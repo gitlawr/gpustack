@@ -13,7 +13,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from gpustack.api.exceptions import NotFoundException
 from gpustack.config.config import Config
 from gpustack.utils import network
-from gpustack.worker.inference_server import InferenceServer
+from gpustack.worker.backends.llama_box import LlamaBoxServer
 from gpustack.client import ClientSet
 from gpustack.schemas.models import (
     ModelInstance,
@@ -21,6 +21,7 @@ from gpustack.schemas.models import (
     ModelInstanceStateEnum,
 )
 from gpustack.server.bus import Event, EventType
+from gpustack.worker.backends.vllm import VLLMServer
 
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,10 @@ class ServeManager:
         )
         with open(log_file_path, "w", buffering=1, encoding="utf-8") as log_file:
             with redirect_stdout(log_file), redirect_stderr(log_file):
-                InferenceServer(clientset, mi, cfg).start()
+                if mi.huggingface_filename:
+                    LlamaBoxServer(clientset, mi, cfg).start()
+                else:
+                    VLLMServer(clientset, mi, cfg).start()
 
     def _update_model_instance(self, id: str, **kwargs):
         mi_public = self._clientset.model_instances.get(id=id)
