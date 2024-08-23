@@ -9,7 +9,7 @@ $ROOT_DIR = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent | Split-
 
 function Publish-Pypi {
     poetry run twine check dist/*.whl
-    poetry run twine upload dist/*.whl
+    poetry run twine upload --repository-url https://test.pypi.org/legacy/ dist/*.whl
     if ($LASTEXITCODE -ne 0) {
         GPUStack.Log.Fatal "twine upload failed."
     }

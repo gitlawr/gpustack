@@ -12,4 +12,4 @@ fi
 # shellcheck disable=SC2086
 poetry run twine check $DIST
 # shellcheck disable=SC2086
-poetry run twine upload $DIST
+poetry run twine --repository-url https://test.pypi.org/legacy/ upload $DIST
