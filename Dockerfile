@@ -10,20 +10,13 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
+COPY dist/*.whl /tmp/
 
-FROM cuda-12-base AS cuda-amd64
-
-COPY dist/*_x86_64.whl /tmp/
-
-RUN pip3 install /tmp/*_x86_64.whl && rm /tmp/*_x86_64.whl
-
-ENTRYPOINT [ "gpustack", "start" ]
-
-
-FROM cuda-12-base as cuda-arm64
-
-COPY dist/*_aarch64.whl /tmp/
-
-RUN pip3 install /tmp/*_aarch64.whl && rm /tmp/*_aarch64.whl
+RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+    pip3 install /tmp/*_x86_64.whl \
+    elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+    pip3 install /tmp/*_aarch64.whl \
+    fi \
+    && rm /tmp/*.whl
 
 ENTRYPOINT [ "gpustack", "start" ]
