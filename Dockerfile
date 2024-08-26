@@ -13,9 +13,9 @@ RUN apt-get update && apt-get install -y \
 COPY dist/*.whl /tmp/
 
 RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-    pip3 install /tmp/*_x86_64.whl \
+    pip3 install /tmp/*_x86_64.whl; \
     elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-    pip3 install /tmp/*_aarch64.whl \
+    pip3 install /tmp/*_aarch64.whl; \
     fi \
     && rm /tmp/*.whl
 
