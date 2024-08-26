@@ -1,6 +1,6 @@
 ARG CUDA_VERSION=12.5.1
 
-FROM nvidia/cuda:$CUDA_VERSION-runtime-ubuntu22.04 as cuda-12-base
+FROM --platform=$TARGETPLATFORM nvidia/cuda:$CUDA_VERSION-runtime-ubuntu22.04 as cuda-12-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
