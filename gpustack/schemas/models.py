@@ -25,9 +25,9 @@ class ModelSource(BaseModel):
     @model_validator(mode="after")
     def check_huggingface_fields(self):
         if self.source == SourceEnum.HUGGING_FACE:
-            if not self.huggingface_repo_id or not self.huggingface_filename:
+            if not self.huggingface_repo_id:
                 raise ValueError(
-                    "huggingface_repo_id and huggingface_filename must be provided "
+                    "huggingface_repo_id must be provided "
                     "when source is 'huggingface'"
                 )
         if self.source == SourceEnum.OLLAMA_LIBRARY:

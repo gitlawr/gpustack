@@ -8,11 +8,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from gpustack.config.config import Config
 from gpustack.scheduler.policy import (
-    ResourceFitPolicy,
+    ModelInstanceScheduleCandidate,
+    # ResourceFitPolicy,
 )
 from gpustack.scheduler.queue import AsyncUniqueQueue
 from gpustack.schemas.workers import Worker, WorkerStateEnum
 from gpustack.schemas.models import (
+    ComputedResourceClaim,
     Model,
     ModelInstance,
     ModelInstanceStateEnum,
@@ -21,7 +23,8 @@ from gpustack.server.bus import EventType
 from gpustack.server.db import get_engine
 from gpustack.scheduler.calculator import (
     ModelInstanceResourceClaim,
-    calculate_model_resource_claim,
+    # calculate_model_resource_claim,
+    estimate,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,28 +93,37 @@ class Scheduler:
         async with AsyncSession(self._engine) as session:
             try:
                 instance = await ModelInstance.one_by_id(session, instance.id)
-                if instance.state != ModelInstanceStateEnum.ANALYZING:
-                    instance.state = ModelInstanceStateEnum.ANALYZING
-                    instance.state_message = "Evaluating resource requirements"
-                    await instance.update(session)
+                # if instance.state != ModelInstanceStateEnum.ANALYZING:
+                #     instance.state = ModelInstanceStateEnum.ANALYZING
+                #     instance.state_message = "Evaluating resource requirements"
+                #     await instance.update(session)
 
-                model = await Model.one_by_id(session, instance.model_id)
-                if model is None:
-                    raise Exception("Model not found.")
+                # model = await Model.one_by_id(session, instance.model_id)
+                # if model is None:
+                #     raise Exception("Model not found.")
 
-                task_output = await calculate_model_resource_claim(
-                    instance,
-                    model,
-                    ollama_library_base_url=self._config.ollama_library_base_url,
+                # task_output = await calculate_model_resource_claim(
+                #     instance,
+                #     model,
+                #     ollama_library_base_url=self._config.ollama_library_base_url,
+                # )
+
+                # if (
+                #     task_output.resource_claim_estimate.embeddingOnly
+                #     and not model.embedding_only
+                # ):
+                #     await self.set_model_embedding_only(session, model)
+
+                mirc: ModelInstanceResourceClaim = ModelInstanceResourceClaim(
+                    model_instance=instance,
+                    resource_claim_estimate=estimate(
+                        memory=[],
+                        contextSize=1024,
+                        architecture="test",
+                        embeddingOnly=False,
+                    ),
                 )
-
-                if (
-                    task_output.resource_claim_estimate.embeddingOnly
-                    and not model.embedding_only
-                ):
-                    await self.set_model_embedding_only(session, model)
-
-                await self._queue.put(task_output)
+                await self._queue.put(mirc)
 
             except Exception as e:
                 try:
@@ -191,23 +203,30 @@ class Scheduler:
 
         state_message = ""
         instance = item.model_instance
-        estimate = item.resource_claim_estimate
-        filterPolicies = [ResourceFitPolicy(estimate)]
+        # estimate = item.resource_claim_estimate
+        # filterPolicies = [ResourceFitPolicy(estimate)]
 
         async with AsyncSession(self._engine) as session:
             workers = await Worker.all_by_field(session, "state", WorkerStateEnum.READY)
 
-            candidates = []
+            # candidates = []
+            # if len(workers) != 0:
+            #     try:
+            #         for policy in filterPolicies:
+            #             candidates = await policy.filter(workers)
+            #     except Exception as e:
+            #         state_message = f"Failed to filter workers with policies: {e}"
+            #         logger.error(state_message)
+
+            # candidate = self.pick_most_offload_layers_candidate(candidates)
             if len(workers) != 0:
-                try:
-                    for policy in filterPolicies:
-                        candidates = await policy.filter(workers)
-                except Exception as e:
-                    state_message = f"Failed to filter workers with policies: {e}"
-                    logger.error(state_message)
+                candidate = ModelInstanceScheduleCandidate(
+                    worker=workers[0],
+                    gpu_index=0,
+                    computed_resource_claim=ComputedResourceClaim(),
+                )
 
             model_instance = await ModelInstance.one_by_id(session, instance.id)
-            candidate = self.pick_most_offload_layers_candidate(candidates)
             if candidate is None:
                 # update model instance.
                 if model_instance.state in (

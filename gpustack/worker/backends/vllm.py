@@ -22,7 +22,7 @@ class VLLMServer(InferenceServer):
             "--max-model-len",
             "8192",
             "--served-model-name",
-            self._model_instance.name,
+            self._model_instance.model_name,
             "--trust-remote-code",
         ]
 

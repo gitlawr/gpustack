@@ -10,7 +10,7 @@ from typing import List, Literal, Optional, Union
 import fnmatch
 from pathlib import Path
 from tqdm import tqdm
-from huggingface_hub import hf_hub_download, HfFileSystem
+from huggingface_hub import hf_hub_download, snapshot_download, HfFileSystem
 from huggingface_hub.utils import validate_repo_id
 import base64
 import random
@@ -28,6 +28,39 @@ class HfDownloader:
 
     @classmethod
     def download(
+        cls,
+        repo_id: str,
+        filename: Optional[str],
+        local_dir: Optional[Union[str, os.PathLike[str]]] = None,
+        local_dir_use_symlinks: Union[bool, Literal["auto"]] = "auto",
+        cache_dir: Optional[Union[str, os.PathLike[str]]] = None,
+    ) -> str:
+        """Download a model from the Hugging Face Hub.
+
+        Args:
+            repo_id: The model repo id.
+            filename: A filename or glob pattern to match the model file in the repo.
+            local_dir: The local directory to save the model to.
+            local_dir_use_symlinks: Whether to use symlinks when downloading the model.
+
+        Returns:
+            The path to the downloaded model.
+        """
+
+        if filename is not None:
+            return cls.download_file(
+                repo_id, filename, local_dir, local_dir_use_symlinks, cache_dir
+            )
+
+        return snapshot_download(
+            repo_id=repo_id,
+            local_dir=local_dir,
+            local_dir_use_symlinks=local_dir_use_symlinks,
+            cache_dir=cache_dir,
+        )
+
+    @classmethod
+    def download_file(
         cls,
         repo_id: str,
         filename: Optional[str],
