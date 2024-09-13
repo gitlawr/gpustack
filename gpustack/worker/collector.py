@@ -350,6 +350,7 @@ class WorkerStatusCollector:
     def _fastfetch_command(self):
         command_map = {
             ("Windows", "amd64"): "fastfetch-windows-amd64.exe",
+            ("Windows", "arm64"): "fastfetch-windows-amd64.exe",  # Use Prism emulator
             ("Darwin", "amd64"): "fastfetch-macos-universal",
             ("Darwin", "arm64"): "fastfetch-macos-universal",
             ("Linux", "amd64"): "fastfetch-linux-amd64",

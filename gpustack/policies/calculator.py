@@ -78,6 +78,7 @@ def _gguf_parser_command(
 ):
     command_map = {
         ("Windows", "amd64"): "gguf-parser-windows-amd64.exe",
+        ("Windows", "arm64"): "gguf-parser-windows-amd64.exe",  # Use Prism emulator
         ("Darwin", "amd64"): "gguf-parser-darwin-universal",
         ("Darwin", "arm64"): "gguf-parser-darwin-universal",
         ("Linux", "amd64"): "gguf-parser-linux-amd64",
