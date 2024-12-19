@@ -335,7 +335,6 @@ function Install-GPUStack {
         Log-Info "$ACTION GPUStack with $($installArgs -join ' ') $INSTALL_PACKAGE_SPEC"
 
         $pythonPath = Get-Command python | Select-Object -ExpandProperty Source
-        $env:PIPX_DEFAULT_PYTHON = $pythonPath
 
         Log-Info "Check pipx environment..."
         $pipxSharedEnv = (pipx environment --value PIPX_SHARED_LIBS)
@@ -374,7 +373,7 @@ function Install-GPUStack {
             }
         }
 
-        pipx install --force --verbose @installArgs $INSTALL_PACKAGE_SPEC
+        pipx install --force --verbose --python "$pythonPath" @installArgs $INSTALL_PACKAGE_SPEC
         if ($LASTEXITCODE -ne 0) {
             throw "failed to install $INSTALL_PACKAGE_SPEC."
         }
