@@ -384,3 +384,42 @@ def model_scope_file_path(model_id: str, file_path: str) -> str:
     if len(file_paths) == 0:
         raise ValueError(f"File {file_path} not found in {model_id}")
     return file_paths[0]
+
+
+def rough_estimate_model_size(size_in_billions: float, quantization: str) -> int:
+    """
+    Roughly estimate the model size based on the size in billions and quantization.
+    It does not consider topology, context or the actual model structure and is only used for quick estimation.
+    Args:
+        size_in_billions: The size of the model in billions.
+        quantization: The quantization of the model.
+
+    Returns:
+        The estimated size of the model.
+    """
+    total_params = int(size_in_billions * 1e9)
+    quant_to_bytes = {
+        "FP32": 4,
+        "FP16": 2,
+        "BF16": 2,
+        "INT8": 1,
+        "GPTQ-INT8": 1,
+        "GPTQ-INT4": 0.5,
+        "AWQ": 0.5,
+        "INT4": 0.5,
+        "Q8": 0.6,
+        "Q6": 0.6,
+        "Q5": 0.5,
+        "Q4": 0.5,
+        "Q3": 0.45,
+        "Q2": 0.45,
+    }
+    bytes_per_param = 2
+    quantization = quantization.upper()
+    for key in quant_to_bytes:
+        if quantization.startswith(key):
+            bytes_per_param = quant_to_bytes[key]
+
+    empirical_ratio = 1.2
+    total_size = empirical_ratio * total_params * bytes_per_param
+    return int(total_size)

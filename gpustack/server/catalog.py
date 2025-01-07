@@ -30,6 +30,8 @@ class ModelSpec(ModelBase):
     name: Optional[str] = None
     quantization: Optional[str] = None
     size: Optional[float] = None
+    compatibility: Optional[bool] = None
+    compatibility_message: Optional[str] = None
 
 
 class ModelSetBase(BaseModel):
