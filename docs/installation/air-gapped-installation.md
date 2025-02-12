@@ -50,11 +50,71 @@ Optional: Additional Dependencies for macOS.
 
 ```bash
 # Deploying the speech-to-text CosyVoice model on macOS requires additional dependencies.
-brew install openfst
-CPLUS_INCLUDE_PATH=$(brew --prefix openfst)/include
-LIBRARY_PATH=$(brew --prefix openfst)/lib
+brew_install_with_version() {
+  BREW_APP_NAME="$1"
+  BREW_APP_VERSION="$2"
+  BREW_APP_NAME_WITH_VERSION="$BREW_APP_NAME@$BREW_APP_VERSION"
+  TAP_NAME="$USER/local-$BREW_APP_NAME-$BREW_APP_VERSION"
 
-AUDIO_DEPENDENCY_PACKAGE_SPEC="wetextprocessing"
+  # Check current installed versions
+  echo "Checking installed versions of $BREW_APP_NAME."
+  INSTALLED_VERSIONS=$(brew list --versions | grep "$BREW_APP_NAME" || true)
+  INSTALLED_VERSION_COUNT=$(brew list --versions | grep -c "$BREW_APP_NAME" || true)
+
+  if [ -n "$INSTALLED_VERSIONS" ]; then
+    # Check if the target version is already installed
+    if echo "$INSTALLED_VERSIONS" | grep -q "$BREW_APP_VERSION"; then
+      if [ "$INSTALLED_VERSION_COUNT" -eq 1 ]; then
+        echo "$BREW_APP_NAME $BREW_APP_VERSION is already installed."
+        return 0
+      elif [ "$INSTALLED_VERSION_COUNT" -gt 1 ]; then
+        SINGLE_LINE_INSTALLED_VERSIONS=$(echo "$INSTALLED_VERSIONS" | tr '\n' ' ')
+        echo "Installed $BREW_APP_NAME versions: $SINGLE_LINE_INSTALLED_VERSIONS"
+        echo "Multiple versions of $BREW_APP_NAME are installed, relink the target version."
+        echo "$INSTALLED_VERSIONS" | awk '{print $1}' | while read -r installed_version; do
+            brew unlink "$installed_version"
+        done
+
+        NEED_VERSION=$(echo "$INSTALLED_VERSIONS" | grep "$BREW_APP_VERSION" | cut -d ' ' -f 1)
+        brew link --overwrite "$NEED_VERSION"
+        return 0
+      fi
+    fi
+  fi
+
+  # Create a new Homebrew tap
+  if brew tap-info "$TAP_NAME" 2>/dev/null | grep -q "Installed"; then
+      echo "Tap $TAP_NAME already exists. Skipping tap creation."
+  else
+      echo "Creating a new tap: $TAP_NAME..."
+      if ! brew tap-new "$TAP_NAME"; then
+          echo "Failed to create the tap $TAP_NAME." && exit 1
+      fi
+  fi
+
+  # Extract the history version of the app
+  echo "Extracting $BREW_APP_NAME version $BREW_APP_VERSION."
+  brew tap homebrew/core --force
+  brew extract --force --version="$BREW_APP_VERSION" "$BREW_APP_NAME" "$TAP_NAME"
+
+  # Install the specific version of the application
+  echo "Unlinking before install $BREW_APP_NAME."
+  echo "$INSTALLED_VERSIONS" | awk '{print $1}' | while read -r installed_version; do
+    brew unlink "$installed_version" 2>/dev/null || true
+  done
+
+  echo "Installing $BREW_APP_NAME version $BREW_APP_VERSION."
+  if ! brew install "$TAP_NAME/$BREW_APP_NAME_WITH_VERSION"; then
+      echo "Failed to install $BREW_APP_NAME version $BREW_APP_VERSION." && exit 1
+  fi
+
+  echo "Installed and linked $BREW_APP_NAME version $BREW_APP_VERSION."
+}
+brew_install_with_version openfst 1.8.3
+CPLUS_INCLUDE_PATH=$(brew --prefix openfst@1.8.3)/include
+LIBRARY_PATH=$(brew --prefix openfst@1.8.3)/lib
+
+AUDIO_DEPENDENCY_PACKAGE_SPEC="wetextprocessing==1.0.4.1"
 pip wheel $AUDIO_DEPENDENCY_PACKAGE_SPEC -w gpustack_audio_dependency_offline_packages
 mv gpustack_audio_dependency_offline_packages/* gpustack_offline_packages/ && rm -rf gpustack_audio_dependency_offline_packages
 ```
