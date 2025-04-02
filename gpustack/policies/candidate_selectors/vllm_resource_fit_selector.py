@@ -187,7 +187,6 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                 )
             else:
                 self._gpu_count = world_size
-                self._vram_claim = 0
 
         self._gpu_memory_utilization = 0.9
         gmu = find_parameter(model.backend_parameters, ["gpu-memory-utilization"])
@@ -250,14 +249,13 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
         Get schedule candidates that fit the GPU resources requirement.
         """
 
-        if not self._gpu_count:
-            self._vram_claim = await estimate_model_vram(
-                self._model, self._cfg.huggingface_token
-            )
-            logger.info(
-                f"Calculated resource claim for model {self._model.readable_source}, "
-                f"claim: {self._vram_claim}"
-            )
+        self._vram_claim = await estimate_model_vram(
+            self._model, self._cfg.huggingface_token
+        )
+        logger.info(
+            f"Calculated resource claim for model {self._model.readable_source}, "
+            f"claim: {self._vram_claim}"
+        )
 
         candidate_functions = [
             self.find_single_worker_single_gpu_full_offloading_candidates,
@@ -459,7 +457,7 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                 for gpu_index in selected_gpu_indexes
             }
 
-            if sum(vram_claim.values()) < self._vram_claim:
+            if self._gpu_count is None and sum(vram_claim.values()) < self._vram_claim:
                 return []
 
             return [
