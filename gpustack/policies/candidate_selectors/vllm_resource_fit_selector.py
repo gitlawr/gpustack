@@ -350,8 +350,9 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                 if gpu.memory is None or gpu.memory.total == 0:
                     continue
 
-                if (self._vram_claim > allocatable_vram) or (
-                    allocatable_gpu_memory_utilization < self._gpu_memory_utilization
+                if selected_gpu_index is None and (
+                    self._vram_claim > allocatable_vram
+                    or allocatable_gpu_memory_utilization < self._gpu_memory_utilization
                 ):
                     continue
 
