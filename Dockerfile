@@ -23,12 +23,19 @@ RUN cd /workspace/gpustack && \
     make build
 
 ARG VLLM_VERSION=0.8.4
+ARG FLASHATTN_VERSION=2.6.3
 RUN <<EOF
     if [ "$TARGETPLATFORM" = "linux/amd64" ]; then
         # Install vllm dependencies for x86_64
         if [ "$(echo "${CUDA_VERSION}" | cut -d. -f1,2)" = "11.8" ]; then
+            # vLLM for CUDA 11.8
             pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp38-abi3-manylinux1_x86_64.whl \
             --extra-index-url https://download.pytorch.org/whl/cu118;
+            # flash-attn
+            pip install https://github.com/Dao-AILab/flash-attention/releases/download/v${FLASHATTN_VERSION}/flash_attn-${FLASHATTN_VERSION}+cu11torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl;
+        elif [ "$(echo "${CUDA_VERSION}" | cut -d. -f1,2)" = "12.4" ]; then
+            # flash-attn
+            pip install https://github.com/Dao-AILab/flash-attention/releases/download/v${FLASHATTN_VERSION}/flash_attn-${FLASHATTN_VERSION}+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl;
         fi;
         WHEEL_PACKAGE="$(ls /workspace/gpustack/dist/*.whl)[all]";
     else
