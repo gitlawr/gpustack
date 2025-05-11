@@ -3,7 +3,7 @@ name: Docker CI
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, flash-libs]
     tags: ["*.*.*"]
     paths-ignore:
       - "mkdocs.yml"
@@ -57,54 +57,6 @@ jobs:
             build_args:
               - "CUDA_VERSION=11.8.0"
               - "CUDA_TAG_SUFFIX=-cudnn8-runtime-ubuntu22.04"
-          #
-          # HIP RoCM
-          #
-          - device: rocm
-            dockerfile: "Dockerfile.rocm"
-            platforms: "linux/amd64,linux/arm64"
-            tag_suffix: "-rocm"
-            build_args:
-              - "BUILD_FA=0"
-          #
-          # Ascend NPU
-          #
-          - device: npu
-            dockerfile: "Dockerfile.npu"
-            platforms: "linux/amd64,linux/arm64"
-            tag_suffix: "-npu"
-            build_args:
-              - "CANN_CHIP=910b"
-          - device: npu
-            dockerfile: "Dockerfile.npu"
-            platforms: "linux/amd64,linux/arm64"
-            tag_suffix: "-npu-310p"
-            build_args:
-              - "CANN_CHIP=310p"
-          #
-          # MooreThreads MUSA
-          #
-          - device: musa
-            dockerfile: "Dockerfile.musa"
-            platforms: "linux/amd64,linux/arm64"
-            tag_suffix: "-musa"
-            build_args: []
-          #
-          # Hygon DCU
-          #
-          - device: dcu
-            dockerfile: "Dockerfile.dcu"
-            platforms: "linux/amd64"
-            tag_suffix: "-dcu"
-            build_args: []
-          #
-          # CPU
-          #
-          - device: cpu
-            dockerfile: "Dockerfile.cpu"
-            platforms: "linux/amd64,linux/arm64"
-            tag_suffix: "-cpu"
-            build_args: []
 
     steps:
       - name: Checkout
@@ -134,7 +86,7 @@ jobs:
         id: metadata
         uses: docker/metadata-action@v5
         with:
-          images: gpustack/gpustack
+          images: lawr/gpustack
           tags: |
             type=ref,event=branch
             type=ref,event=pr
