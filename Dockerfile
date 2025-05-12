@@ -23,7 +23,7 @@ RUN cd /workspace/gpustack && \
     make build
 
 ARG VLLM_VERSION=0.8.4
-ARG FLASHATTN_VERSION=2.6.3
+ARG FLASHATTN_VERSION=2.7.4.post1
 RUN <<EOF
     if [ "$TARGETPLATFORM" = "linux/amd64" ]; then
         # Install vllm dependencies for x86_64
