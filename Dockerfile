@@ -32,12 +32,10 @@ RUN <<EOF
             pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp38-abi3-manylinux1_x86_64.whl \
             --extra-index-url https://download.pytorch.org/whl/cu118;
             # flash-attn
-            pip install flash-attn==${FLASHATTN_VERSION} --no-build-isolation
-            # pip install https://github.com/Dao-AILab/flash-attention/releases/download/v${FLASHATTN_VERSION}/flash_attn-${FLASHATTN_VERSION}+cu11torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl;
+            pip install https://github.com/Dao-AILab/flash-attention/releases/download/v${FLASHATTN_VERSION}/flash_attn-${FLASHATTN_VERSION}+cu11torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl;
         elif [ "$(echo "${CUDA_VERSION}" | cut -d. -f1,2)" = "12.4" ]; then
             # flash-attn
-            pip install flash-attn==${FLASHATTN_VERSION} --no-build-isolation
-            # pip install https://github.com/Dao-AILab/flash-attention/releases/download/v${FLASHATTN_VERSION}/flash_attn-${FLASHATTN_VERSION}+cu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl;
+            pip install https://github.com/Dao-AILab/flash-attention/releases/download/v${FLASHATTN_VERSION}/flash_attn-${FLASHATTN_VERSION}+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl;
         fi;
         WHEEL_PACKAGE="$(ls /workspace/gpustack/dist/*.whl)[all]";
     else
