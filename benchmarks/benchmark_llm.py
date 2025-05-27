@@ -52,7 +52,7 @@ async def process_stream(stream):
     return first_token_time, total_tokens
 
 
-async def make_request(
+async def make_chat_completion_request(
     client: AsyncOpenAI, model, max_completion_tokens, request_timeout
 ):
     start_time = time.time()
@@ -83,6 +83,34 @@ async def make_request(
         return None
 
 
+async def make_embedding_request(client: AsyncOpenAI, model, request_timeout):
+    import time
+    import random
+
+    content = random.choice(SAMPLE_PROMPTS)
+    start_time = time.time()
+
+    try:
+        response = await asyncio.wait_for(
+            client.embeddings.create(model=model, input=content),
+            timeout=request_timeout,
+        )
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        total_tokens = response.usage.total_tokens
+        tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
+        ttft = None  # Embeddings do not have a time to first token in the same way as chat completions
+
+        return total_tokens, elapsed_time, tokens_per_second, ttft
+
+    except asyncio.TimeoutError:
+        logging.warning(f"Embedding request timed out after {request_timeout} seconds")
+        return None
+    except Exception as e:
+        logging.error(f"Error during embedding request: {str(e)}")
+        return None
+
+
 async def worker(
     client,
     model,
@@ -91,6 +119,7 @@ async def worker(
     results,
     max_completion_tokens,
     request_timeout,
+    embeddings=False,
 ):
     while True:
         async with semaphore:
@@ -99,9 +128,12 @@ async def worker(
                 queue.task_done()
                 break
             logging.info(f"Starting request {task_id}")
-            result = await make_request(
-                client, model, max_completion_tokens, request_timeout
-            )
+            if embeddings:
+                result = await make_embedding_request(client, model, request_timeout)
+            else:
+                result = await make_chat_completion_request(
+                    client, model, max_completion_tokens, request_timeout
+                )
             if result:
                 results.append(result)
             else:
@@ -118,8 +150,11 @@ def calculate_percentile(values, percentile, reverse=False):
     return numpy.percentile(values, percentile)
 
 
-async def preflight_check(client, model) -> bool:
-    result = await make_request(client, model, 16, 60)
+async def preflight_check(client, model, embeddings=False) -> bool:
+    if embeddings:
+        result = await make_embedding_request(client, model, 16)
+    else:
+        result = await make_chat_completion_request(client, model, 16, 60)
     return result is not None
 
 
@@ -131,6 +166,7 @@ async def main(
     max_completion_tokens,
     server_url,
     api_key,
+    embeddings=False,
 ):
     client = AsyncOpenAI(
         base_url=f"{server_url}/v1",
@@ -139,7 +175,7 @@ async def main(
         max_retries=0,
     )
 
-    if not await preflight_check(client, model):
+    if not await preflight_check(client, model, embeddings=embeddings):
         logging.error(
             "Preflight check failed. Please check configuration and the service status."
         )
@@ -168,6 +204,7 @@ async def main(
                 results,
                 max_completion_tokens,
                 request_timeout,
+                embeddings=embeddings,
             )
         )
         for _ in range(concurrency)
@@ -225,7 +262,7 @@ async def main(
         "max_completion_tokens": max_completion_tokens,
         "total_time": total_elapsed_time,
         "requests_per_second": requests_per_second,
-        "total_completion_tokens": total_tokens,
+        "total_tokens": total_tokens,
         "latency": {
             "average": avg_latency,
             "p50": latency_percentiles[0],
@@ -329,6 +366,11 @@ if __name__ == "__main__":
         dest="headers",
         help="Custom HTTP header in Key:Value format. May be specified multiple times.",
     )
+    parser.add_argument(
+        '--embeddings',
+        action='store_true',
+        help='Run embedding benchmark instead of chat completions',
+    )
     args = parser.parse_args()
     set_http_client(args)
 
@@ -341,6 +383,7 @@ if __name__ == "__main__":
             args.max_completion_tokens,
             args.server_url,
             args.api_key,
+            embeddings=args.embeddings,
         )
     )
     output_results(results, args.result_file)

@@ -6,6 +6,7 @@ from typing import Type, Union
 from fastapi import Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from jwt import DecodeError, ExpiredSignatureError
+from pyinstrument import Profiler
 from starlette.middleware.base import BaseHTTPMiddleware
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types import Completion, CompletionUsage
@@ -321,3 +322,21 @@ def is_usage_chunk(
             return True
 
     return False
+
+
+class ProfileRequestMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        profiling = request.headers.get("X-Profile", False)
+        if profiling:
+            profiler = Profiler()
+            profiler.start()
+            response = await call_next(request)
+            profiler.stop()
+            date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+            profiler.write_html(f"/tmp/gpustack-profile-{date_str}.html")
+            logger.info(
+                f"Request profiling completed. Profile saved to /tmp/gpustack-profile-{date_str}.html"
+            )
+            return response
+        else:
+            return await call_next(request)

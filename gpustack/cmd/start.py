@@ -205,6 +205,12 @@ def setup_start_cmd(subparsers: argparse._SubParsersAction):
         help="Port of Ray Client Server. Used when Ray is enabled. The default is 40097.",
         default=get_gpustack_env("RAY_CLIENT_SERVER_PORT"),
     )
+    group.add_argument(
+        "--enable-request-profiling",
+        type=OptionalBoolAction,
+        help=argparse.SUPPRESS,
+        default=get_gpustack_env_bool("ENABLE_REQUEST_PROFILING"),
+    )
 
     group = parser_server.add_argument_group("Worker settings")
     group.add_argument(
@@ -457,6 +463,7 @@ def set_server_options(args, config_data: dict):
         "allow_credentials",
         "allow_methods",
         "allow_headers",
+        "enable_request_profiling",
     ]
 
     for option in options:

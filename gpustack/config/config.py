@@ -113,6 +113,7 @@ class Config(BaseSettings):
     allow_credentials: bool = False
     allow_methods: Optional[List[str]] = ['GET', 'POST']
     allow_headers: Optional[List[str]] = ['Authorization', 'Content-Type']
+    enable_request_profiling: bool = False
 
     # Worker options
     server_url: Optional[str] = None
