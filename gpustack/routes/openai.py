@@ -300,28 +300,27 @@ async def handle_streaming_request(
 
     async def stream_generator():
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.request(
-                    method=request.method,
-                    url=url,
-                    headers=headers,
-                    json=body_json if body_json else None,
-                    data=form_data if form_data else None,
-                    # files=form_files if form_files else None,
-                    # timeout=timeout,
-                ) as resp:
-                    if resp.status >= 400:
-                        yield await resp.read(), resp.headers, resp.status
-                        return
+            http_client: aiohttp.ClientSession = request.app.state.http_client
+            async with http_client.request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                json=body_json if body_json else None,
+                data=form_data if form_data else None,
+                timeout=timeout,
+            ) as resp:
+                if resp.status >= 400:
+                    yield await resp.read(), resp.headers, resp.status
+                    return
 
-                    chunk = ""
-                    async for line in resp.content:
-                        line = line.decode("utf-8").strip()
-                        if line != "":
-                            chunk = line + "\n"
-                        else:
-                            chunk += "\n"
-                            yield chunk, resp.headers, resp.status
+                chunk = ""
+                async for line in resp.content:
+                    line = line.decode("utf-8").strip()
+                    if line != "":
+                        chunk = line + "\n"
+                    else:
+                        chunk += "\n"
+                        yield chunk, resp.headers, resp.status
         except aiohttp.ClientError as e:
             error_response = OpenAIAPIErrorResponse(
                 error=OpenAIAPIError(
@@ -357,33 +356,31 @@ async def handle_standard_request(
     headers = filter_headers(request.headers)
     if extra_headers:
         headers.update(extra_headers)
+    data = None
+    if form_data or form_files:
+        form = aiohttp.FormData()
+        for key, value in (form_data or {}).items():
+            form.add_field(key, value)
+        for key, (filename, content, content_type) in form_files or []:
+            form.add_field(key, content, filename=filename, content_type=content_type)
+        data = form
+
+    http_client: aiohttp.ClientSession = request.app.state.http_client
     timeout = aiohttp.ClientTimeout(total=PROXY_TIMEOUT)
-
-    async with aiohttp.ClientSession(timeout=timeout) as client:
-        data = None
-        if form_data or form_files:
-            form = aiohttp.FormData()
-            for key, value in (form_data or {}).items():
-                form.add_field(key, value)
-            for key, (filename, content, content_type) in form_files or []:
-                form.add_field(
-                    key, content, filename=filename, content_type=content_type
-                )
-            data = form
-
-        async with client.request(
-            method=request.method,
-            url=url,
-            headers=headers,
-            json=body_json if body_json else None,
-            data=data if data else None,
-        ) as response:
-            content = await response.read()
-            return Response(
-                status_code=response.status,
-                headers=dict(response.headers),
-                content=content,
-            )
+    async with http_client.request(
+        method=request.method,
+        url=url,
+        headers=headers,
+        json=body_json if body_json else None,
+        data=data if data else None,
+        timeout=timeout,
+    ) as response:
+        content = await response.read()
+        return Response(
+            status_code=response.status,
+            headers=dict(response.headers),
+            content=content,
+        )
 
 
 def filter_headers(headers):
