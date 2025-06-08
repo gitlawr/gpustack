@@ -1,7 +1,7 @@
+import asyncio
 import os
 from typing import List, Optional
 import aiohttp
-import httpx
 import logging
 
 from fastapi import APIRouter, Query, Request, Response, status
@@ -197,7 +197,7 @@ async def proxy_request_by_model(request: Request, endpoint: str):
             return await handle_standard_request(
                 request, url, body_json, form_data, form_files, extra_headers
             )
-    except httpx.TimeoutException as e:
+    except asyncio.TimeoutError as e:
         error_message = f"Request to {url} timed out"
         if str(e):
             error_message += f": {e}"
@@ -312,6 +312,7 @@ async def handle_streaming_request(
                 ) as resp:
                     if resp.status >= 400:
                         yield await resp.read(), resp.headers, resp.status
+                        return
 
                     chunk = ""
                     async for line in resp.content:
@@ -321,7 +322,7 @@ async def handle_streaming_request(
                         else:
                             chunk += "\n"
                             yield chunk, resp.headers, resp.status
-        except aiohttp.ClientConnectionError as e:
+        except aiohttp.ClientError as e:
             error_response = OpenAIAPIErrorResponse(
                 error=OpenAIAPIError(
                     message=f"Service unavailable. Please retry your requests after a brief wait. Original error: {e}",
@@ -356,22 +357,33 @@ async def handle_standard_request(
     headers = filter_headers(request.headers)
     if extra_headers:
         headers.update(extra_headers)
+    timeout = aiohttp.ClientTimeout(total=PROXY_TIMEOUT)
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.request(
+    async with aiohttp.ClientSession(timeout=timeout) as client:
+        data = None
+        if form_data or form_files:
+            form = aiohttp.FormData()
+            for key, value in (form_data or {}).items():
+                form.add_field(key, value)
+            for key, (filename, content, content_type) in form_files or []:
+                form.add_field(
+                    key, content, filename=filename, content_type=content_type
+                )
+            data = form
+
+        async with client.request(
             method=request.method,
             url=url,
             headers=headers,
             json=body_json if body_json else None,
-            data=form_data if form_data else None,
-            files=form_files if form_files else None,
-            timeout=PROXY_TIMEOUT,
-        )
-        return Response(
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
-            content=resp.content,
-        )
+            data=data if data else None,
+        ) as response:
+            content = await response.read()
+            return Response(
+                status_code=response.status,
+                headers=dict(response.headers),
+                content=content,
+            )
 
 
 def filter_headers(headers):
