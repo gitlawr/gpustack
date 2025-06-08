@@ -2,6 +2,7 @@ import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
+from aiocache import cached, SimpleMemoryCache
 import jwt
 from argon2 import PasswordHasher
 
@@ -11,6 +12,7 @@ API_KEY_PREFIX = "gpustack"
 JWT_TOKEN_EXPIRE_MINUTES = 120
 
 
+@cached(ttl=60, cache=SimpleMemoryCache)
 def verify_hashed_secret(hashed: Union[str, bytes], plain: Union[str, bytes]) -> bool:
     try:
         return ph.verify(hashed, plain)

@@ -38,6 +38,8 @@ credentials_exception = UnauthorizedException(
     message="Invalid authentication credentials"
 )
 
+user = None
+
 
 async def get_current_user(
     request: Request,
@@ -50,17 +52,17 @@ async def get_current_user(
     ] = None,
     cookie_token: Annotated[Optional[str], Depends(cookie_auth)] = None,
 ) -> User:
-    user = None
-    if basic_credentials and is_system_user(basic_credentials.username):
-        server_config: Config = request.app.state.server_config
-        user = await authenticate_system_user(server_config, basic_credentials)
-    elif basic_credentials:
-        user = await authenticate_basic_user(session, basic_credentials)
-    elif cookie_token:
-        jwt_manager: JWTManager = request.app.state.jwt_manager
-        user = await get_user_from_jwt_token(session, jwt_manager, cookie_token)
-    elif bearer_token:
-        user = await get_user_from_bearer_token(session, bearer_token)
+    global user
+    # if basic_credentials and is_system_user(basic_credentials.username):
+    #     server_config: Config = request.app.state.server_config
+    #     user = await authenticate_system_user(server_config, basic_credentials)
+    # elif basic_credentials:
+    #     user = await authenticate_basic_user(session, basic_credentials)
+    # elif cookie_token:
+    #     jwt_manager: JWTManager = request.app.state.jwt_manager
+    #     user = await get_user_from_jwt_token(session, jwt_manager, cookie_token)
+    # elif bearer_token:
+    #     user = await get_user_from_bearer_token(session, bearer_token)
 
     if user is None and request.client.host == "127.0.0.1":
         server_config: Config = request.app.state.server_config

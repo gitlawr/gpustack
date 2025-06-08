@@ -1,5 +1,6 @@
 import os
 from typing import List, Optional
+import aiohttp
 import httpx
 import logging
 
@@ -287,7 +288,7 @@ async def handle_streaming_request(
     form_files: Optional[list],
     extra_headers: Optional[dict] = None,
 ):
-    timeout = 300
+    timeout = aiohttp.ClientTimeout(total=300)
     headers = filter_headers(request.headers)
     if extra_headers:
         headers.update(extra_headers)
@@ -299,27 +300,28 @@ async def handle_streaming_request(
 
     async def stream_generator():
         try:
-            async with httpx.AsyncClient() as client:
-                async with client.stream(
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.request(
                     method=request.method,
                     url=url,
                     headers=headers,
                     json=body_json if body_json else None,
                     data=form_data if form_data else None,
-                    files=form_files if form_files else None,
-                    timeout=timeout,
+                    # files=form_files if form_files else None,
+                    # timeout=timeout,
                 ) as resp:
-                    if resp.status_code >= 400:
-                        yield await resp.aread(), resp.headers, resp.status_code
+                    if resp.status >= 400:
+                        yield await resp.read(), resp.headers, resp.status
 
                     chunk = ""
-                    async for line in resp.aiter_lines():
+                    async for line in resp.content:
+                        line = line.decode("utf-8").strip()
                         if line != "":
                             chunk = line + "\n"
                         else:
                             chunk += "\n"
-                            yield chunk, resp.headers, resp.status_code
-        except httpx.ConnectError as e:
+                            yield chunk, resp.headers, resp.status
+        except aiohttp.ClientConnectionError as e:
             error_response = OpenAIAPIErrorResponse(
                 error=OpenAIAPIError(
                     message=f"Service unavailable. Please retry your requests after a brief wait. Original error: {e}",

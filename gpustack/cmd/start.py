@@ -207,7 +207,7 @@ def setup_start_cmd(subparsers: argparse._SubParsersAction):
     )
     group.add_argument(
         "--enable-request-profiling",
-        type=OptionalBoolAction,
+        action=OptionalBoolAction,
         help=argparse.SUPPRESS,
         default=get_gpustack_env_bool("ENABLE_REQUEST_PROFILING"),
     )
