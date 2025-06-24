@@ -31,6 +31,7 @@ def create_app(cfg: Config) -> FastAPI:
     app.add_middleware(middlewares.RequestTimeMiddleware)
     app.add_middleware(middlewares.ModelUsageMiddleware)
     app.add_middleware(middlewares.RefreshTokenMiddleware)
+    app.add_middleware(middlewares.ProfileRequestMiddleware)
     app.include_router(api_router)
     ui.register(app)
     exceptions.register_handlers(app)

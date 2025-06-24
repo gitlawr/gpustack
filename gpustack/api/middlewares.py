@@ -16,6 +16,7 @@ from openai.types.audio.transcription_create_response import (
 from openai.types.create_embedding_response import (
     Usage as EmbeddingUsage,
 )
+from pyinstrument import Profiler
 from gpustack.routes.rerank import RerankResponse, RerankUsage
 from gpustack.schemas.images import ImageGenerationChunk
 from gpustack.schemas.model_usage import ModelUsage, OperationEnum
@@ -321,3 +322,21 @@ def is_usage_chunk(
             return True
 
     return False
+
+
+class ProfileRequestMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        profiling = request.headers.get("X-Profile", False)
+        if profiling:
+            profiler = Profiler()
+            profiler.start()
+            response = await call_next(request)
+            profiler.stop()
+            date_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+            profiler.write_html(f"/tmp/gpustack-profile-{date_str}.html")
+            logger.info(
+                f"Request profiling completed. Profile saved to /tmp/gpustack-profile-{date_str}.html"
+            )
+            return response
+        else:
+            return await call_next(request)
