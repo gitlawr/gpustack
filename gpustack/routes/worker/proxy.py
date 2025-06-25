@@ -1,5 +1,4 @@
 import logging
-import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import httpx
@@ -7,12 +6,12 @@ from starlette.background import BackgroundTask
 
 from gpustack.api.auth import worker_auth
 from gpustack.api.exceptions import GatewayTimeoutException, ServiceUnavailableException
+from gpustack.config.envs import PROXY_TIMEOUT
 
 router = APIRouter(dependencies=[Depends(worker_auth)])
 
 logger = logging.getLogger(__name__)
 
-PROXY_TIMEOUT = int(os.getenv("GPUSTACK_PROXY_TIMEOUT_SECONDS", 1800))
 client = httpx.AsyncClient(timeout=PROXY_TIMEOUT)
 
 
