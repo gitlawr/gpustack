@@ -278,16 +278,19 @@ class ToolsManager:
         target_path = Path(self._bin_dir) / get_versioned_command("vllm", version)
 
         if system != "linux" or arch != "amd64":
-            if not target_path.exists():
+            if not os.path.lexists(target_path):
                 raise Exception(
                     f"Auto-installation for versioned vLLM is only supported on amd64 Linux. Please install vLLM manually and link it to {target_path}."
                 )
         elif device != platform.DeviceTypeEnum.CUDA.value:
-            if not target_path.exists():
+            if not os.path.lexists(target_path):
                 raise Exception(
                     f"Auto-installation for versioned vLLM is only supported on CUDA devices. Please install vLLM manually and link it to {target_path}."
                 )
 
+        logger.info(
+            f"before custom install, target_path: {target_path}, exists: {os.path.lexists(target_path)}"
+        )
         self.install_versioned_package_by_pipx(
             "vllm",
             version,
@@ -303,7 +306,11 @@ class ToolsManager:
         :param version: The version of the package to install.
         """
         target_path = Path(self._bin_dir) / get_versioned_command(package, version)
+        logger.info(
+            f"install_versioned_package_by_pipx, {target_path.exists()}, lexists: {os.path.lexists(target_path)}"
+        )
         if target_path.exists():
+            # if os.path.lexists(target_path):
             logger.debug(f"{package} {version} already exists, skipping installation")
             return
 
@@ -345,9 +352,14 @@ class ToolsManager:
                     f"Installation succeeded, but executable not found at {installed_bin_path}"
                 )
 
+            logger.info("before symlink_to")
+            logger.info(
+                f"target_path: {target_path}, exists: {os.path.lexists(target_path)}"
+            )
             # Create a symlink to the installed binary
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.symlink_to(installed_bin_path)
+            logger.info("after symlink_to")
 
             if extra_packages:
                 for extra_package in extra_packages:
