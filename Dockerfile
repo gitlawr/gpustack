@@ -416,6 +416,7 @@ RUN --mount=type=bind,from=flashinfer-build,source=/workspace/flashinfer,target=
 torch==${TORCH_VERSION}+cu${CUDA_MAJOR}${CUDA_MINOR}
 torchaudio
 torchvision
+xformers
 numpy
 EOT
     pip install --disable-pip-version-check --no-cache-dir --root-user-action ignore -r /tmp/requirements.txt --index-url https://download.pytorch.org/whl/cu${CUDA_MAJOR}${CUDA_MINOR}
