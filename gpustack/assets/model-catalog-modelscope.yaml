@@ -286,6 +286,62 @@
       replicas: 1
       backend: vllm
       backend_parameters: *qwen3_thinking_vllm_parameters
+- name: Qwen3 Coder
+  description: Qwen3-Coder is a family of advanced code models available in multiple sizes, designed for a wide range of programming and AI-assisted development tasks. They deliver strong performance in agentic coding, browser-based automation, and foundational coding challenges. With native support for long contexts up to 256K tokens—extendable to 1M using Yarn—Qwen3-Coder excels at understanding and working with large codebases.
+  home: https://qwenlm.github.io
+  icon: /static/catalog_icons/qwen.png
+  categories:
+    - llm
+  capabilities:
+    - context/1M
+    - tools
+  sizes: [30, 480]
+  licenses:
+    - apache-2.0
+  release_date: "2025-07-22"
+  templates:
+    - quantizations: *default_bf16_gguf_quantizations
+      sizes: [480]
+      source: model_scope
+      model_scope_model_id: unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF
+      model_scope_file_path: "*-{quantization}*.gguf"
+      replicas: 1
+      backend: llama-box
+      cpu_offloading: true
+      distributed_inference_across_workers: true
+      backend_parameters: &qwen3_coder_gguf_parameters
+        - --temp=0.7
+        - --top-k=20
+        - --top-p=0.8
+        - --repeat-penalty=1.05
+        - --ctx-size=65536
+    - quantizations: *default_bf16_gguf_quantizations
+      sizes: [30]
+      source: model_scope
+      model_scope_model_id: unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
+      model_scope_file_path: "*-{quantization}*.gguf"
+      replicas: 1
+      backend: llama-box
+      cpu_offloading: true
+      distributed_inference_across_workers: true
+      backend_parameters: *qwen3_coder_gguf_parameters
+    - quantizations: ["BF16"]
+      source: model_scope
+      sizes: [480]
+      model_scope_model_id: Qwen/Qwen3-Coder-480B-A35B-Instruct
+      replicas: 1
+      backend: vllm
+      backend_parameters: &qwen3_coder_vllm_parameters
+        - --max-model-len 65536
+        - --enable-auto-tool-choice
+        - --tool-call-parser=qwen3_coder
+    - quantizations: ["BF16"]
+      source: model_scope
+      sizes: [30]
+      model_scope_model_id: Qwen/Qwen3-Coder-30B-A3B-Instruct
+      replicas: 1
+      backend: vllm
+      backend_parameters: *qwen3_coder_vllm_parameters
 - name: Qwen2.5
   description: Qwen2.5 is a family of large language models in Qwen series. Qwen2.5-instruct includes a number of instruction-tuned language models ranging from 0.5 to 72 billion parameters.
   home: https://qwenlm.github.io
@@ -1410,8 +1466,8 @@
         - --chat-template={data_dir}/chat_templates/tool_chat_template_llama3.1_json.jinja
 - name: GLM4 0414
   description: GLM-4-0414 is a family of models with performance comparable to OpenAI's GPT series and DeepSeek's V3/R1 series. It delivers strong results in engineering code generation, artifact creation, function calling, search-based question answering, and report generation.
-  home: https://github.com/THUDM/GLM-4
-  icon: /static/catalog_icons/ZhipuAI.png
+  home: https://z.ai
+  icon: /static/catalog_icons/zai.png
   categories:
     - llm
   capabilities:
@@ -1445,8 +1501,8 @@
       backend: vllm
 - name: GLM4 Z1 0414
   description: GLM-4-Z1 models are reasoning models with deep thinking capabilities in the GLM-4-0414 series. They demonstrate excellent performance in mathematical reasoning and general tasks.
-  home: https://github.com/THUDM/GLM-4
-  icon: /static/catalog_icons/ZhipuAI.png
+  home: https://z.ai
+  icon: /static/catalog_icons/zai.png
   categories:
     - llm
   capabilities:
@@ -1485,45 +1541,10 @@
       backend: vllm
       backend_parameters:
         - --max-model-len=32768
-- name: GLM4
-  description: GLM-4-9B is the open-source version of the latest generation of pre-trained models in the GLM-4 series launched by Zhipu AI. In the evaluation of data sets in semantics, mathematics, reasoning, code, and knowledge, GLM-4-9B and its human preference-aligned version GLM-4-9B-Chat have shown superior performance beyond Llama-3-8B.
-  home: https://github.com/THUDM/GLM-4
-  icon: /static/catalog_icons/ZhipuAI.png
-  categories:
-    - llm
-  capabilities:
-    - context/128K
-  sizes:
-    - 9
-  licenses:
-    - glm-4
-  release_date: "2024-08-26"
-  templates:
-    - quantizations:
-        - Q2_K_L
-        - Q3_K_L
-        - Q4_K_M
-        - Q5_K_M
-        - Q6_K_L
-        - Q8_0
-      source: model_scope
-      model_scope_model_id: bartowski/glm-4-9b-chat-GGUF
-      model_scope_file_path: "*-{quantization}*.gguf"
-      replicas: 1
-      backend: llama-box
-      cpu_offloading: true
-      distributed_inference_across_workers: true
-    - quantizations: ["BF16"]
-      source: model_scope
-      model_scope_model_id: ZhipuAI/glm-4-9b-chat
-      replicas: 1
-      backend: vllm
-      backend_parameters:
-        - --trust-remote-code
-- name: GLM 4.1V Thinking
+- name: GLM4.1V Thinking
   description: GLM-4.1V-9B-Thinking is a VLM model based on GLM-4-9B-0414. By introducing a "thinking paradigm" and leveraging reinforcement learning, the model significantly enhances its capabilities. It achieves state-of-the-art performance among 10B-parameter VLMs, matching or even surpassing the 72B-parameter Qwen-2.5-VL-72B on 18 benchmark tasks.
-  home: https://github.com/THUDM/GLM-4.1V-Thinking
-  icon: /static/catalog_icons/ZhipuAI.png
+  home: https://z.ai
+  icon: /static/catalog_icons/zai.png
   categories:
     - llm
   capabilities:
@@ -1538,6 +1559,54 @@
     - quantizations: ["BF16"]
       source: model_scope
       model_scope_model_id: ZhipuAI/GLM-4.1V-9B-Thinking
+      replicas: 1
+      backend: vllm
+- name: GLM4.5
+  description: The GLM-4.5 series models are foundation models designed for intelligent agents. GLM-4.5 models unify reasoning, coding, and intelligent agent capabilities to meet the complex demands of intelligent agent applications.
+  home: https://z.ai
+  icon: /static/catalog_icons/zai.png
+  categories:
+    - llm
+  capabilities:
+    - context/128K
+  sizes:
+    - 106
+    - 355
+  licenses:
+    - mit
+  release_date: "2025-07-28"
+  templates:
+    - quantizations: ["BF16"]
+      source: model_scope
+      sizes: [106]
+      model_scope_model_id: ZhipuAI/GLM-4.5-Air
+      replicas: 1
+      backend: vllm
+    - quantizations: ["BF16"]
+      source: model_scope
+      sizes: [355]
+      model_scope_model_id: ZhipuAI/GLM-4.5
+      replicas: 1
+      backend: vllm
+- name: GLM4.5V
+  description: GLM-4.5V is based on GLM-4.5-Air (106B parameters, 12B active). It continues the technical approach of GLM-4.1V-Thinking, achieving SOTA performance among models of the same scale on 42 public vision-language benchmarks. It covers common tasks such as image, video, and document understanding, as well as GUI agent operations.
+  home: https://z.ai
+  icon: /static/catalog_icons/zai.png
+  categories:
+    - llm
+  capabilities:
+    - context/128K
+    - vision
+  sizes:
+    - 106
+  licenses:
+    - mit
+  release_date: "2025-08-10"
+  templates:
+    - quantizations: ["BF16"]
+      source: model_scope
+      sizes: [106]
+      model_scope_model_id: ZhipuAI/GLM-4.5V
       replicas: 1
       backend: vllm
 - name: Hunyuan A13B Instruct
@@ -1562,6 +1631,38 @@
       backend_parameters:
         - --trust-remote-code
         - --max-model-len=32768
+- name: GPT OSS
+  description: The gpt-oss series is OpenAI's family of open-weight models, designed for powerful reasoning, agentic tasks, and versatile developer use cases.
+  home: https://openai.com
+  icon: /static/catalog_icons/openai.png
+  categories:
+    - llm
+  capabilities:
+    - context/128K
+  sizes:
+    - 20
+    - 120
+  licenses:
+    - apache-2.0
+  release_date: "2025-08-05"
+  templates:
+    - quantizations:
+        - Q2_K_L
+        - Q3_K_M
+        - Q4_K_M
+        - Q5_K_M
+        - Q6_K
+        - Q8_0
+        - F16
+      source: model_scope
+      model_scope_model_id: unsloth/gpt-oss-{size}b-GGUF
+      model_scope_file_path: "*-{quantization}*.gguf"
+      replicas: 1
+      backend: llama-box
+      backend_parameters:
+        - --ctx-size=32768
+      cpu_offloading: true
+      distributed_inference_across_workers: true
 # Vision language models
 - name: Qwen2.5 VL
   description: Qwen2.5-VL is a collection of vision-language models of Qwen, excelling in visual understanding, document analysis, and long-video comprehension. It accurately localizes objects, extracts structured data from images, and functions as an interactive visual agent capable of reasoning and tool use. It outperforms previous models and rivals GPT-4o in tasks like document and diagram understanding.
@@ -1836,6 +1937,27 @@
     - quantizations: ["BF16"]
       source: model_scope
       model_scope_model_id: OpenGVLab/InternVL2_5-{size}B-MPO
+      replicas: 1
+      backend: vllm
+      backend_parameters:
+        - --trust-remote-code
+- name: MiniCPM-V-4
+  description: MiniCPM-V 4.0 is built based on SigLIP2-400M and MiniCPM4-3B with a total of 4.1B parameters. It inherits the strong single-image, multi-image and video understanding performance of MiniCPM-V 2.6 with largely improved efficiency.
+  home: https://github.com/OpenBMB
+  icon: /static/catalog_icons/OpenBMB.png
+  categories:
+    - llm
+  capabilities:
+    - context/32K
+    - vision
+  sizes: [4]
+  licenses:
+    - minicpm
+  release_date: "2025-08-05"
+  templates:
+    - quantizations: ["BF16"]
+      source: model_scope
+      model_scope_model_id: OpenBMB/MiniCPM-V-4
       replicas: 1
       backend: vllm
       backend_parameters:
