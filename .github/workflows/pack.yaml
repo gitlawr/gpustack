@@ -37,10 +37,10 @@ on:
 
 env:
   INPUT_PYTHON_VERSION: 3.11
-  INPUT_USERNAME: foo
+  INPUT_USERNAME: lawr
   INPUT_PASSWORD: ${{ secrets.CI_DOCKERHUB_PASSWORD }}
   INPUT_NAMESPACE: lawr
-  INPUT_REPOSITORY: gpustack
+  INPUT_REPOSITORY: test
 
 jobs:
   pack:
