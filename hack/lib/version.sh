@@ -73,7 +73,7 @@ function gpustack::version::get_version_vars() {
       echo "======= GIT STATUS ======="
       git status --short
       echo "======= GIT DIFF ======="
-      git diff --no-pager
+      git --no-pager diff
       GIT_VERSION="v0.0.0"
     elif ! [[ "${GIT_VERSION}" =~ ^v([0-9]+)\.([0-9]+)(\.[0-9]+)?(-?[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
       echo "GIT Version ${GIT_VERSION} is not valid semver"
