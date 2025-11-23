@@ -62,14 +62,18 @@ function gpustack::version::get_version_vars() {
     # specify with the tag if the head is tagged.
     if GIT_VERSION="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
       if git_tag=$(git tag -l --contains HEAD 2>/dev/null | head -n 1 2>/dev/null) && [[ -n ${git_tag} ]]; then
+        echo "Git head is tagged with ${git_tag}"
         GIT_VERSION="${git_tag}"
       fi
     fi
 
     # specify to v0.0.0 if the tree is dirty.
     if [[ "${GIT_TREE_STATE:-dirty}" == "dirty" ]]; then
+      echo "GIT Tree is dirty"
+      git diff
       GIT_VERSION="v0.0.0"
     elif ! [[ "${GIT_VERSION}" =~ ^v([0-9]+)\.([0-9]+)(\.[0-9]+)?(-?[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+      echo "GIT Version ${GIT_VERSION} is not valid semver"
       GIT_VERSION="v0.0.0"
     fi
 
