@@ -85,6 +85,22 @@ model_sets:
       backend_parameters:
         - --max-seq-len=32768
     # Other GPUs
+    - mode: latency
+      quantization: FP8
+      gpu_filters:
+        vendor: nvidia
+        compute_capability: ">=9.0" # Hopper or later
+      source: model_scope
+      model_scope_model_id: Qwen/Qwen3-8B-FP8
+      backend: SGLang
+      backend_parameters:
+        - --reasoning-parser=qwen3
+        - --context-length=32768
+      speculative_config:
+        enabled: true
+        algorithm: eagle3
+        draft_model: gpustack/qwen3_8b_eagle3
+        num_draft_tokens: 4
     - mode: throughput
       quantization: FP8
       source: model_scope
@@ -192,22 +208,6 @@ model_sets:
       backend_parameters:
         - --max-seq-len=32768
     # Other GPUs
-    - mode: latency
-      quantization: FP8
-      gpu_filters:
-        vendor: nvidia
-        compute_capability: ">=9.0" # Hopper or later
-      source: model_scope
-      model_scope_model_id: Qwen/Qwen3-32B-FP8
-      speculative_config:
-        enabled: true
-        algorithm: eagle3
-        draft_model: AngelSlim/Qwen3-32B_eagle3
-        num_draft_tokens: 4
-      backend: SGLang
-      backend_parameters:
-        - --reasoning-parser=qwen3
-        - --context-length=32768
     - mode: throughput
       quantization: FP8
       source: model_scope
