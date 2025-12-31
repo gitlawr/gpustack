@@ -54,9 +54,42 @@ def event_decoder(obj):
     return obj
 
 
+class MonitoredQueue(asyncio.Queue):
+    """
+    A subclass of asyncio.Queue that provides additional methods to monitor its contents.
+    """
+
+    def __init__(self, maxsize=1024):
+        super().__init__(maxsize=maxsize)
+
+    def get_queue_contents_info(self) -> List[str]:
+        """
+        Returns a list of string representations of the items in the queue."""
+        contents = []
+        for item in self._queue:
+            if hasattr(item, 'type') and hasattr(item.data, 'id'):
+                contents.append(f"type={item.type}, data.id={item.data.id}")
+            elif hasattr(item, 'type'):
+                contents.append(f"type={item.type}")
+            else:
+                contents.append(str(item))
+        return contents
+
+    def get_queue_stats(self) -> Dict[str, Any]:
+        """
+        Returns a dictionary with statistics about the queue."""
+        return {
+            'qsize': self.qsize(),
+            'maxsize': self.maxsize,
+            'full': self.full(),
+            'empty': self.empty(),
+            'contents': self.get_queue_contents_info(),
+        }
+
+
 class Subscriber:
     def __init__(self):
-        self.queue = asyncio.Queue(maxsize=1024)
+        self.queue = MonitoredQueue(maxsize=1024)
         self.latest_by_key = {}
         self.lock = asyncio.Lock()
 
@@ -97,6 +130,36 @@ class EventBus:
         self.subscribers: Dict[str, List[Subscriber]] = {}
 
     def subscribe(self, topic: str) -> Subscriber:
+        if topic == 'apikey':
+            # a debug hook.
+            logger.debug("----debug----")
+            modelinstance_subs = self.subscribers.get('modelinstance', [])
+            logger.debug(
+                f"Current modelinstance subscribers: {len(modelinstance_subs)}"
+            )
+            # print queue of each subscriber
+            for i, sub in enumerate(modelinstance_subs):
+                logger.debug(
+                    f"Subscriber {i} queue contents: {sub.queue.get_queue_contents_info()}"
+                )
+                logger.debug(
+                    f"Subscriber {i} queue stats: {sub.queue.get_queue_stats()}"
+                )
+
+            model_subs = self.subscribers.get('model', [])
+            logger.debug(f"Current model subscribers: {len(model_subs)}")
+            for i, sub in enumerate(model_subs):
+                logger.debug(
+                    f"Subscriber {i} queue contents: {sub.queue.get_queue_contents_info()}"
+                )
+                logger.debug(
+                    f"Subscriber {i} queue stats: {sub.queue.get_queue_stats()}"
+                )
+
+            tasks = asyncio.all_tasks()
+            logger.debug(f"Total asyncio tasks: {len(tasks)}")
+            logger.debug("----end debug----")
+
         subscriber = Subscriber()
         if topic not in self.subscribers:
             self.subscribers[topic] = []
