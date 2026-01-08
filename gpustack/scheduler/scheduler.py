@@ -58,6 +58,7 @@ from gpustack.scheduler.calculator import (
 from gpustack.server.services import ModelInstanceService, ModelService
 from gpustack.utils.command import find_parameter
 from gpustack.utils.gpu import parse_gpu_ids_by_worker
+from gpustack.utils.asyncio_task import create_background_task
 from gpustack.utils.hub import (
     get_pretrained_config_with_fallback,
     has_diffusers_model_index,
@@ -96,7 +97,7 @@ class Scheduler:
 
         try:
             # scheduler queue.
-            asyncio.create_task(self._schedule_cycle())
+            create_background_task(self._schedule_cycle(), name="scheduler_cycle")
 
             # scheduler job trigger by time interval.
             trigger = IntervalTrigger(

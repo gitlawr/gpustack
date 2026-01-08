@@ -7,6 +7,7 @@ import threading
 
 
 from gpustack.utils import platform
+from gpustack.utils.asyncio_task import create_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def add_signal_handlers_in_loop():
     for sig in (signal.SIGINT, signal.SIGTERM):
         logger.debug(f"Adding signal handler for {sig}")
         loop.add_signal_handler(
-            sig, lambda: asyncio.create_task(shutdown_event_loop(sig, loop))
+            sig, lambda: create_background_task(shutdown_event_loop(sig, loop))
         )
 
 

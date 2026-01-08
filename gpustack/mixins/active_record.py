@@ -17,6 +17,7 @@ from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.ext.asyncio import AsyncEngine
 from gpustack.schemas.common import PaginatedList, Pagination
 from gpustack.server.bus import Event, EventType, event_bus
+from gpustack.utils.asyncio_task import create_background_task
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,11 @@ def send_post_commit_events(session: AsyncSession):
         try:
             copied_dict = bus_event.data.model_dump(warnings=False)
             bus_event.data = type(bus_event.data).model_validate(copied_dict)
-            asyncio.create_task(event_bus.publish(event.name, bus_event))
+
+            create_background_task(
+                event_bus.publish(event.name, bus_event),
+                name=f"publish_{event.name}_{event.event.type}_{id}",
+            )
         except Exception as e:
             logger.exception(f"Failed to publish events: {e}")
 

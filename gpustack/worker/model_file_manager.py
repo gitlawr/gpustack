@@ -30,6 +30,7 @@ from gpustack.utils.file import delete_path, get_local_file_size_in_byte
 from gpustack.worker import downloaders
 from gpustack.config.registration import read_worker_token
 from gpustack.utils.locks import read_lock_info, get_lock_path
+from gpustack.utils.asyncio_task import create_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,9 @@ class ModelFileManager:
         logger.trace(f"Received model file event: {event.type} {mf.id} {mf.state}")
 
         if event.type == EventType.DELETED:
-            asyncio.create_task(self._handle_deletion(mf))
+            create_background_task(
+                self._handle_deletion(mf), name=f"handle_model_file_deletion_{mf.id}"
+            )
         elif event.type in {EventType.CREATED, EventType.UPDATED}:
             if mf.state != ModelFileStateEnum.DOWNLOADING:
                 return
@@ -286,7 +289,9 @@ class ModelFileManager:
 
             logger.debug(f"Download completed for {model_file.readable_source}")
 
-        asyncio.create_task(_check_completion())
+        create_background_task(
+            _check_completion(), name=f"check_model_file_completion_{model_file.id}"
+        )
 
 
 class ModelFileDownloadTask:

@@ -80,6 +80,7 @@ from gpustack.gateway.client.networking_higress_io_v1_api import (
 )
 from gpustack.gateway import utils as mcp_handler
 from gpustack.gateway import get_async_k8s_config
+from gpustack.utils.asyncio_task import create_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -182,11 +183,12 @@ class ModelInstanceController:
                 if event.type == EventType.DELETED:
                     # trigger model replica sync
                     copied_model = Model.model_validate(model.model_dump())
-                    asyncio.create_task(
+                    create_background_task(
                         event_bus.publish(
                             Model.__name__.lower(),
                             Event(type=EventType.UPDATED, data=copied_model),
-                        )
+                        ),
+                        name=f"publish_model_updated_after_instance_deleted_{model_instance.id}",
                     )
                 elif model_instance.state == ModelInstanceStateEnum.INITIALIZING:
                     await ensure_instance_model_file(session, model_instance)
