@@ -684,17 +684,30 @@ class ActiveRecordMixin:
                     yield "\n\n"
                     continue
 
+                event_id = getattr(event.data, 'id', None)
+                logger.trace(
+                    f"Streaming {cls.__name__} event: type={event.type}, id={event_id}, "
+                    f"fields={fields}, fuzzy_fields={fuzzy_fields}"
+                )
+
                 if not cls._match_fields(event, fields):
+                    logger.trace(f"Event filtered by fields: id={event_id}")
                     continue
 
                 if not cls._match_fuzzy_fields(event, fuzzy_fields):
+                    logger.trace(f"Event filtered by fuzzy_fields: id={event_id}")
                     continue
 
                 if filter_func and not filter_func(event.data):
+                    logger.trace(f"Event filtered by filter_func: id={event_id}")
                     continue
 
                 event.data = cls._convert_to_public_class(event.data)
-                yield cls._format_event(event)
+                formatted = cls._format_event(event)
+                logger.trace(
+                    f"Yielding event to client: type={event.type}, id={event_id}"
+                )
+                yield formatted
         except asyncio.CancelledError:
             pass
         except Exception as e:

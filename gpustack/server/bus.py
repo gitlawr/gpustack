@@ -93,12 +93,21 @@ class Subscriber:
 
     async def receive(self) -> Any:
         event = await self.queue.get()
+        event_id = getattr(event.data, 'id', None)
+        logger.trace(
+            f"Subscriber {id(self)} received event: type={event.type}, "
+            f"id={event_id}, queue_size_after={self.queue.qsize()}"
+        )
+
         if event.type == EventType.UPDATED and event.id is not None:
             async with self.lock:
                 # If the ID is not in latest_by_key (e.g., DELETED cleaned it up),
                 # skip this stale event and get the next one
                 if event.id not in self.latest_by_key:
                     # This is a stale UPDATED event after a DELETED, skip it
+                    logger.trace(
+                        f"Subscriber {id(self)} skipping stale UPDATED event: id={event_id}"
+                    )
                     # Recursively get the next event
                     return await self.receive()
                 return self.latest_by_key.pop(event.id, event)
