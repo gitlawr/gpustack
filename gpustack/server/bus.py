@@ -113,9 +113,26 @@ class EventBus:
                 del self.subscribers[topic]
 
     async def publish(self, topic: str, event: Event):
+        subscriber_count = len(self.subscribers.get(topic, []))
+        logger.debug(
+            f"Publishing to topic '{topic}': type={event.type}, "
+            f"subscribers={subscriber_count}, data_id={getattr(event.data, 'id', None)}"
+        )
+
         if topic in self.subscribers:
-            for subscriber in self.subscribers[topic]:
-                await subscriber.enqueue(copy.deepcopy(event))
+            for idx, subscriber in enumerate(self.subscribers[topic]):
+                try:
+                    await subscriber.enqueue(copy.deepcopy(event))
+                    logger.debug(
+                        f"Enqueued event to subscriber {idx} for topic '{topic}', "
+                        f"queue_size={subscriber.queue.qsize()}"
+                    )
+                except Exception as e:
+                    logger.exception(
+                        f"Failed to enqueue event to subscriber {idx} for topic '{topic}': {e}"
+                    )
+        else:
+            logger.debug(f"No subscribers for topic '{topic}'")
 
 
 event_bus = EventBus()
