@@ -395,11 +395,14 @@ class Worker(WorkerBase, BaseModelMixin, table=True):
     __tablename__ = 'workers'
     id: Optional[int] = Field(default=None, primary_key=True)
 
+    # WorkerPublic only includes cluster_id, not the cluster object
+    # Use noload to avoid loading the association in list queries
     cluster: Cluster = Relationship(
-        back_populates="cluster_workers", sa_relationship_kwargs={"lazy": "selectin"}
+        back_populates="cluster_workers", sa_relationship_kwargs={"lazy": "noload"}
     )
+    # worker_pool is not in WorkerPublic, use noload
     worker_pool: Optional[WorkerPool] = Relationship(
-        back_populates="pool_workers", sa_relationship_kwargs={"lazy": "selectin"}
+        back_populates="pool_workers", sa_relationship_kwargs={"lazy": "noload"}
     )
 
     # This field should be replaced by x509 credential if mTLS is supported.

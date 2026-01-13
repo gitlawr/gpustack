@@ -6,6 +6,7 @@ from gpustack_runtime.detector import ManufacturerEnum
 from sqlalchemy import bindparam, cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.mysql import JSON
+from sqlalchemy.orm import selectinload
 from sqlmodel import and_, col, or_, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 from enum import Enum
@@ -236,7 +237,7 @@ async def _get_model(
 async def get_model_instances(
     engine: EngineDep, session: SessionDep, id: int, params: ListParamsDep
 ):
-    model = await Model.one_by_id(session, id)
+    model = await Model.one_by_id(session, id, options=[selectinload(Model.instances)])
     if not model:
         raise NotFoundException(message="Model not found")
 

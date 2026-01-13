@@ -73,7 +73,13 @@ async def reset_query_count():
 
 
 async def get_session():
-    async with AsyncSession(_engine) as session:
+    """
+    Create a session for database operations.
+
+    Note: expire_on_commit=False is required for async SQLAlchemy to prevent
+    lazy loading errors after commit. See: https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html
+    """
+    async with AsyncSession(_engine, expire_on_commit=False) as session:
         yield session
 
 
