@@ -42,9 +42,34 @@ SLOW_QUERY_THRESHOLD_SECOND = 0.5
 
 _engine = None
 
+# Query counter for performance monitoring
+_query_counter = 0
+_query_counter_lock = asyncio.Lock()
+
 
 def get_engine():
     return _engine
+
+
+async def increment_query_count():
+    """Increment the global query counter."""
+    global _query_counter
+    async with _query_counter_lock:
+        _query_counter += 1
+
+
+async def get_query_count() -> int:
+    """Get the current query count."""
+    global _query_counter
+    async with _query_counter_lock:
+        return _query_counter
+
+
+async def reset_query_count():
+    """Reset the query counter to zero."""
+    global _query_counter
+    async with _query_counter_lock:
+        _query_counter = 0
 
 
 async def get_session():
@@ -148,6 +173,9 @@ def listen_events(engine: AsyncEngine):
                 engine.sync_engine, "after_cursor_execute", after_cursor_execute
             )
 
+    # Always count queries for performance monitoring
+    event.listen(engine.sync_engine, "after_cursor_execute", count_query)
+
 
 def setup_sqlite_pragmas(conn, record):
     # Enable foreign keys for SQLite, since it's disabled by default
@@ -175,3 +203,9 @@ def after_cursor_execute(conn, cursor, statement, parameters, context, executema
     total = time.time() - context._query_start_time
     if total > SLOW_QUERY_THRESHOLD_SECOND:
         logger.debug(f"[SLOW SQL] {total:.3f}s\nSQL: {statement}\nParams: {parameters}")
+
+
+def count_query(conn, cursor, statement, parameters, context, executemany):
+    """Increment the global query counter for each query executed."""
+    global _query_counter
+    _query_counter += 1

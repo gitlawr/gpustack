@@ -11,7 +11,7 @@ from gpustack.config.config import Config
 from gpustack.logging import setup_logging
 from gpustack.schemas.clusters import Cluster
 from gpustack.schemas.workers import Worker, WorkerStateEnum
-from gpustack.server.db import get_engine
+from gpustack.server.db import get_engine, get_query_count
 from gpustack.server.deps import SessionDep
 from gpustack.utils.name import metric_name
 import logging
@@ -97,6 +97,15 @@ class MetricExporter(Collector):
             model_running_instances,
             model_instance_status,
         ]
+
+        # Database query count metric
+        db_query_count = GaugeMetricFamily(
+            metric_name("db_query_count"),
+            "Total database queries executed since server start",
+            labels=[],
+        )
+        db_query_count.add_metric([], await get_query_count())
+        metrics.append(db_query_count)
 
         # cluster metrics
         cluster_id_to_name = {}

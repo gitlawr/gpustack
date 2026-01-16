@@ -6,10 +6,25 @@ from gpustack.api.exceptions import (
     BadRequestException,
     InvalidException,
 )
+from gpustack.server.db import get_query_count, reset_query_count
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
+
+@router.get("/query_count")
+async def get_query_count_handler():
+    """Get the current database query count since last reset."""
+    count = await get_query_count()
+    return {"query_count": count}
+
+
+@router.post("/query_count/reset")
+async def reset_query_count_handler():
+    """Reset the database query counter to zero."""
+    await reset_query_count()
+    return {"status": "reset"}
 
 
 @router.get("/log_level")
