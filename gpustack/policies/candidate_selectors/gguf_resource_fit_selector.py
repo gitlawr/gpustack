@@ -170,7 +170,7 @@ class GGUFResourceFitSelector(ScheduleCandidatesSelector):
         if self._workers_allocatable_resource.get(worker.id):
             return self._workers_allocatable_resource.get(worker.id)
 
-        return await get_worker_allocatable_resource(self._engine, worker)
+        return await get_worker_allocatable_resource(self._model_instances, worker)
 
     def _get_claim_with_layers(
         self, layers: int, is_uma: bool = False

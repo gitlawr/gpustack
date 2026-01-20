@@ -25,6 +25,7 @@ from gpustack.schemas.models import (
     CategoryEnum,
     ComputedResourceClaim,
     Model,
+    ModelInstance,
     SourceEnum,
 )
 from gpustack.schemas.workers import Worker
@@ -94,8 +95,8 @@ class CustomBackendResourceFitSelector(ScheduleCandidatesSelector):
     - Supports both GPU and CPU-only deployments
     """
 
-    def __init__(self, cfg: Config, model: Model):
-        super().__init__(cfg, model, parse_model_params=False)
+    def __init__(self, cfg: Config, model: Model, model_instances: List[ModelInstance]):
+        super().__init__(cfg, model, model_instances, parse_model_params=False)
         self._event_collector = EventCollector(model, logger)
         self._messages = []
 
@@ -258,7 +259,7 @@ class CustomBackendResourceFitSelector(ScheduleCandidatesSelector):
                     continue
 
                 allocatable = await get_worker_allocatable_resource(
-                    self._engine, worker, gpu_type
+                    self._model_instances, worker, gpu_type
                 )
 
                 for gpu_device in worker.status.gpu_devices:
@@ -312,7 +313,7 @@ class CustomBackendResourceFitSelector(ScheduleCandidatesSelector):
                     continue  # Need at least 2 GPUs for multi-GPU
 
                 allocatable = await get_worker_allocatable_resource(
-                    self._engine, worker, gpu_type
+                    self._model_instances, worker, gpu_type
                 )
 
                 # Try to distribute VRAM across multiple GPUs
@@ -368,7 +369,9 @@ class CustomBackendResourceFitSelector(ScheduleCandidatesSelector):
         candidates = []
 
         for worker in workers:
-            allocatable = await get_worker_allocatable_resource(self._engine, worker)
+            allocatable = await get_worker_allocatable_resource(
+                self._model_instances, worker
+            )
 
             # Check if worker has enough RAM for CPU inference
             if allocatable.ram >= self._ram_claim:

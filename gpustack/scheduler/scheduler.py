@@ -301,12 +301,14 @@ class Scheduler:
                 )
                 return
 
+            model_instances = await ModelInstance.all(session)
+
             candidate = None
             messages = []
             if workers and model:
                 try:
                     candidate, messages = await find_candidate(
-                        self._config, model, workers
+                        self._config, model, workers, model_instances
                     )
                 except Exception as e:
                     state_message = f"Failed to find candidate: {e}"
@@ -369,6 +371,7 @@ async def find_candidate(
     config: Config,
     model: Model,
     workers: List[Worker],
+    model_instances: List[ModelInstance],
 ) -> Tuple[Optional[ModelInstanceScheduleCandidate], List[str]]:
     """
     Find a schedule candidate for the model instance.
@@ -404,13 +407,21 @@ async def find_candidate(
                 config, model, config.cache_dir
             )
         elif model.backend == BackendEnum.ASCEND_MINDIE:
-            candidates_selector = AscendMindIEResourceFitSelector(config, model)
+            candidates_selector = AscendMindIEResourceFitSelector(
+                config, model, model_instances
+            )
         elif model.backend == BackendEnum.VLLM:
-            candidates_selector = VLLMResourceFitSelector(config, model)
+            candidates_selector = VLLMResourceFitSelector(
+                config, model, model_instances
+            )
         elif model.backend == BackendEnum.SGLANG:
-            candidates_selector = SGLangResourceFitSelector(config, model)
+            candidates_selector = SGLangResourceFitSelector(
+                config, model, model_instances
+            )
         else:
-            candidates_selector = CustomBackendResourceFitSelector(config, model)
+            candidates_selector = CustomBackendResourceFitSelector(
+                config, model, model_instances
+            )
     except Exception as e:
         return None, [f"Failed to initialize {model.backend} candidates selector: {e}"]
 
@@ -418,7 +429,7 @@ async def find_candidate(
     candidates = await candidates_selector.select_candidates(workers)
 
     # Score candidates.
-    placement_scorer = PlacementScorer(model)
+    placement_scorer = PlacementScorer(model, model_instances)
     candidates = await placement_scorer.score(candidates)
 
     # Pick the highest score candidate.
