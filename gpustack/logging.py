@@ -20,6 +20,7 @@ def setup_logging(debug: bool = False):
         level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler()],
+        force=True,
     )
     logging.addLevelName(TRACE_LEVEL, "TRACE")
     logging.Logger.trace = trace
@@ -68,6 +69,12 @@ def setup_logging(debug: bool = False):
             logger.setLevel(logging.DEBUG)
         else:
             logger.disabled = True
+
+    # Ensure uvicorn access logger is enabled
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.disabled = False
+    uvicorn_access_logger.setLevel(logging.INFO)
+    uvicorn_access_logger.propagate = True
 
 
 def trace(self, message, *args, **kwargs):

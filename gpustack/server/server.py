@@ -127,15 +127,20 @@ class Server:
             else "0.0.0.0"
         )
 
+        setup_logging()
+
+        # Configure uvicorn access logger
+        access_logger = logging.getLogger("uvicorn.access")
+        access_logger.setLevel(logging.INFO)
+        access_logger.addHandler(logging.StreamHandler())
+
         config = uvicorn.Config(
             app,
             host=serving_host,
             port=self._config.get_api_port(),
-            access_log=False,
-            log_level="error",
+            access_log=True,
+            log_config=None,  # Don't override our logging configuration
         )
-
-        setup_logging()
         logger.info(f"Gateway mode: {self._config.gateway_mode.value}.")
         serving_api_message = f"Serving GPUStack API on {config.host}:{config.port}."
         if self._config.gateway_mode == GatewayModeEnum.embedded:
