@@ -34,18 +34,21 @@ class InferenceBackendClient:
             params: Query parameters for filtering
             use_cache: Whether to use cache. Defaults to True (use cache if available).
                       Automatically falls back to API if cache watch is not running.
-                      Note: If params is provided, always calls API (not cache).
+                      Note: If 'page' or 'perPage' params are provided, always calls API.
 
         Returns:
             List of resources
         """
-        # Use cache if enabled, watch is running, use_cache is True, and NO params provided
-        # If params is provided, always call API for server-side filtering
+        # Determine if we should use cache
+        # Don't use cache if pagination params are provided
+        pagination_params = {"page", "perPage"} if params else set()
+        has_pagination = any(k in pagination_params for k in (params or {}))
+
         should_use_cache = (
             use_cache
             and self._enable_cache
             and self._watch_started
-            and not params  # Don't use cache when params are provided
+            and not has_pagination  # Don't use cache if pagination params exist
         )
 
         # If cache should be used, try to read from cache
