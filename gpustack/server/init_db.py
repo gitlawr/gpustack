@@ -40,6 +40,31 @@ logger = logging.getLogger(__name__)
 
 SLOW_QUERY_THRESHOLD_SECOND = 0.5
 
+# Query counter for performance monitoring
+_query_counter = 0
+_query_counter_lock = asyncio.Lock()
+
+
+async def increment_query_count():
+    """Increment the global query counter."""
+    global _query_counter
+    async with _query_counter_lock:
+        _query_counter += 1
+
+
+async def get_query_count() -> int:
+    """Get the current query count."""
+    global _query_counter
+    async with _query_counter_lock:
+        return _query_counter
+
+
+async def reset_query_count():
+    """Reset the query counter to zero."""
+    global _query_counter
+    async with _query_counter_lock:
+        _query_counter = 0
+
 
 async def init_db(db_url: str):
     if db.engine is None:
@@ -135,6 +160,15 @@ def listen_events(engine: AsyncEngine):
             event.listen(
                 engine.sync_engine, "after_cursor_execute", after_cursor_execute
             )
+
+    # Always count queries for performance monitoring
+    event.listen(engine.sync_engine, "after_cursor_execute", count_query)
+
+
+def count_query(conn, cursor, statement, parameters, context, executemany):
+    """Increment the global query counter for each query executed."""
+    global _query_counter
+    _query_counter += 1
 
 
 def setup_sqlite_pragmas(conn, record):
