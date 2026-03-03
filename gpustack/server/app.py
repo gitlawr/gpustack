@@ -1,6 +1,5 @@
 from functools import partial
 from contextlib import asynccontextmanager
-from importlib.metadata import entry_points
 import logging
 from pathlib import Path
 import aiohttp
@@ -13,13 +12,13 @@ from gpustack.api import exceptions, middlewares
 from gpustack.api.auth import BearerTokenAuthenticator
 from gpustack.config.config import Config
 from gpustack import envs
-from gpustack.extension import Plugin
 from gpustack.routes import ui
 from gpustack.routes.routes import api_router
 from gpustack.utils.forwarded import ForwardedHostPortMiddleware
 from gpustack.security import JWTManager
 from gpustack.gateway.utils import worker_websocket_connect_callback
 from gpustack.websocket_proxy.message_server import MessageServerHandler
+from gpustack.extension import iter_plugins
 
 logger = logging.getLogger(__name__)
 
@@ -87,23 +86,10 @@ def create_app(cfg: Config) -> FastAPI:
 def _load_extension_plugins(app: FastAPI, cfg: Config):
     """Load extension plugins registered via entry points."""
     app.state.extension_plugins = []
-    eps = entry_points(group="gpustack.plugins")
-    for ep in eps:
+    for name, plugin in iter_plugins():
         try:
-            plugin_factory = ep.load()
-            plugin = plugin_factory()
-            if not isinstance(plugin, Plugin):
-                logger.warning(
-                    f"Extension plugin {ep.name} does not implement "
-                    "the Plugin interface."
-                )
-                continue
-
             plugin.register(app, cfg)
             app.state.extension_plugins.append(plugin)
-            logger.info(f"Loaded extension plugin: {ep.name}")
-        except Exception:
-            logger.warning(
-                f"Failed to load extension plugin: {ep.name}",
-                exc_info=True,
-            )
+            logger.info(f"Loaded extension plugin: {name}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load extension plugin '{name}': {e}") from e

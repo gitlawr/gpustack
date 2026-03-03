@@ -11,6 +11,7 @@ import yaml
 
 from gpustack import __version__, __git_commit__
 from gpustack.config.config import set_global_config
+from gpustack.extension import iter_plugins
 from gpustack.logging import setup_logging
 from gpustack.utils.envs import get_gpustack_env, get_gpustack_env_bool
 from gpustack.worker.worker import Worker
@@ -616,7 +617,22 @@ def start_cmd_options(parser_server: argparse.ArgumentParser):
         "Default value is direct for embedded worker, and worker for standalone worker.",
     )
 
+    # Allow plugins to set up start command arguments
+    _setup_plugin_start_args(parser_server)
+
     parser_server.set_defaults(func=run)
+
+
+def _setup_plugin_start_args(parser: argparse.ArgumentParser):
+    """Allow plugins to set up start command arguments."""
+    for name, plugin in iter_plugins():
+        try:
+            plugin.setup_start_cmd(parser)
+            logger.debug(f"Set up start args from plugin: {name}")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to set up CLI args from plugin '{name}': {e}"
+            ) from e
 
 
 def run(args: argparse.Namespace):
@@ -684,6 +700,7 @@ def parse_args(args: argparse.Namespace) -> Config:
         raise Exception(f"Config error: {e}")
 
     set_global_config(cfg)
+
     return cfg
 
 

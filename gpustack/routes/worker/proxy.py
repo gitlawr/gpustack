@@ -73,10 +73,21 @@ async def proxy(path: str, request: Request):
             timeout=timeout,
         )
 
+        # Filter out hop-by-hop headers to avoid duplicates
+        headers_to_skip = {
+            "server",
+            "transfer-encoding",
+            "connection",
+            "keep-alive",
+            "upgrade",
+        }
+        filtered_headers = {
+            k: v for k, v in resp.headers.items() if k.lower() not in headers_to_skip
+        }
         return StreamingResponse(
             stream_response(resp),
             status_code=resp.status,
-            headers=dict(resp.headers),
+            headers=filtered_headers,
             background=BackgroundTask(resp.close),
         )
 
