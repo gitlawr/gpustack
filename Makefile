@@ -60,7 +60,7 @@ help:
 	#           E2E_SERVER_URL - server URL (default: http://localhost:80).
 	#           E2E_PASSWORD   - admin password (default: Admin@123).
 	#           E2E_TAGS       - filter tests: smoke, model, provider, route, stability.
-	#           E2E_GPU        - GPU type: nvidia, amd, ascend, cpu.
+	#           E2E_GPU        - GPU type: nvidia (default), amd, ascend, cpu.
 	#           E2E_DEPLOY     - deploy via Docker before testing: allinone (default), server.
 	#           E2E_IMAGE      - Docker image (default: gpustack/gpustack:dev), used with E2E_DEPLOY.
 	#           Examples:

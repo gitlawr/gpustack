@@ -12,7 +12,7 @@ E2E_SERVER_URL="${E2E_SERVER_URL:-http://localhost:80}"
 E2E_PASSWORD="${E2E_PASSWORD:-Admin@123}"
 E2E_IMAGE="${E2E_IMAGE:-gpustack/gpustack:dev}"
 E2E_TAGS="${E2E_TAGS:-}"
-E2E_GPU="${E2E_GPU:-}"
+E2E_GPU="${E2E_GPU:-nvidia}"
 E2E_DEPLOY="${E2E_DEPLOY:-}"
 E2E_ARGS="${E2E_ARGS:-}"
 

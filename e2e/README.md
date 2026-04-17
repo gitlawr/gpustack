@@ -135,7 +135,7 @@ E2E_ARGS="-k test_version" make e2e
 | `E2E_SERVER_URL` | GPUStack server URL | `http://localhost:80` |
 | `E2E_PASSWORD` | Admin password | `Admin@123` |
 | `E2E_TAGS` | Pytest markers (smoke, model, provider, route, stability) | - |
-| `E2E_GPU` | GPU type filter (nvidia, amd, ascend, cpu) | - |
+| `E2E_GPU` | GPU type filter (nvidia, amd, ascend, cpu) | `nvidia` |
 | `E2E_DEPLOY` | Deploy via Docker before testing (allinone, server) | - |
 | `E2E_IMAGE` | Docker image, used with `E2E_DEPLOY` | `gpustack/gpustack:dev` |
 | `E2E_ARGS` | Additional pytest arguments | - |
