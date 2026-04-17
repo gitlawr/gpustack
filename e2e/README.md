@@ -49,25 +49,19 @@ e2e/
 Connect to an existing GPUStack deployment and run tests:
 
 ```bash
-# Set environment variables
-export GPUSTACK_SERVER_URL=http://localhost:80
-export GPUSTACK_ADMIN_PASSWORD=Admin@123
-
-# Run tests
-pytest e2e/tests -v
+make e2e
+E2E_PASSWORD=123456 make e2e
+E2E_SERVER_URL=http://192.168.1.100:80 E2E_PASSWORD=123456 make e2e
 ```
 
 ### 2. Deploy Mode
 
-Test framework deploys GPUStack via Docker, then runs tests:
+Deploy GPUStack via Docker, then run tests:
 
 ```bash
-# Set test mode
-export E2E_TEST_MODE=deploy
-export E2E_DOCKER_IMAGE=gpustack/gpustack:dev
-
-# Run tests
-pytest e2e/tests -v -m installation
+E2E_DEPLOY=allinone make e2e
+E2E_DEPLOY=server make e2e
+E2E_DEPLOY=allinone E2E_IMAGE=gpustack/gpustack:v0.5 make e2e
 ```
 
 ## Tag System
@@ -111,66 +105,39 @@ pytest e2e/tests -v -m installation
 
 ## Quick Start
 
-### Show Help
-
 ```bash
-make e2e-help
-```
-
-### Run Tests Against Existing Server
-
-```bash
-# Run all tests (connects to http://localhost:80 by default)
+# Run all tests against existing server (localhost:80, password Admin@123)
 make e2e
 
-# Run smoke tests only
+# Custom password
+E2E_PASSWORD=123456 make e2e
+
+# Smoke tests only
 E2E_TAGS=smoke make e2e
 
-# Run model tests on NVIDIA GPU
+# Model tests on NVIDIA GPU
 E2E_TAGS=model E2E_GPU=nvidia make e2e
 
-# Run with custom server URL
-E2E_SERVER_URL=http://192.168.1.100:80 E2E_PASSWORD=mypassword make e2e
+# Deploy all-in-one via Docker, then test
+E2E_DEPLOY=allinone make e2e
 
-# Run provider tests
-E2E_TAGS=provider make e2e
+# Deploy with specific image
+E2E_DEPLOY=allinone E2E_IMAGE=gpustack/gpustack:v0.5 make e2e
 
-# Combine with extra pytest args
-E2E_TAGS=smoke E2E_ARGS="-k test_version" make e2e
-```
-
-### Test Docker Deployment
-
-```bash
-# Test all-in-one deployment (default)
-make e2e-deploy
-
-# Test server-only deployment
-E2E_DEPLOY_MODE=server make e2e-deploy
-
-# Test with specific image
-E2E_IMAGE=gpustack/gpustack:v0.5 make e2e-deploy
-
-# Test specific GPU type
-E2E_GPU=nvidia make e2e-deploy
-```
-
-### Cleanup
-
-```bash
-make e2e-cleanup
+# Extra pytest args
+E2E_ARGS="-k test_version" make e2e
 ```
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `E2E_SERVER_URL` | GPUStack Server URL | `http://localhost:80` |
+| `E2E_SERVER_URL` | GPUStack server URL | `http://localhost:80` |
 | `E2E_PASSWORD` | Admin password | `Admin@123` |
-| `E2E_IMAGE` | Docker image for deployment | `gpustack/gpustack:dev` |
-| `E2E_TAGS` | Pytest markers (smoke, model, provider, etc.) | - |
+| `E2E_TAGS` | Pytest markers (smoke, model, provider, route, stability) | - |
 | `E2E_GPU` | GPU type filter (nvidia, amd, ascend, cpu) | - |
-| `E2E_DEPLOY_MODE` | Deployment mode (allinone, server) | `allinone` |
+| `E2E_DEPLOY` | Deploy via Docker before testing (allinone, server) | - |
+| `E2E_IMAGE` | Docker image, used with `E2E_DEPLOY` | `gpustack/gpustack:dev` |
 | `E2E_ARGS` | Additional pytest arguments | - |
 
 ## Advanced Usage

@@ -8,10 +8,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "${ROOT_DIR}/hack/lib/init.sh"
 
 # E2E test configuration with defaults
-# GPUSTACK_SERVER_URL / GPUSTACK_ADMIN_PASSWORD are the canonical env vars.
-# E2E_SERVER_URL / E2E_PASSWORD are aliases for convenience.
-E2E_SERVER_URL="${E2E_SERVER_URL:-${GPUSTACK_SERVER_URL:-http://localhost:80}}"
-E2E_PASSWORD="${E2E_PASSWORD:-${GPUSTACK_ADMIN_PASSWORD:-Admin@123}}"
+E2E_SERVER_URL="${E2E_SERVER_URL:-http://localhost:80}"
+E2E_PASSWORD="${E2E_PASSWORD:-Admin@123}"
 E2E_IMAGE="${E2E_IMAGE:-gpustack/gpustack:dev}"
 E2E_TAGS="${E2E_TAGS:-}"
 E2E_GPU="${E2E_GPU:-}"
