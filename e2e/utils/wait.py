@@ -9,7 +9,7 @@ from .client import GPUStackClient
 logger = logging.getLogger(__name__)
 
 
-class TimeoutError(Exception):
+class WaitTimeoutError(Exception):
     """Wait timeout error."""
 
     pass
@@ -34,7 +34,7 @@ def wait_for_condition(
         Whether condition was met
 
     Raises:
-        TimeoutError: Timeout waiting for condition
+        WaitTimeoutError: Timeout waiting for condition
     """
     start_time = time.time()
     last_error = None
@@ -56,7 +56,7 @@ def wait_for_condition(
     error_msg = f"Timeout waiting for '{description}' after {elapsed:.1f}s"
     if last_error:
         error_msg += f" (last error: {last_error})"
-    raise TimeoutError(error_msg)
+    raise WaitTimeoutError(error_msg)
 
 
 def wait_for_model_ready(
@@ -78,7 +78,7 @@ def wait_for_model_ready(
         Ready model info
 
     Raises:
-        TimeoutError: Timeout waiting for model
+        WaitTimeoutError: Timeout waiting for model
         Exception: Model deployment failed
     """
     start_time = time.time()
@@ -117,7 +117,7 @@ def wait_for_model_ready(
 
         time.sleep(interval)
 
-    raise TimeoutError(
+    raise WaitTimeoutError(
         f"Timeout waiting for model {model_id} to be ready after {timeout}s"
     )
 
@@ -141,7 +141,7 @@ def wait_for_model_instance_ready(
         Ready instance info
 
     Raises:
-        TimeoutError: Timeout waiting for instance
+        WaitTimeoutError: Timeout waiting for instance
         Exception: Instance startup failed
     """
     start_time = time.time()
@@ -175,7 +175,7 @@ def wait_for_model_instance_ready(
 
         time.sleep(interval)
 
-    raise TimeoutError(
+    raise WaitTimeoutError(
         f"Timeout waiting for model instance {instance_id} to be ready after {timeout}s"
     )
 
@@ -199,7 +199,7 @@ def wait_for_worker_ready(
         Ready worker info
 
     Raises:
-        TimeoutError: Timeout waiting for worker
+        WaitTimeoutError: Timeout waiting for worker
         Exception: Worker startup failed
     """
     start_time = time.time()
@@ -229,7 +229,7 @@ def wait_for_worker_ready(
 
         time.sleep(interval)
 
-    raise TimeoutError(
+    raise WaitTimeoutError(
         f"Timeout waiting for worker {worker_id} to be ready after {timeout}s"
     )
 
@@ -253,7 +253,7 @@ def wait_for_model_deleted(
         Whether deletion succeeded
 
     Raises:
-        TimeoutError: Timeout waiting for deletion
+        WaitTimeoutError: Timeout waiting for deletion
     """
     start_time = time.time()
 
@@ -268,7 +268,7 @@ def wait_for_model_deleted(
                 return True
             raise
 
-    raise TimeoutError(
+    raise WaitTimeoutError(
         f"Timeout waiting for model {model_id} to be deleted after {timeout}s"
     )
 
@@ -292,7 +292,7 @@ def wait_for_worker_deleted(
         Whether deletion succeeded
 
     Raises:
-        TimeoutError: Timeout waiting for deletion
+        WaitTimeoutError: Timeout waiting for deletion
     """
     start_time = time.time()
 
@@ -307,7 +307,7 @@ def wait_for_worker_deleted(
                 return True
             raise
 
-    raise TimeoutError(
+    raise WaitTimeoutError(
         f"Timeout waiting for worker {worker_id} to be deleted after {timeout}s"
     )
 
@@ -329,7 +329,7 @@ def wait_for_server_healthy(
         Whether server is healthy
 
     Raises:
-        TimeoutError: Timeout waiting for server
+        WaitTimeoutError: Timeout waiting for server
     """
 
     def check_health():

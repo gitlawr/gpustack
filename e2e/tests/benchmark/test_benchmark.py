@@ -1,6 +1,6 @@
 """
-用例 16: Benchmark 功能验证
-用例 17: Grafana Dashboard 验证
+Test Case 16: Benchmark functionality verification
+Test Case 17: Grafana Dashboard verification
 """
 
 import time
@@ -14,7 +14,7 @@ from e2e.utils.models import ModelHelper
 @pytest.mark.benchmark
 @pytest.mark.nvidia
 class TestBenchmark:
-    """Benchmark 功能测试"""
+    """Benchmark functionality tests"""
 
     @pytest.fixture
     def deployed_model(
@@ -24,7 +24,7 @@ class TestBenchmark:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """部署用于 benchmark 的模型"""
+        """Deploy a model for benchmarking"""
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-benchmark-model",
@@ -39,7 +39,7 @@ class TestBenchmark:
         return model
 
     def test_list_benchmarks(self, gpustack_client: GPUStackClient):
-        """列出 Benchmarks"""
+        """List Benchmarks"""
         result = gpustack_client.list_benchmarks()
 
         assert "items" in result
@@ -51,7 +51,7 @@ class TestBenchmark:
         deployed_model,
         e2e_config: E2EConfig,
     ):
-        """创建 Benchmark"""
+        """Create a Benchmark"""
         benchmark = gpustack_client.create_benchmark(
             name="e2e-test-benchmark",
             model_id=deployed_model["id"],
@@ -60,7 +60,7 @@ class TestBenchmark:
         assert benchmark["id"] > 0
         assert benchmark["name"] == "e2e-test-benchmark"
 
-        # 清理
+        # Cleanup
         if e2e_config.test.cleanup:
             gpustack_client.delete_benchmark(benchmark["id"])
 
@@ -70,22 +70,22 @@ class TestBenchmark:
         deployed_model,
         e2e_config: E2EConfig,
     ):
-        """执行 Benchmark 并验证结果"""
+        """Execute a Benchmark and verify results"""
         benchmark = gpustack_client.create_benchmark(
             name="e2e-test-benchmark-exec",
             model_id=deployed_model["id"],
         )
 
         try:
-            # 等待 benchmark 完成（简化处理）
+            # Wait for benchmark to complete (simplified handling)
             time.sleep(30)
 
-            # 获取 benchmark 详情
+            # Get benchmark details
             result = gpustack_client.get_benchmark(benchmark["id"])
 
             assert result["id"] == benchmark["id"]
-            # 验证 benchmark 有结果数据
-            # 具体字段取决于 API 实现
+            # Verify benchmark has result data
+            # Specific fields depend on the API implementation
 
         finally:
             if e2e_config.test.cleanup:
@@ -97,7 +97,7 @@ class TestBenchmark:
         deployed_model,
         e2e_config: E2EConfig,
     ):
-        """验证 Benchmark 日志"""
+        """Verify Benchmark logs"""
         benchmark = gpustack_client.create_benchmark(
             name="e2e-test-benchmark-logs",
             model_id=deployed_model["id"],
@@ -106,7 +106,7 @@ class TestBenchmark:
         try:
             time.sleep(10)
 
-            # 获取 benchmark 详情应包含日志或状态信息
+            # Getting benchmark details should include logs or status information
             result = gpustack_client.get_benchmark(benchmark["id"])
             assert result is not None
 
@@ -118,28 +118,28 @@ class TestBenchmark:
 @pytest.mark.monitoring
 @pytest.mark.smoke
 class TestGrafanaDashboard:
-    """Grafana Dashboard 测试"""
+    """Grafana Dashboard tests"""
 
     def test_grafana_accessible(
         self,
         gpustack_client: GPUStackClient,
         e2e_config: E2EConfig,
     ):
-        """验证 Grafana 可访问"""
+        """Verify Grafana is accessible"""
         if not e2e_config.monitoring.grafana_url:
-            # 尝试通过 GPUStack 内置路径访问
+            # Try accessing via the GPUStack built-in path
             try:
-                # Grafana 通常通过 /grafana 路径代理
+                # Grafana is typically proxied via the /grafana path
                 response = gpustack_client._client.get("/grafana/api/health")
                 assert response.status_code in [200, 302, 401]
             except Exception:
                 pytest.skip("Grafana not accessible")
 
     def test_dashboard_data_available(self, gpustack_client: GPUStackClient):
-        """验证 Dashboard 数据可用"""
+        """Verify Dashboard data is available"""
         dashboard = gpustack_client.get_dashboard()
 
-        # 验证返回了一些数据
+        # Verify some data is returned
         assert dashboard is not None
 
     def test_model_dashboard_link(
@@ -149,7 +149,7 @@ class TestGrafanaDashboard:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """验证模型 Dashboard 链接"""
+        """Verify model Dashboard link"""
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-dashboard-link",
@@ -161,21 +161,21 @@ class TestGrafanaDashboard:
 
         cleanup_models.append(model["id"])
 
-        # 尝试获取 dashboard 链接
-        # 这通常是一个重定向端点
+        # Try to get the dashboard link
+        # This is typically a redirect endpoint
         try:
             response = gpustack_client._client.get(
                 f"/v2/models/{model['id']}/dashboard",
                 follow_redirects=False,
             )
-            # 应该返回重定向到 Grafana
+            # Should return a redirect to Grafana
             assert response.status_code in [200, 302, 307]
         except Exception:
-            # Dashboard 可能未配置
+            # Dashboard may not be configured
             pass
 
     def test_worker_dashboard_link(self, gpustack_client: GPUStackClient):
-        """验证 Worker Dashboard 链接"""
+        """Verify Worker Dashboard link"""
         result = gpustack_client.list_workers()
         workers = result.get("items", [])
 
@@ -194,7 +194,7 @@ class TestGrafanaDashboard:
             pass
 
     def test_cluster_dashboard_link(self, gpustack_client: GPUStackClient):
-        """验证 Cluster Dashboard 链接"""
+        """Verify Cluster Dashboard link"""
         cluster = gpustack_client.get_default_cluster()
 
         if not cluster:
@@ -212,18 +212,18 @@ class TestGrafanaDashboard:
 
 @pytest.mark.monitoring
 class TestPrometheus:
-    """Prometheus 监控测试"""
+    """Prometheus monitoring tests"""
 
     def test_prometheus_metrics_exposed(
         self,
         gpustack_client: GPUStackClient,
         e2e_config: E2EConfig,
     ):
-        """验证 Prometheus 指标暴露"""
+        """Verify Prometheus metrics are exposed"""
         try:
             response = gpustack_client._client.get("/metrics")
             if response.status_code == 200:
-                # 验证返回的是 Prometheus 格式
+                # Verify the response is in Prometheus format
                 content = response.text
                 assert "# HELP" in content or "# TYPE" in content
         except Exception:

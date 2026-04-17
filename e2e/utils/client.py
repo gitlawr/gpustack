@@ -76,7 +76,7 @@ class GPUStackClient:
         )
         if response.status_code != 200:
             raise GPUStackClientError(
-                f"Login failed: {response.text}",
+                f"Login failed ({self.base_url}): {response.text}",
                 status_code=response.status_code,
                 response=response,
             )

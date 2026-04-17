@@ -1,6 +1,6 @@
 """
-用例 3: 通过 DO 添加 Worker，部署/删除模型
-用例 4: 通过 K8s 添加 Worker，部署/删除模型
+Test Case 3: Add Worker via DigitalOcean, deploy/delete model
+Test Case 4: Add Worker via K8s, deploy/delete model
 """
 
 import time
@@ -15,11 +15,11 @@ from e2e.utils.k8s import K8sManager
 @pytest.mark.worker
 @pytest.mark.do_worker
 class TestDigitalOceanWorker:
-    """DigitalOcean Worker 测试"""
+    """DigitalOcean Worker tests"""
 
     @pytest.fixture
     def do_enabled(self, e2e_config: E2EConfig):
-        """检查 DO 是否启用"""
+        """Check if DigitalOcean is enabled"""
         if not e2e_config.worker.digitalocean.enabled:
             pytest.skip("DigitalOcean worker not enabled in config")
         if not e2e_config.worker.digitalocean.api_token:
@@ -31,8 +31,8 @@ class TestDigitalOceanWorker:
         e2e_config: E2EConfig,
         do_enabled,
     ):
-        """创建 DigitalOcean Cluster"""
-        # 首先创建云凭证
+        """Create a DigitalOcean Cluster"""
+        # First create cloud credential
         credential = gpustack_client.create_cloud_credential(
             name="e2e-do-credential",
             provider="DigitalOcean",
@@ -42,7 +42,7 @@ class TestDigitalOceanWorker:
         )
 
         try:
-            # 创建 Cluster
+            # Create Cluster
             cluster = gpustack_client.create_cluster(
                 name="e2e-do-cluster",
                 provider="DigitalOcean",
@@ -54,7 +54,7 @@ class TestDigitalOceanWorker:
             assert cluster["provider"] == "DigitalOcean"
 
         finally:
-            # 清理
+            # Cleanup
             if e2e_config.test.cleanup:
                 try:
                     gpustack_client.delete_cluster(cluster["id"])
@@ -70,8 +70,8 @@ class TestDigitalOceanWorker:
         do_enabled,
         cleanup_models,
     ):
-        """添加 DO Worker 并部署模型"""
-        # 这是一个完整的集成测试，需要真实的 DO 环境
+        """Add a DO Worker and deploy a model"""
+        # This is a full integration test that requires a real DO environment
         pytest.skip("Full DO integration test - requires manual setup")
 
     def test_delete_do_worker(
@@ -80,18 +80,18 @@ class TestDigitalOceanWorker:
         e2e_config: E2EConfig,
         do_enabled,
     ):
-        """删除 DO Worker"""
+        """Delete a DO Worker"""
         pytest.skip("Full DO integration test - requires manual setup")
 
 
 @pytest.mark.worker
 @pytest.mark.k8s_worker
 class TestKubernetesWorker:
-    """Kubernetes Worker 测试"""
+    """Kubernetes Worker tests"""
 
     @pytest.fixture
     def k8s_enabled(self, e2e_config: E2EConfig):
-        """检查 K8s 是否启用"""
+        """Check if K8s is enabled"""
         if not e2e_config.worker.kubernetes.enabled:
             pytest.skip("Kubernetes worker not enabled in config")
 
@@ -102,16 +102,16 @@ class TestKubernetesWorker:
         e2e_config: E2EConfig,
         k8s_enabled,
     ):
-        """创建 Kubernetes Cluster"""
-        # 获取默认 cluster
+        """Create a Kubernetes Cluster"""
+        # Get the default cluster
         default_cluster = gpustack_client.get_default_cluster()
         assert default_cluster is not None
 
-        # 获取注册 token
+        # Get registration token
         token_info = gpustack_client.get_registration_token(default_cluster["id"])
         assert "token" in token_info
 
-        # 获取 K8s 部署清单
+        # Get K8s deployment manifests
         manifests = gpustack_client.get_k8s_manifests(default_cluster["id"])
         assert manifests, "Empty K8s manifests"
         assert "kind:" in manifests.lower(), "Invalid K8s manifest format"
@@ -123,24 +123,24 @@ class TestKubernetesWorker:
         e2e_config: E2EConfig,
         k8s_enabled,
     ):
-        """部署 K8s Worker"""
-        # 获取默认 cluster
+        """Deploy a K8s Worker"""
+        # Get the default cluster
         default_cluster = gpustack_client.get_default_cluster()
 
-        # 获取 K8s 部署清单
+        # Get K8s deployment manifests
         manifests = gpustack_client.get_k8s_manifests(default_cluster["id"])
 
-        # 创建命名空间
+        # Create namespace
         k8s_manager.create_namespace()
 
         try:
-            # 应用清单
+            # Apply manifests
             k8s_manager.apply_manifest(manifests)
 
-            # 等待部署就绪
+            # Wait for deployment to be ready
             k8s_manager.wait_for_deployment_ready("gpustack-worker", timeout=300)
 
-            # 验证 Worker 注册
+            # Verify Worker registration
             time.sleep(30)
             result = gpustack_client.list_workers()
             workers = result.get("items", [])
@@ -161,8 +161,8 @@ class TestKubernetesWorker:
         k8s_enabled,
         cleanup_models,
     ):
-        """在 K8s Worker 上部署模型"""
-        # 确保有 K8s worker
+        """Deploy a model on a K8s Worker"""
+        # Ensure there is a K8s worker
         result = gpustack_client.list_workers()
         workers = result.get("items", [])
         k8s_workers = [w for w in workers if w.get("state") == "ready"]
@@ -170,7 +170,7 @@ class TestKubernetesWorker:
         if not k8s_workers:
             pytest.skip("No ready K8s workers available")
 
-        # 部署模型
+        # Deploy model
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-k8s-model",
@@ -182,7 +182,7 @@ class TestKubernetesWorker:
 
         cleanup_models.append(model["id"])
 
-        # 验证模型推理
+        # Verify model inference
         response = model_helper.verify_model_inference(model_name=model["name"])
         assert response["choices"][0]["message"]["content"]
 
@@ -193,8 +193,8 @@ class TestKubernetesWorker:
         e2e_config: E2EConfig,
         k8s_enabled,
     ):
-        """在 K8s Worker 上删除模型"""
-        # 部署模型
+        """Delete a model on a K8s Worker"""
+        # Deploy model
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-k8s-delete",
@@ -204,11 +204,11 @@ class TestKubernetesWorker:
             timeout=e2e_config.models.deploy_timeout,
         )
 
-        # 删除模型
+        # Delete model
         deleted = model_helper.delete_model_and_wait(model["id"])
         assert deleted, "Model deletion failed"
 
-        # 验证模型不存在
+        # Verify model no longer exists
         try:
             gpustack_client.get_model(model["id"])
             pytest.fail("Model should not exist after deletion")
@@ -218,17 +218,17 @@ class TestKubernetesWorker:
 
 @pytest.mark.worker
 class TestWorkerOperations:
-    """通用 Worker 操作测试"""
+    """General Worker operations tests"""
 
     def test_list_workers(self, gpustack_client: GPUStackClient):
-        """列出所有 Workers"""
+        """List all Workers"""
         result = gpustack_client.list_workers()
 
         assert "items" in result
         assert "pagination" in result
 
     def test_worker_status(self, gpustack_client: GPUStackClient):
-        """验证 Worker 状态信息"""
+        """Verify Worker status information"""
         result = gpustack_client.list_workers()
         workers = result.get("items", [])
 
@@ -237,13 +237,13 @@ class TestWorkerOperations:
 
         worker = workers[0]
 
-        # 验证必需字段
+        # Verify required fields
         assert "id" in worker
         assert "name" in worker
         assert "state" in worker
         assert "status" in worker
 
-        # 验证状态信息
+        # Verify status information
         status = worker["status"]
         if status:
             assert "cpu" in status or "memory" in status
@@ -253,7 +253,7 @@ class TestWorkerOperations:
         gpustack_client: GPUStackClient,
         e2e_config: E2EConfig,
     ):
-        """测试 Worker 维护模式"""
+        """Test Worker maintenance mode"""
         result = gpustack_client.list_workers()
         workers = result.get("items", [])
 
@@ -264,7 +264,7 @@ class TestWorkerOperations:
         worker_id = worker["id"]
 
         try:
-            # 启用维护模式
+            # Enable maintenance mode
             updated = gpustack_client.set_worker_maintenance(
                 worker_id,
                 enabled=True,
@@ -273,7 +273,7 @@ class TestWorkerOperations:
 
             assert updated["maintenance"]["enabled"] is True
 
-            # 禁用维护模式
+            # Disable maintenance mode
             updated = gpustack_client.set_worker_maintenance(
                 worker_id,
                 enabled=False,
@@ -282,5 +282,5 @@ class TestWorkerOperations:
             assert updated["maintenance"]["enabled"] is False
 
         finally:
-            # 确保恢复
+            # Ensure recovery
             gpustack_client.set_worker_maintenance(worker_id, enabled=False)

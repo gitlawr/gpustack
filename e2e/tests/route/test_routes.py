@@ -1,6 +1,6 @@
 """
-用例 21: 验证修改 Route 后模型访问正常
-用例 22: 验证 Fallback Route 生效
+Test Case 21: Verify model access works after modifying a Route
+Test Case 22: Verify Fallback Route takes effect
 """
 
 import pytest
@@ -13,7 +13,7 @@ from e2e.utils.models import ModelHelper
 @pytest.mark.route
 @pytest.mark.nvidia
 class TestRouteModification:
-    """Route 修改测试"""
+    """Route modification tests"""
 
     @pytest.fixture(scope="class")
     def deployed_model(
@@ -22,7 +22,7 @@ class TestRouteModification:
         model_helper: ModelHelper,
         e2e_config: E2EConfig,
     ):
-        """部署测试模型"""
+        """Deploy a test model"""
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-route-model",
@@ -30,7 +30,7 @@ class TestRouteModification:
             replicas=1,
             wait=True,
             timeout=e2e_config.models.deploy_timeout,
-            enable_model_route=False,  # 不自动创建 route
+            enable_model_route=False,  # Do not auto-create route
         )
 
         yield model
@@ -47,7 +47,7 @@ class TestRouteModification:
         deployed_model,
         cleanup_routes,
     ):
-        """创建模型 Route"""
+        """Create a model Route"""
         route = gpustack_client.create_model_route(
             name="e2e-test-route",
             categories=["llm"],
@@ -70,7 +70,7 @@ class TestRouteModification:
         deployed_model,
         cleanup_routes,
     ):
-        """通过 Route 访问模型"""
+        """Access a model via Route"""
         route = gpustack_client.create_model_route(
             name="e2e-test-route-access",
             categories=["llm"],
@@ -84,7 +84,7 @@ class TestRouteModification:
 
         cleanup_routes.append(route["id"])
 
-        # 通过 route 名称访问
+        # Access via route name
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Hello"}],
@@ -99,7 +99,7 @@ class TestRouteModification:
         deployed_model,
         cleanup_routes,
     ):
-        """修改 Route 权重"""
+        """Modify Route weight"""
         route = gpustack_client.create_model_route(
             name="e2e-test-route-modify",
             categories=["llm"],
@@ -116,7 +116,7 @@ class TestRouteModification:
         # Verify route detail is accessible
         gpustack_client.get_model_route(route["id"])
 
-        # 验证访问仍然正常
+        # Verify access still works
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Test after modification"}],
@@ -129,7 +129,7 @@ class TestRouteModification:
 @pytest.mark.route
 @pytest.mark.nvidia
 class TestFallbackRoute:
-    """Fallback Route 测试"""
+    """Fallback Route tests"""
 
     @pytest.fixture
     def openai_provider(
@@ -138,7 +138,7 @@ class TestFallbackRoute:
         e2e_config: E2EConfig,
         cleanup_providers,
     ):
-        """创建 OpenAI Provider 作为 fallback"""
+        """Create an OpenAI Provider as fallback"""
         if not e2e_config.providers.openai.enabled:
             pytest.skip("OpenAI provider required for fallback test")
 
@@ -166,8 +166,8 @@ class TestFallbackRoute:
         cleanup_models,
         cleanup_routes,
     ):
-        """创建带 Fallback 的 Route"""
-        # 部署本地模型
+        """Create a Route with Fallback"""
+        # Deploy local model
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-fallback-primary",
@@ -180,7 +180,7 @@ class TestFallbackRoute:
 
         cleanup_models.append(model["id"])
 
-        # 创建带 fallback 的 route
+        # Create route with fallback
         route = gpustack_client.create_model_route(
             name="e2e-test-fallback-route",
             categories=["llm"],
@@ -192,7 +192,7 @@ class TestFallbackRoute:
                 {
                     "provider_id": openai_provider["id"],
                     "provider_model_name": "gpt-4o-mini",
-                    "weight": 0,  # fallback 权重为 0
+                    "weight": 0,  # Fallback weight is 0
                     "fallback_status_codes": ["5xx", "429"],
                 },
             ],
@@ -211,7 +211,7 @@ class TestFallbackRoute:
         cleanup_models,
         cleanup_routes,
     ):
-        """正常情况下访问主模型"""
+        """Access the primary model under normal conditions"""
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-fallback-normal",
@@ -240,7 +240,7 @@ class TestFallbackRoute:
 
         cleanup_routes.append(route["id"])
 
-        # 正常访问应该使用主模型
+        # Normal access should use the primary model
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Hello"}],
@@ -256,11 +256,11 @@ class TestFallbackRoute:
         openai_provider,
         cleanup_routes,
     ):
-        """主模型不可用时触发 Fallback"""
-        # 创建一个不存在的模型 ID 作为主 target（会失败）
-        # 注意：这是一个设计测试场景，实际 GPUStack 可能有不同的行为
+        """Trigger Fallback when the primary model is unavailable"""
+        # Create a non-existent model ID as the primary target (will fail)
+        # Note: This is a designed test scenario; actual GPUStack may behave differently
 
-        # 创建只有 provider 的 route 作为简化测试
+        # Create a route with only the provider as a simplified test
         route = gpustack_client.create_model_route(
             name="e2e-test-fallback-only",
             categories=["llm"],
@@ -275,7 +275,7 @@ class TestFallbackRoute:
 
         cleanup_routes.append(route["id"])
 
-        # 验证可以访问
+        # Verify access works
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Fallback test"}],
@@ -287,14 +287,14 @@ class TestFallbackRoute:
 
 @pytest.mark.route
 class TestRouteAccessPolicy:
-    """Route 访问策略测试"""
+    """Route access policy tests"""
 
     def test_list_my_models(self, gpustack_client: GPUStackClient):
-        """获取当前用户可访问的模型"""
+        """Get models accessible to the current user"""
         result = gpustack_client._get("/v2/my-models")
 
         assert "items" in result
-        # admin 用户应该能看到所有模型
+        # Admin user should be able to see all models
 
     def test_route_categories(
         self,
@@ -304,8 +304,8 @@ class TestRouteAccessPolicy:
         cleanup_models,
         cleanup_routes,
     ):
-        """验证 Route 分类过滤"""
-        # 部署 LLM 模型
+        """Verify Route category filtering"""
+        # Deploy LLM model
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-route-category",
@@ -319,7 +319,7 @@ class TestRouteAccessPolicy:
 
         cleanup_models.append(model["id"])
 
-        # 创建 LLM 分类的 route
+        # Create a route with LLM category
         route = gpustack_client.create_model_route(
             name="e2e-test-llm-route",
             categories=["llm"],
@@ -328,7 +328,7 @@ class TestRouteAccessPolicy:
 
         cleanup_routes.append(route["id"])
 
-        # 按分类过滤
+        # Filter by category
         result = gpustack_client.list_model_routes(categories=["llm"])
         routes = result.get("items", [])
 

@@ -1,6 +1,6 @@
 """
-用例 9: vLLM 部署多模态模型（CUDA）- Z-Image-Turbo/Qwen3-tts-customvoice/Qwen3-ASR
-用例 10: vLLM 部署多模态模型（Ascend）
+Test Case 9: Deploy multimodal models with vLLM (CUDA) - Z-Image-Turbo/Qwen3-tts-customvoice/Qwen3-ASR
+Test Case 10: Deploy multimodal models with vLLM (Ascend)
 """
 
 import pytest
@@ -16,7 +16,7 @@ from e2e.utils.wait import wait_for_model_ready
 @pytest.mark.nvidia
 @pytest.mark.slow
 class TestMultimodalNVIDIA:
-    """NVIDIA GPU 多模态模型测试"""
+    """NVIDIA GPU multimodal model tests"""
 
     def test_deploy_image_model(
         self,
@@ -25,13 +25,13 @@ class TestMultimodalNVIDIA:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """部署图像生成模型 (Z-Image-Turbo)"""
+        """Deploy an image generation model (Z-Image-Turbo)"""
         model_name = e2e_config.models.multimodal.image
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}",
             source="huggingface",
-            huggingface_repo_id=model_name,  # 需要完整的 repo id
+            huggingface_repo_id=model_name,  # Requires full repo id
             backend="vLLM",
             categories=["image"],
             replicas=1,
@@ -39,7 +39,7 @@ class TestMultimodalNVIDIA:
 
         cleanup_models.append(model["id"])
 
-        # 等待模型就绪
+        # Wait for model to be ready
         model = wait_for_model_ready(
             gpustack_client,
             model["id"],
@@ -55,14 +55,14 @@ class TestMultimodalNVIDIA:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """部署 TTS 模型 (Qwen3-tts-customvoice)"""
+        """Deploy a TTS model (Qwen3-tts-customvoice)"""
         model_name = e2e_config.models.multimodal.tts
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}",
             source="huggingface",
             huggingface_repo_id=model_name,
-            backend="VoxBox",  # TTS 使用 VoxBox 后端
+            backend="VoxBox",  # TTS uses VoxBox backend
             categories=["text_to_speech"],
             replicas=1,
         )
@@ -83,10 +83,10 @@ class TestMultimodalNVIDIA:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """测试 TTS 推理"""
+        """Test TTS inference"""
         model_name = e2e_config.models.multimodal.tts
 
-        # 部署模型
+        # Deploy model
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}-inference",
             source="huggingface",
@@ -104,7 +104,7 @@ class TestMultimodalNVIDIA:
             timeout=e2e_config.models.deploy_timeout,
         )
 
-        # 测试 TTS
+        # Test TTS
         audio_content = gpustack_client.audio_speech(
             model=model["name"],
             input="Hello, this is a test of text to speech.",
@@ -120,14 +120,14 @@ class TestMultimodalNVIDIA:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """部署 ASR 模型 (Qwen3-ASR)"""
+        """Deploy an ASR model (Qwen3-ASR)"""
         model_name = e2e_config.models.multimodal.asr
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}",
             source="huggingface",
             huggingface_repo_id=model_name,
-            backend="VoxBox",  # ASR 使用 VoxBox 后端
+            backend="VoxBox",  # ASR uses VoxBox backend
             categories=["speech_to_text"],
             replicas=1,
         )
@@ -148,8 +148,8 @@ class TestMultimodalNVIDIA:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """测试 ASR 推理"""
-        # 需要准备音频测试文件
+        """Test ASR inference"""
+        # Requires an audio test file
         pytest.skip("ASR inference test requires audio test file")
 
 
@@ -158,7 +158,7 @@ class TestMultimodalNVIDIA:
 @pytest.mark.ascend
 @pytest.mark.slow
 class TestMultimodalAscend:
-    """昇腾 NPU 多模态模型测试"""
+    """Ascend NPU multimodal model tests"""
 
     def test_deploy_image_model_ascend(
         self,
@@ -166,7 +166,7 @@ class TestMultimodalAscend:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """在昇腾上部署图像模型"""
+        """Deploy an image model on Ascend"""
         model_name = e2e_config.models.multimodal.image
 
         model = gpustack_client.create_model(
@@ -194,7 +194,7 @@ class TestMultimodalAscend:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """在昇腾上部署 TTS 模型"""
+        """Deploy a TTS model on Ascend"""
         model_name = e2e_config.models.multimodal.tts
 
         model = gpustack_client.create_model(
@@ -222,7 +222,7 @@ class TestMultimodalAscend:
         e2e_config: E2EConfig,
         cleanup_models,
     ):
-        """在昇腾上部署 ASR 模型"""
+        """Deploy an ASR model on Ascend"""
         model_name = e2e_config.models.multimodal.asr
 
         model = gpustack_client.create_model(

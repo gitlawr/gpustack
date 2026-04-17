@@ -1,7 +1,7 @@
 """
-用例 18: 添加豆包 Provider
-用例 19: 添加通义千问 Provider
-用例 20: 添加 OpenAI Provider
+Test Case 18: Add Doubao Provider
+Test Case 19: Add Qwen Provider
+Test Case 20: Add OpenAI Provider
 """
 
 import pytest
@@ -12,11 +12,11 @@ from e2e.utils.config import E2EConfig
 
 @pytest.mark.provider
 class TestDoubaoProvider:
-    """豆包 Provider 测试"""
+    """Doubao Provider tests"""
 
     @pytest.fixture
     def doubao_enabled(self, e2e_config: E2EConfig):
-        """检查豆包配置"""
+        """Check Doubao configuration"""
         if not e2e_config.providers.doubao.enabled:
             pytest.skip("Doubao provider not enabled")
         if not e2e_config.providers.doubao.api_key:
@@ -29,7 +29,7 @@ class TestDoubaoProvider:
         doubao_enabled,
         cleanup_providers,
     ):
-        """创建豆包 Provider"""
+        """Create a Doubao Provider"""
         provider = gpustack_client.create_model_provider(
             name="e2e-test-doubao",
             config={
@@ -54,8 +54,8 @@ class TestDoubaoProvider:
         cleanup_providers,
         cleanup_routes,
     ):
-        """验证豆包模型访问"""
-        # 创建 Provider
+        """Verify Doubao model access"""
+        # Create Provider
         provider = gpustack_client.create_model_provider(
             name="e2e-test-doubao-access",
             config={"type": "doubao"},
@@ -65,7 +65,7 @@ class TestDoubaoProvider:
 
         cleanup_providers.append(provider["id"])
 
-        # 创建 Route
+        # Create Route
         route = gpustack_client.create_model_route(
             name="e2e-test-doubao-route",
             categories=["llm"],
@@ -80,7 +80,7 @@ class TestDoubaoProvider:
 
         cleanup_routes.append(route["id"])
 
-        # 测试推理
+        # Test inference
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Hello"}],
@@ -92,11 +92,11 @@ class TestDoubaoProvider:
 
 @pytest.mark.provider
 class TestQwenProvider:
-    """通义千问 Provider 测试"""
+    """Qwen Provider tests"""
 
     @pytest.fixture
     def qwen_enabled(self, e2e_config: E2EConfig):
-        """检查通义千问配置"""
+        """Check Qwen configuration"""
         if not e2e_config.providers.qwen.enabled:
             pytest.skip("Qwen provider not enabled")
         if not e2e_config.providers.qwen.api_key:
@@ -109,7 +109,7 @@ class TestQwenProvider:
         qwen_enabled,
         cleanup_providers,
     ):
-        """创建通义千问 Provider"""
+        """Create a Qwen Provider"""
         provider = gpustack_client.create_model_provider(
             name="e2e-test-qwen",
             config={
@@ -133,7 +133,7 @@ class TestQwenProvider:
         cleanup_providers,
         cleanup_routes,
     ):
-        """验证通义千问模型访问"""
+        """Verify Qwen model access"""
         provider = gpustack_client.create_model_provider(
             name="e2e-test-qwen-access",
             config={"type": "qwen"},
@@ -168,11 +168,11 @@ class TestQwenProvider:
 
 @pytest.mark.provider
 class TestOpenAIProvider:
-    """OpenAI Provider 测试"""
+    """OpenAI Provider tests"""
 
     @pytest.fixture
     def openai_enabled(self, e2e_config: E2EConfig):
-        """检查 OpenAI 配置"""
+        """Check OpenAI configuration"""
         if not e2e_config.providers.openai.enabled:
             pytest.skip("OpenAI provider not enabled")
         if not e2e_config.providers.openai.api_key:
@@ -185,7 +185,7 @@ class TestOpenAIProvider:
         openai_enabled,
         cleanup_providers,
     ):
-        """创建 OpenAI Provider"""
+        """Create an OpenAI Provider"""
         config = {"type": "openai"}
         if e2e_config.providers.openai.endpoint:
             config["openaiCustomUrl"] = e2e_config.providers.openai.endpoint
@@ -211,7 +211,7 @@ class TestOpenAIProvider:
         cleanup_providers,
         cleanup_routes,
     ):
-        """验证 OpenAI 模型访问"""
+        """Verify OpenAI model access"""
         config = {"type": "openai"}
         if e2e_config.providers.openai.endpoint:
             config["openaiCustomUrl"] = e2e_config.providers.openai.endpoint
@@ -253,7 +253,7 @@ class TestOpenAIProvider:
         e2e_config: E2EConfig,
         openai_enabled,
     ):
-        """测试 OpenAI 连接"""
+        """Test OpenAI connection"""
         config = {"type": "openai"}
         if e2e_config.providers.openai.endpoint:
             config["openaiCustomUrl"] = e2e_config.providers.openai.endpoint
@@ -264,5 +264,5 @@ class TestOpenAIProvider:
             api_tokens=[{"value": e2e_config.providers.openai.api_key}],
         )
 
-        # 测试应该成功或返回错误信息
+        # Test should succeed or return an error message
         assert result is not None

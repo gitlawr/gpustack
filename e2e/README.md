@@ -19,7 +19,6 @@ e2e/
 ├── conftest.py               # pytest fixtures and configuration
 ├── pytest.ini                # pytest configuration and markers
 ├── config.yaml.example       # Configuration example
-├── run_tests.sh              # Test runner script
 ├── utils/                    # Utility modules
 │   ├── __init__.py
 │   ├── client.py             # GPUStack API client
@@ -193,14 +192,6 @@ uv run pytest e2e/tests -v --html=e2e_report.html --self-contained-html
 
 # Generate JUnit XML report (for CI)
 uv run pytest e2e/tests -v --junitxml=e2e_results.xml
-```
-
-### Use Runner Script
-
-```bash
-./e2e/run_tests.sh --help
-./e2e/run_tests.sh --smoke --gpu nvidia
-./e2e/run_tests.sh --tags "model vllm" --report
 ```
 
 ## Test Case List
