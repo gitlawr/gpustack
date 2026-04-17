@@ -6,6 +6,7 @@ from gpustack.api.exceptions import (
     BadRequestException,
     InvalidException,
 )
+from gpustack.server.bus import event_bus
 
 router = APIRouter()
 
@@ -42,3 +43,9 @@ def get_memory_profile():
     top_stats = snapshot.statistics('lineno')
     result = [str(stat) for stat in top_stats[:20]]
     return {"top_memory_lines": result}
+
+
+@router.get("/event-bus")
+def get_event_bus_stats():
+    """Return EventBus subscriber stats for diagnosing streaming leaks."""
+    return event_bus.stats()

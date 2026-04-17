@@ -116,5 +116,22 @@ class EventBus:
             for subscriber in self.subscribers[topic]:
                 await subscriber.enqueue(event)
 
+    def stats(self) -> Dict[str, Any]:
+        """Return diagnostic stats for all topics and subscribers."""
+        result = {}
+        for topic, subs in self.subscribers.items():
+            result[topic] = {
+                "subscriber_count": len(subs),
+                "subscribers": [
+                    {
+                        "id": id(s),
+                        "queue_size": s.queue.qsize(),
+                        "latest_by_key_size": len(s.latest_by_key),
+                    }
+                    for s in subs
+                ],
+            }
+        return result
+
 
 event_bus = EventBus()
