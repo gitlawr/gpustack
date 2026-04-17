@@ -8,6 +8,7 @@ These tests deploy GPUStack via Docker and verify the deployment process.
 Run with: pytest e2e/tests/installation/test_deployment.py -v
 """
 
+import logging
 import time
 import pytest
 
@@ -16,6 +17,21 @@ from e2e.utils.config import E2EConfig
 from e2e.utils.docker import DockerManager
 from e2e.utils.wait import wait_for_server_healthy, wait_for_any_worker_ready
 from e2e.utils.models import ModelHelper
+
+logger = logging.getLogger(__name__)
+
+
+def _dump_container_logs(docker_manager: DockerManager, container_name: str):
+    """Dump container logs for debugging."""
+    try:
+        logs = docker_manager.get_container_logs(container_name, tail=100)
+        logger.error(
+            "=== Container logs (%s) ===\n%s\n=== End logs ===",
+            container_name,
+            logs,
+        )
+    except Exception as e:
+        logger.error("Failed to get container logs for %s: %s", container_name, e)
 
 
 @pytest.mark.installation
@@ -32,34 +48,45 @@ class TestAllinoneDeployment:
     """
 
     @pytest.fixture(scope="class")
-    def deployment(self, docker_manager: DockerManager, e2e_config: E2EConfig):
+    def deployment(self, request, docker_manager: DockerManager, e2e_config: E2EConfig):
         """Deploy GPUStack in all-in-one mode."""
-        # Clean up any existing containers
         docker_manager.cleanup_all()
 
         password = e2e_config.docker.bootstrap_password
+        container_name = docker_manager._get_container_name("allinone")
 
-        # Start all-in-one container
         container_id = docker_manager.run_allinone(
             bootstrap_password=password,
             debug=True,
             disable_update_check=True,
         )
 
-        # Wait for startup
         time.sleep(e2e_config.docker.startup_wait)
 
         server_url = docker_manager.get_server_url()
 
         yield {
             "container_id": container_id,
-            "container_name": docker_manager._get_container_name("allinone"),
+            "container_name": container_name,
             "server_url": server_url,
             "password": password,
         }
 
-        # Cleanup
-        if e2e_config.test.cleanup:
+        # On failure, dump logs and skip cleanup for debugging
+        failed = any(
+            item.rep_call.failed
+            for item in request.node.items
+            if hasattr(item, "rep_call")
+        )
+        if failed:
+            _dump_container_logs(docker_manager, container_name)
+            logger.warning(
+                "Tests failed — container '%s' kept for debugging. "
+                "Run 'docker rm -f %s' to clean up manually.",
+                container_name,
+                container_name,
+            )
+        elif e2e_config.test.cleanup:
             docker_manager.cleanup_all()
 
     def test_container_running(self, deployment, docker_manager: DockerManager):
@@ -78,7 +105,6 @@ class TestAllinoneDeployment:
         with client:
             wait_for_server_healthy(client, timeout=120)
 
-            # Verify version endpoint works
             version = client.get_version()
             assert "version" in version
 
@@ -108,14 +134,12 @@ class TestAllinoneDeployment:
 
             assert len(workers) > 0, "No workers found"
 
-            # Check for GPU in worker status
             worker = workers[0]
             status = worker.get("status", {})
             gpu_devices = status.get("gpu_devices", [])
 
             assert len(gpu_devices) > 0, "No GPU detected on worker"
 
-            # Verify it's NVIDIA
             gpu = gpu_devices[0]
             assert (
                 gpu.get("vendor") == "nvidia"
@@ -134,13 +158,13 @@ class TestServerOnlyDeployment:
     """
 
     @pytest.fixture(scope="class")
-    def deployment(self, docker_manager: DockerManager, e2e_config: E2EConfig):
+    def deployment(self, request, docker_manager: DockerManager, e2e_config: E2EConfig):
         """Deploy GPUStack in server-only mode."""
         docker_manager.cleanup_all()
 
         password = e2e_config.docker.bootstrap_password
+        container_name = docker_manager._get_container_name("server")
 
-        # Start server-only container (no GPU, no worker)
         container_id = docker_manager.run_server_only(
             bootstrap_password=password,
             debug=True,
@@ -153,12 +177,25 @@ class TestServerOnlyDeployment:
 
         yield {
             "container_id": container_id,
-            "container_name": docker_manager._get_container_name("server"),
+            "container_name": container_name,
             "server_url": server_url,
             "password": password,
         }
 
-        if e2e_config.test.cleanup:
+        failed = any(
+            item.rep_call.failed
+            for item in request.node.items
+            if hasattr(item, "rep_call")
+        )
+        if failed:
+            _dump_container_logs(docker_manager, container_name)
+            logger.warning(
+                "Tests failed — container '%s' kept for debugging. "
+                "Run 'docker rm -f %s' to clean up manually.",
+                container_name,
+                container_name,
+            )
+        elif e2e_config.test.cleanup:
             docker_manager.cleanup_all()
 
     def test_container_running(self, deployment, docker_manager: DockerManager):
@@ -188,7 +225,6 @@ class TestServerOnlyDeployment:
             result = client.list_workers()
             workers = result.get("items", [])
 
-            # Server-only mode should have no ready workers
             ready_workers = [w for w in workers if w.get("state") == "ready"]
             assert (
                 len(ready_workers) == 0
@@ -202,11 +238,12 @@ class TestModelDeployAfterInstall:
     """Test model deployment after fresh installation."""
 
     @pytest.fixture(scope="class")
-    def deployment(self, docker_manager: DockerManager, e2e_config: E2EConfig):
+    def deployment(self, request, docker_manager: DockerManager, e2e_config: E2EConfig):
         """Deploy GPUStack and prepare for model deployment test."""
         docker_manager.cleanup_all()
 
         password = e2e_config.docker.bootstrap_password
+        container_name = docker_manager._get_container_name("allinone")
 
         docker_manager.run_allinone(
             bootstrap_password=password,
@@ -220,7 +257,6 @@ class TestModelDeployAfterInstall:
         client = GPUStackClient(base_url=server_url, admin_password=password)
         with client:
             wait_for_server_healthy(client, timeout=120)
-            # Wait for at least one worker to be ready
             wait_for_any_worker_ready(client, timeout=120)
 
         yield {
@@ -228,7 +264,20 @@ class TestModelDeployAfterInstall:
             "password": password,
         }
 
-        if e2e_config.test.cleanup:
+        failed = any(
+            item.rep_call.failed
+            for item in request.node.items
+            if hasattr(item, "rep_call")
+        )
+        if failed:
+            _dump_container_logs(docker_manager, container_name)
+            logger.warning(
+                "Tests failed — container '%s' kept for debugging. "
+                "Run 'docker rm -f %s' to clean up manually.",
+                container_name,
+                container_name,
+            )
+        elif e2e_config.test.cleanup:
             docker_manager.cleanup_all()
 
     def test_deploy_model_from_catalog(self, deployment, e2e_config: E2EConfig):
@@ -241,7 +290,6 @@ class TestModelDeployAfterInstall:
         with client:
             helper = ModelHelper(client)
 
-            # Deploy a small model
             model = helper.deploy_huggingface_model(
                 repo_id=e2e_config.models.default_model,
                 name="e2e-install-test-model",
@@ -253,14 +301,12 @@ class TestModelDeployAfterInstall:
 
             assert model["ready_replicas"] >= 1, "Model not ready"
 
-            # Verify inference works
             response = helper.verify_model_inference(
                 model_name=model["name"],
                 prompt="Hello",
             )
             assert response["choices"][0]["message"]["content"]
 
-            # Cleanup
             if e2e_config.test.cleanup:
                 client.delete_model(model["id"])
 
