@@ -1,0 +1,134 @@
+# GPUStack E2E Test Configuration Example
+# Copy to config.yaml and modify according to your environment
+
+# =============================================================================
+# Test Mode:
+# 
+# 1. Connect mode (connect) - Default
+#    - Connect to an existing GPUStack deployment
+#    - Configure server.url and credentials
+#    - Suitable for daily functional regression tests
+#
+# 2. Deploy mode (deploy)
+#    - Test framework deploys GPUStack via Docker
+#    - Used for testing installation/deployment process
+#    - Requires docker section configuration
+# =============================================================================
+
+# Test mode: connect (existing environment) or deploy (auto deployment)
+test_mode: "connect"
+
+# GPUStack Server configuration (used in connect mode)
+server:
+  # Server URL
+  url: "http://localhost:80"
+  # Admin password
+  admin_password: "Admin@123"
+  # API Key (optional, takes priority over password)
+  api_key: ""
+  # Request timeout (seconds)
+  timeout: 30
+  # Verify SSL certificate
+  verify_ssl: false
+
+# Docker deployment configuration (used in deploy mode)
+docker:
+  # GPUStack image
+  image: "gpustack/gpustack:dev"
+  # Container name prefix
+  container_prefix: "gpustack-e2e"
+  # Cache directory (host path)
+  cache_dir: "/tmp/gpustack-e2e/cache"
+  # GPU runtime: nvidia, or empty to disable GPU
+  runtime: "nvidia"
+  # Use sudo for docker commands
+  use_sudo: false
+  # Bootstrap password
+  bootstrap_password: "Admin@123"
+  # Wait time after deployment (seconds)
+  startup_wait: 30
+
+# GPU environment configuration
+gpu:
+  # GPU type: nvidia, amd, ascend, cpu
+  type: "nvidia"
+  # GPU count (for distributed tests)
+  count: 1
+  # Minimum VRAM requirement (GB)
+  min_memory_gb: 8
+
+# Model configuration
+models:
+  # Default test model (small model for fast testing)
+  default_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  # Model deployment timeout (seconds)
+  deploy_timeout: 600
+  # Model inference timeout (seconds)
+  inference_timeout: 60
+  
+  # Multimodal test models
+  multimodal:
+    image: "Z-Image-Turbo"
+    tts: "Qwen3-tts-customvoice"
+    asr: "Qwen3-ASR"
+
+# Worker configuration
+worker:
+  # DigitalOcean configuration
+  digitalocean:
+    enabled: false
+    api_token: ""
+    region: "nyc1"
+    size: "g-2vcpu-8gb"
+    
+  # Kubernetes configuration
+  kubernetes:
+    enabled: false
+    kubeconfig: "~/.kube/config"
+    namespace: "gpustack"
+
+# Provider configuration (for provider tests)
+providers:
+  doubao:
+    enabled: false
+    api_key: ""
+  
+  qwen:
+    enabled: false
+    api_key: ""
+  
+  openai:
+    enabled: false
+    api_key: ""
+    endpoint: "https://api.openai.com/v1"
+
+# Upgrade test configuration
+upgrade:
+  # Version before upgrade
+  from_version: "2.0.3"
+  # Version after upgrade
+  to_version: "2.1.2rc"
+  # Old version image
+  from_image: "gpustack/gpustack:v2.0.3"
+  # New version image
+  to_image: "gpustack/gpustack:v2.1.2rc"
+
+# Test behavior configuration
+test:
+  # Clean up resources after tests
+  cleanup: true
+  # Retry count
+  retry_count: 2
+  # Retry interval (seconds)
+  retry_interval: 10
+  # Artifacts directory for logs/screenshots
+  artifacts_dir: "./e2e-artifacts"
+  # Save logs on test failure
+  save_logs_on_failure: true
+
+# Monitoring configuration
+monitoring:
+  # Grafana URL (for dashboard verification)
+  grafana_url: ""
+  # Prometheus URL
+  prometheus_url: ""
