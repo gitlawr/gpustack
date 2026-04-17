@@ -19,6 +19,20 @@ class ModelHelper:
             client: GPUStack client
         """
         self.client = client
+        self._default_cluster_id = None
+
+    def _get_default_cluster_id(self) -> int:
+        """Get the default cluster ID, cached after first call."""
+        if self._default_cluster_id is None:
+            cluster = self.client.get_default_cluster()
+            if cluster is None:
+                raise RuntimeError(
+                    "No default cluster found. "
+                    "Ensure the server is fully initialized before creating models."
+                )
+            self._default_cluster_id = cluster["id"]
+            logger.info(f"Using default cluster ID: {self._default_cluster_id}")
+        return self._default_cluster_id
 
     def deploy_model_from_catalog(
         self,
@@ -60,6 +74,7 @@ class ModelHelper:
             "replicas": replicas,
             "backend": backend,
             "categories": catalog_model.get("categories", ["llm"]),
+            "cluster_id": self._get_default_cluster_id(),
         }
 
         # Get model source info from catalog
@@ -124,6 +139,7 @@ class ModelHelper:
             "backend": backend,
             "replicas": replicas,
             "categories": categories,
+            "cluster_id": self._get_default_cluster_id(),
         }
 
         if filename:
