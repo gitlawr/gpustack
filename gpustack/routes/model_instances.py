@@ -35,6 +35,7 @@ router = APIRouter()
 
 @router.get("", response_model=ModelInstancesPublic)
 async def get_model_instances(
+    request: Request,
     params: ListParamsDep,
     id: Optional[int] = None,
     model_id: Optional[int] = None,
@@ -56,7 +57,7 @@ async def get_model_instances(
 
     if params.watch:
         return StreamingResponse(
-            ModelInstance.streaming(fields=fields),
+            ModelInstance.streaming(fields=fields, request=request),
             media_type="text/event-stream",
         )
 

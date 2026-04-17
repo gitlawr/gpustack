@@ -69,6 +69,7 @@ class ModelStateFilterEnum(str, Enum):
 
 @router.get("", response_model=ModelsPublic)
 async def get_models(
+    request: Request,
     params: ModelListParams = Depends(),
     state: Optional[ModelStateFilterEnum] = Query(
         default=None,
@@ -96,6 +97,7 @@ async def get_models(
                 fields=fields,
                 fuzzy_fields=fuzzy_fields,
                 filter_func=lambda data: categories_filter(data, categories),
+                request=request,
             ),
             media_type="text/event-stream",
         )
@@ -192,11 +194,11 @@ async def _get_model(
 
 
 @router.get("/{id}/instances", response_model=ModelInstancesPublic)
-async def get_model_instances(id: int, params: ListParamsDep):
+async def get_model_instances(request: Request, id: int, params: ListParamsDep):
     if params.watch:
         fields = {"model_id": id}
         return StreamingResponse(
-            ModelInstance.streaming(fields=fields),
+            ModelInstance.streaming(fields=fields, request=request),
             media_type="text/event-stream",
         )
 

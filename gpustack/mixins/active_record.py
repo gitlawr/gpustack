@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import FlushError
 from sqlalchemy.orm.state import InstanceState
+from fastapi import Request
 from gpustack.schemas.common import PaginatedList, Pagination
 from gpustack.server.bus import Event, EventType, event_bus
 from gpustack.server.cache import locked_cached, delete_cache_by_key, class_key
@@ -745,7 +746,10 @@ class ActiveRecordMixin:
 
     @classmethod
     async def subscribe(
-        cls, source: str, options: Optional[List] = None
+        cls,
+        source: str,
+        options: Optional[List] = None,
+        request: Optional[Request] = None,
     ) -> AsyncGenerator[Event, None]:
         topic = cls.__name__.lower()
         subscriber = event_bus.subscribe(cls.__name__.lower())
@@ -766,6 +770,20 @@ class ActiveRecordMixin:
 
         try:
             while True:
+                # Detect client disconnect (works when not behind buffering proxy)
+                if request is not None:
+                    try:
+                        if await request.is_disconnected():
+                            logger.info(
+                                "client disconnected, source=%s topic=%s subscriber=%s",
+                                source,
+                                topic,
+                                id(subscriber),
+                            )
+                            break
+                    except Exception:
+                        pass
+
                 try:
                     event = await asyncio.wait_for(
                         subscriber.receive(), timeout=heartbeat_interval.total_seconds()
@@ -780,6 +798,12 @@ class ActiveRecordMixin:
                         last_event_time = datetime.now(timezone.utc)
         finally:
             event_bus.unsubscribe(cls.__name__.lower(), subscriber)
+            logger.info(
+                "unsubscribed, source=%s topic=%s subscriber=%s",
+                source,
+                topic,
+                id(subscriber),
+            )
 
     @classmethod
     async def streaming(
@@ -788,6 +812,7 @@ class ActiveRecordMixin:
         fuzzy_fields: Optional[dict] = None,
         filter_func: Optional[Callable[[Any], bool]] = None,
         options: Optional[List] = None,
+        request: Optional[Request] = None,
     ) -> AsyncGenerator[str, None]:
         """Stream events matching the given criteria as JSON strings.
 
@@ -796,9 +821,12 @@ class ActiveRecordMixin:
             fuzzy_fields: Fuzzy match filters
             filter_func: Optional filter function to apply to event data
             options: SQLAlchemy options for eager loading relationships (e.g., selectinload)
+            request: Optional HTTP request for disconnect detection
         """
         try:
-            async for event in cls.subscribe(source="streaming", options=options):
+            async for event in cls.subscribe(
+                source="streaming", options=options, request=request
+            ):
                 if event.type == EventType.HEARTBEAT:
                     yield "\n\n"
                     continue

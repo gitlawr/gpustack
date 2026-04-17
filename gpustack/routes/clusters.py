@@ -64,6 +64,7 @@ def get_server_url(request: Request, cluster_override: Optional[str]) -> str:
 
 @router.get("", response_model=ClustersPublic, response_model_exclude_none=True)
 async def get_clusters(
+    request: Request,
     session: SessionDep,
     params: ClusterListParams = Depends(),
     name: str = None,
@@ -83,6 +84,7 @@ async def get_clusters(
                 fields=fields,
                 fuzzy_fields=fuzzy_fields,
                 options=CLUSTER_LOAD_OPTIONS,
+                request=request,
             ),
             media_type="text/event-stream",
         )

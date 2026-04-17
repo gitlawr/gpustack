@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import secrets
 from typing import Optional
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import selectinload
 from sqlmodel import col
@@ -56,6 +56,7 @@ def _is_system_api_key(api_key: ApiKey) -> bool:
 
 @router.get("", response_model=ApiKeysPublic)
 async def get_api_keys(
+    request: Request,
     session: SessionDep,
     user: CurrentUserDep,
     params: ApiKeyListParams = Depends(),
@@ -87,6 +88,7 @@ async def get_api_keys(
                 fuzzy_fields=fuzzy_fields,
                 filter_func=lambda api_key: not _is_system_api_key(api_key),
                 options=[selectinload(ApiKey.user)],
+                request=request,
             ),
             media_type="text/event-stream",
         )

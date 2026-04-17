@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import selectinload
 
@@ -23,6 +23,7 @@ router = APIRouter()
 
 @router.get("", response_model=WorkerPoolsPublic)
 async def list(
+    request: Request,
     params: ListParamsDep,
     name: str = None,
     search: str = None,
@@ -46,6 +47,7 @@ async def list(
                 fields=fields,
                 fuzzy_fields=fuzzy_fields,
                 options=WORKER_POOL_LOAD_OPTIONS,
+                request=request,
             ),
             media_type="text/event-stream",
         )

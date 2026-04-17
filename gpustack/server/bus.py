@@ -70,20 +70,29 @@ class Subscriber:
                     self.latest_by_key[event.id] = event
                     return
                 self.latest_by_key[event.id] = event
-
-            try:
-                self.queue.put_nowait(event)
-            except asyncio.QueueFull:
-                # If the queue is full, skip adding the event, relying on latest_by_key, could receive it later
-                logger.warning(
-                    "Subscriber:%s queue full, skipping UPDATED event for id=%s",
-                    id(self),
-                    event.id,
-                )
+                try:
+                    self.queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    # Remove from latest_by_key to prevent orphaned entries that
+                    # can never be consumed (no corresponding queue sentinel).
+                    self.latest_by_key.pop(event.id, None)
+                    logger.warning(
+                        "Subscriber:%s queue full, dropping UPDATED event for id=%s",
+                        id(self),
+                        event.id,
+                    )
             return
 
-        # For other event types, enqueue directly
-        await self.queue.put(event)
+        # For other event types, use non-blocking put to avoid blocking
+        # publish() indefinitely when a subscriber is slow or dead.
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.warning(
+                "Subscriber:%s queue full, dropping %s event",
+                id(self),
+                event.type,
+            )
 
     async def receive(self) -> Any:
         event = await self.queue.get()

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from gpustack.api.exceptions import (
@@ -27,6 +27,7 @@ router = APIRouter()
 
 @router.get("", response_model=UsersPublic)
 async def get_users(
+    request: Request,
     params: UserListParams = Depends(),
     search: str = None,
 ):
@@ -36,7 +37,7 @@ async def get_users(
 
     if params.watch:
         return StreamingResponse(
-            User.streaming(fuzzy_fields=fuzzy_fields),
+            User.streaming(fuzzy_fields=fuzzy_fields, request=request),
             media_type="text/event-stream",
         )
 

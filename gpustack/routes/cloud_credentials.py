@@ -27,6 +27,7 @@ router = APIRouter()
 
 @router.get("", response_model=CloudCredentialsPublic)
 async def list(
+    request: Request,
     params: CloudCredentialListParams = Depends(),
     name: str = None,
     search: str = None,
@@ -41,7 +42,9 @@ async def list(
 
     if params.watch:
         return StreamingResponse(
-            CloudCredential.streaming(fields=fields, fuzzy_fields=fuzzy_fields),
+            CloudCredential.streaming(
+                fields=fields, fuzzy_fields=fuzzy_fields, request=request
+            ),
             media_type="text/event-stream",
         )
 

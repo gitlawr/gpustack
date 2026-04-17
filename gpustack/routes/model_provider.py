@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime, timezone
 from sqlalchemy.orm import selectinload
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from gpustack.schemas.model_provider import (
     MaskedAPIToken,
@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 @router.get("", response_model=ModelProvidersPublic, response_model_exclude_none=True)
 async def get_model_providers(
+    request: Request,
     params: ModelProviderListParams = Depends(),
     name: str = None,
     search: str = None,
@@ -55,7 +56,9 @@ async def get_model_providers(
 
     if params.watch:
         return StreamingResponse(
-            ModelProvider.streaming(fields=fields, fuzzy_fields=fuzzy_fields),
+            ModelProvider.streaming(
+                fields=fields, fuzzy_fields=fuzzy_fields, request=request
+            ),
             media_type="text/event-stream",
         )
 

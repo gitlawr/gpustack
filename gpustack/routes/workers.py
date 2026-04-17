@@ -74,6 +74,7 @@ def to_worker_public(input: Worker, me: bool) -> WorkerPublic:
 
 @router.get("", response_model=WorkersPublic)
 async def get_workers(
+    request: Request,
     user: CurrentUserDep,
     params: WorkerListParams = Depends(),
     name: str = None,
@@ -96,7 +97,7 @@ async def get_workers(
 
     if params.watch:
         return StreamingResponse(
-            Worker.streaming(fields=fields, fuzzy_fields=fuzzy_fields),
+            Worker.streaming(fields=fields, fuzzy_fields=fuzzy_fields, request=request),
             media_type="text/event-stream",
         )
     if me and user.worker is not None:

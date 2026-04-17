@@ -107,3 +107,8 @@ class StreamingResponseWithStatusCode(StreamingResponse):
                     "more_body": False,
                 }
             )
+        finally:
+            # Ensure the async generator is properly closed to prevent
+            # resource leaks (e.g., aiohttp response contexts held open).
+            if hasattr(self.body_iterator, 'aclose'):
+                await self.body_iterator.aclose()

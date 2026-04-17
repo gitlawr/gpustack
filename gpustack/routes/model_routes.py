@@ -4,7 +4,7 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import col, or_
 from sqlmodel.ext.asyncio.session import AsyncSession
 from typing import List, Optional, Tuple, Union, Dict
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from gpustack.schemas.model_routes import (
     ModelRoute,
@@ -55,12 +55,14 @@ my_models_router = APIRouter()
 
 @router.get("", response_model=ModelRoutesPublic, response_model_exclude_none=True)
 async def get_model_routes(
+    request: Request,
     params: ModelRouteListParams = Depends(),
     name: str = None,
     search: str = None,
     categories: Optional[List[str]] = Query(None, description="Filter by categories."),
 ):
     return await _get_model_routes(
+        request=request,
         params=params,
         name=name,
         search=search,
@@ -69,6 +71,7 @@ async def get_model_routes(
 
 
 async def _get_model_routes(
+    request: Request,
     params: ModelRouteListParams,
     name: str = None,
     search: str = None,
@@ -93,6 +96,7 @@ async def _get_model_routes(
                 fields=fields,
                 fuzzy_fields=fuzzy_fields,
                 filter_func=lambda data: categories_filter(data, categories),
+                request=request,
             ),
             media_type="text/event-stream",
         )
@@ -500,6 +504,7 @@ def validate_provider_model_name(
     "", response_model=ModelRouteTargetsPublic, response_model_exclude_none=True
 )
 async def get_model_route_targets(
+    request: Request,
     session: SessionDep,
     params: ModelRouteTargetListParams = Depends(),
     name: str = None,
@@ -526,7 +531,9 @@ async def get_model_route_targets(
 
     if params.watch:
         return StreamingResponse(
-            ModelRouteTarget.streaming(fields=fields, fuzzy_fields=fuzzy_fields),
+            ModelRouteTarget.streaming(
+                fields=fields, fuzzy_fields=fuzzy_fields, request=request
+            ),
             media_type="text/event-stream",
         )
 
@@ -711,6 +718,7 @@ async def add_model_authorization(
 
 @my_models_router.get("", response_model=ModelRoutesPublic)
 async def get_my_models(
+    request: Request,
     user: CurrentUserDep,
     params: ModelRouteListParams = Depends(),
     search: str = None,
@@ -723,6 +731,7 @@ async def get_my_models(
         user_id = user.id
 
     return await _get_model_routes(
+        request=request,
         params=params,
         search=search,
         categories=categories,

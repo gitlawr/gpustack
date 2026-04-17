@@ -60,6 +60,7 @@ router = APIRouter()
 
 @router.get("", response_model=BenchmarksPublic)
 async def get_benchmarks(
+    request: Request,
     params: BenchmarkListParams = Depends(),
     search: str = None,
     state: Optional[BenchmarkStateEnum] = Query(
@@ -72,6 +73,7 @@ async def get_benchmarks(
     profile: Optional[str] = Query(None, description="Filter by profile."),
 ):
     return await _get_benchmarks(
+        request=request,
         params=params,
         state=state,
         search=search,
@@ -93,6 +95,7 @@ def gpu_summary_filter(data: Benchmark, gpu_summary: Optional[str]) -> bool:
 
 
 async def _get_benchmarks(
+    request: Request,
     params: BenchmarkListParams,
     search: str = None,
     state: Optional[BenchmarkStateEnum] = None,
@@ -130,6 +133,7 @@ async def _get_benchmarks(
                 fields=fields,
                 fuzzy_fields=fuzzy_fields,
                 filter_func=lambda data: gpu_summary_filter(data, gpu_summary),
+                request=request,
             ),
             media_type="text/event-stream",
         )

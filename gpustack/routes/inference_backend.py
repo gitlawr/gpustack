@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import List, Tuple, Optional, Dict
 
 import yaml
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Request
 from gpustack_runner.runner import ServiceVersionedRunner, ServiceRunner
 from gpustack_runtime.deployer.__utils__ import compare_versions
 from pydantic import ValidationError
@@ -586,6 +586,7 @@ def _filter_community_backends(
 
 @router.get("", response_model=InferenceBackendsPublic)
 async def get_inference_backends(  # noqa: C901
+    request: Request,
     session: SessionDep,
     params: ListParamsDep,
     search: str = None,
@@ -611,7 +612,7 @@ async def get_inference_backends(  # noqa: C901
 
     if params.watch:
         return StreamingResponse(
-            InferenceBackend.streaming(fields=fields),
+            InferenceBackend.streaming(fields=fields, request=request),
             media_type="text/event-stream",
         )
 

@@ -1,5 +1,5 @@
 from typing import Optional
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlmodel import String, cast, func, or_
 from pathlib import Path
@@ -28,6 +28,7 @@ router = APIRouter()
 
 @router.get("", response_model=ModelFilesPublic)
 async def get_model_files(
+    request: Request,
     params: ModelFileListParams = Depends(),
     search: str = None,
     worker_id: int = None,
@@ -47,6 +48,7 @@ async def get_model_files(
             ModelFile.streaming(
                 fields=fields,
                 filter_func=get_filter_func(search),
+                request=request,
             ),
             media_type="text/event-stream",
         )
