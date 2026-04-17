@@ -341,3 +341,43 @@ def wait_for_server_healthy(
         interval=interval,
         description="server healthy",
     )
+
+
+def wait_for_any_worker_ready(
+    client: GPUStackClient,
+    timeout: int = 120,
+    interval: int = 10,
+) -> dict:
+    """
+    Wait for at least one worker to be ready.
+
+    Args:
+        client: GPUStack client
+        timeout: Timeout in seconds
+        interval: Check interval in seconds
+
+    Returns:
+        First ready worker info
+
+    Raises:
+        WaitTimeoutError: Timeout waiting for worker
+    """
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        try:
+            result = client.list_workers()
+            workers = result.get("items", [])
+            for worker in workers:
+                if worker.get("state") == "ready":
+                    logger.info(f"Worker {worker.get('name', worker['id'])} is ready")
+                    return worker
+            logger.debug(f"No ready workers yet ({len(workers)} total), waiting...")
+        except Exception as e:
+            logger.debug(f"Error listing workers: {e}")
+
+        time.sleep(interval)
+
+    raise WaitTimeoutError(
+        f"Timeout waiting for any worker to be ready after {timeout}s"
+    )

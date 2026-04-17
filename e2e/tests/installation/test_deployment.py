@@ -14,7 +14,7 @@ import pytest
 from e2e.utils.client import GPUStackClient
 from e2e.utils.config import E2EConfig
 from e2e.utils.docker import DockerManager
-from e2e.utils.wait import wait_for_server_healthy
+from e2e.utils.wait import wait_for_server_healthy, wait_for_any_worker_ready
 from e2e.utils.models import ModelHelper
 
 
@@ -90,13 +90,8 @@ class TestAllinoneDeployment:
         )
 
         with client:
-            # Wait a bit for worker registration
-            time.sleep(30)
-
-            result = client.list_workers()
-            workers = result.get("items", [])
-
-            assert len(workers) >= 1, "No worker registered in all-in-one mode"
+            worker = wait_for_any_worker_ready(client, timeout=120)
+            assert worker, "No worker registered in all-in-one mode"
 
     def test_nvidia_gpu_detected(self, deployment):
         """Verify NVIDIA GPU is detected."""
@@ -106,8 +101,7 @@ class TestAllinoneDeployment:
         )
 
         with client:
-            # Wait for worker to be ready
-            time.sleep(10)
+            wait_for_any_worker_ready(client, timeout=120)
 
             result = client.list_workers()
             workers = result.get("items", [])
@@ -226,8 +220,8 @@ class TestModelDeployAfterInstall:
         client = GPUStackClient(base_url=server_url, admin_password=password)
         with client:
             wait_for_server_healthy(client, timeout=120)
-            # Wait for worker
-            time.sleep(30)
+            # Wait for at least one worker to be ready
+            wait_for_any_worker_ready(client, timeout=120)
 
         yield {
             "server_url": server_url,
