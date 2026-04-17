@@ -21,31 +21,51 @@ from e2e.utils.models import ModelHelper
 logger = logging.getLogger(__name__)
 
 
+class _TestStatus:
+    """Tracks whether any test in the class has failed."""
+
+    def __init__(self):
+        self.failed = False
+
+
+@pytest.fixture(scope="class")
+def test_status():
+    """Shared test status tracker for the class."""
+    return _TestStatus()
+
+
+@pytest.fixture(autouse=True)
+def _track_failures(request, test_status):
+    """Auto-use fixture to mark test_status.failed on any test failure."""
+    yield
+    if hasattr(request.node, "rep_call") and request.node.rep_call.failed:
+        test_status.failed = True
+
+
 def _teardown_container(
     docker_manager: DockerManager,
     container_name: str,
-    cleanup: bool,
+    failed: bool,
 ):
-    """Teardown helper: dump logs, then cleanup if enabled."""
-    try:
-        logs = docker_manager.get_container_logs(container_name, tail=100)
-        logger.info(
-            "=== Container logs (%s) ===\n%s\n=== End logs ===",
-            container_name,
-            logs,
-        )
-    except Exception as e:
-        logger.warning("Failed to get container logs for %s: %s", container_name, e)
-
-    if cleanup:
-        docker_manager.cleanup_all()
-    else:
-        logger.info(
-            "Skipping cleanup — container '%s' kept for debugging. "
+    """Teardown: on failure dump logs and keep container; on success cleanup."""
+    if failed:
+        try:
+            logs = docker_manager.get_container_logs(container_name, tail=200)
+            logger.error(
+                "=== Container logs (%s) ===\n%s\n=== End logs ===",
+                container_name,
+                logs,
+            )
+        except Exception as e:
+            logger.warning("Failed to get container logs for %s: %s", container_name, e)
+        logger.warning(
+            "Test failed — container '%s' kept for debugging. "
             "Run 'docker rm -f %s' to clean up manually.",
             container_name,
             container_name,
         )
+    else:
+        docker_manager.cleanup_all()
 
 
 @pytest.mark.installation
@@ -62,7 +82,9 @@ class TestAllinoneDeployment:
     """
 
     @pytest.fixture(scope="class")
-    def deployment(self, docker_manager: DockerManager, e2e_config: E2EConfig):
+    def deployment(
+        self, test_status, docker_manager: DockerManager, e2e_config: E2EConfig
+    ):
         """Deploy GPUStack in all-in-one mode."""
         docker_manager.cleanup_all()
 
@@ -86,7 +108,7 @@ class TestAllinoneDeployment:
             "password": password,
         }
 
-        _teardown_container(docker_manager, container_name, e2e_config.test.cleanup)
+        _teardown_container(docker_manager, container_name, test_status.failed)
 
     def test_container_running(self, deployment, docker_manager: DockerManager):
         """Verify container is running."""
@@ -157,7 +179,9 @@ class TestServerOnlyDeployment:
     """
 
     @pytest.fixture(scope="class")
-    def deployment(self, docker_manager: DockerManager, e2e_config: E2EConfig):
+    def deployment(
+        self, test_status, docker_manager: DockerManager, e2e_config: E2EConfig
+    ):
         """Deploy GPUStack in server-only mode."""
         docker_manager.cleanup_all()
 
@@ -181,7 +205,7 @@ class TestServerOnlyDeployment:
             "password": password,
         }
 
-        _teardown_container(docker_manager, container_name, e2e_config.test.cleanup)
+        _teardown_container(docker_manager, container_name, test_status.failed)
 
     def test_container_running(self, deployment, docker_manager: DockerManager):
         """Verify container is running."""
@@ -223,7 +247,9 @@ class TestModelDeployAfterInstall:
     """Test model deployment after fresh installation."""
 
     @pytest.fixture(scope="class")
-    def deployment(self, docker_manager: DockerManager, e2e_config: E2EConfig):
+    def deployment(
+        self, test_status, docker_manager: DockerManager, e2e_config: E2EConfig
+    ):
         """Deploy GPUStack and prepare for model deployment test."""
         docker_manager.cleanup_all()
 
@@ -249,7 +275,7 @@ class TestModelDeployAfterInstall:
             "password": password,
         }
 
-        _teardown_container(docker_manager, container_name, e2e_config.test.cleanup)
+        _teardown_container(docker_manager, container_name, test_status.failed)
 
     def test_deploy_model_from_catalog(self, deployment, e2e_config: E2EConfig):
         """Deploy model from catalog after fresh installation."""
