@@ -69,30 +69,16 @@ class TestModelRedeployment:
         response = model_helper.verify_model_inference(model_name=model2["name"])
         assert response["choices"][0]["message"]["content"]
 
-    def test_model_playground_after_redeploy(
+    def test_model_playground(
         self,
         gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
+        shared_vllm_model,
     ):
-        """Verify playground (multi-turn chat) works after redeploy."""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-playground",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Multi-turn conversation
+        """Verify playground (multi-turn chat) works."""
         messages = [{"role": "user", "content": "Hello"}]
 
         response1 = gpustack_client.chat_completion(
-            model=model["name"],
+            model=shared_vllm_model["name"],
             messages=messages,
             max_tokens=50,
         )
@@ -104,40 +90,25 @@ class TestModelRedeployment:
         messages.append({"role": "user", "content": "How are you?"})
 
         response2 = gpustack_client.chat_completion(
-            model=model["name"],
+            model=shared_vllm_model["name"],
             messages=messages,
             max_tokens=50,
         )
 
         assert response2["choices"][0]["message"]["content"]
 
-    def test_model_api_after_redeploy(
+    def test_model_openai_api(
         self,
         gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
+        shared_vllm_model,
     ):
-        """Verify OpenAI-compatible API works after redeploy."""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-api",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Chat completion
+        """Verify OpenAI-compatible API works."""
         response = gpustack_client.chat_completion(
-            model=model["name"],
+            model=shared_vllm_model["name"],
             messages=[{"role": "user", "content": "Test"}],
         )
         assert response["choices"]
 
-        # List models
         models = gpustack_client.openai_list_models()
         assert "data" in models
 

@@ -7,44 +7,21 @@ import pytest
 
 from e2e.utils.client import GPUStackClient
 from e2e.utils.config import E2EConfig
-from e2e.utils.models import ModelHelper
 
 
 @pytest.mark.route
 @pytest.mark.nvidia
 class TestRouteModification:
-    """Route modification tests"""
+    """Route modification tests.
 
-    @pytest.fixture(scope="class")
-    def deployed_model(
-        self,
-        gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-    ):
-        """Deploy a test model"""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-route-model",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-            enable_model_route=False,  # Do not auto-create route
-        )
-
-        yield model
-
-        if e2e_config.test.cleanup:
-            try:
-                gpustack_client.delete_model(model["id"])
-            except Exception:
-                pass
+    Uses the session-scoped shared_vllm_model to avoid deploying
+    a separate model just for route testing.
+    """
 
     def test_create_route_for_model(
         self,
         gpustack_client: GPUStackClient,
-        deployed_model,
+        shared_vllm_model,
         cleanup_routes,
     ):
         """Create a model Route"""
@@ -53,7 +30,7 @@ class TestRouteModification:
             categories=["llm"],
             targets=[
                 {
-                    "model_id": deployed_model["id"],
+                    "model_id": shared_vllm_model["id"],
                     "weight": 100,
                 }
             ],
@@ -67,7 +44,7 @@ class TestRouteModification:
     def test_access_model_via_route(
         self,
         gpustack_client: GPUStackClient,
-        deployed_model,
+        shared_vllm_model,
         cleanup_routes,
     ):
         """Access a model via Route"""
@@ -76,7 +53,7 @@ class TestRouteModification:
             categories=["llm"],
             targets=[
                 {
-                    "model_id": deployed_model["id"],
+                    "model_id": shared_vllm_model["id"],
                     "weight": 100,
                 }
             ],
@@ -84,7 +61,6 @@ class TestRouteModification:
 
         cleanup_routes.append(route["id"])
 
-        # Access via route name
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Hello"}],
@@ -96,7 +72,7 @@ class TestRouteModification:
     def test_modify_route_weight(
         self,
         gpustack_client: GPUStackClient,
-        deployed_model,
+        shared_vllm_model,
         cleanup_routes,
     ):
         """Modify Route weight"""
@@ -105,7 +81,7 @@ class TestRouteModification:
             categories=["llm"],
             targets=[
                 {
-                    "model_id": deployed_model["id"],
+                    "model_id": shared_vllm_model["id"],
                     "weight": 50,
                 }
             ],
@@ -113,10 +89,8 @@ class TestRouteModification:
 
         cleanup_routes.append(route["id"])
 
-        # Verify route detail is accessible
         gpustack_client.get_model_route(route["id"])
 
-        # Verify access still works
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Test after modification"}],
@@ -160,39 +134,23 @@ class TestFallbackRoute:
     def test_create_fallback_route(
         self,
         gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
+        shared_vllm_model,
         openai_provider,
-        cleanup_models,
         cleanup_routes,
     ):
         """Create a Route with Fallback"""
-        # Deploy local model
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-fallback-primary",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-            enable_model_route=False,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Create route with fallback
         route = gpustack_client.create_model_route(
             name="e2e-test-fallback-route",
             categories=["llm"],
             targets=[
                 {
-                    "model_id": model["id"],
+                    "model_id": shared_vllm_model["id"],
                     "weight": 100,
                 },
                 {
                     "provider_id": openai_provider["id"],
                     "provider_model_name": "gpt-4o-mini",
-                    "weight": 0,  # Fallback weight is 0
+                    "weight": 0,
                     "fallback_status_codes": ["5xx", "429"],
                 },
             ],
@@ -205,30 +163,16 @@ class TestFallbackRoute:
     def test_fallback_route_normal_access(
         self,
         gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
+        shared_vllm_model,
         openai_provider,
-        cleanup_models,
         cleanup_routes,
     ):
         """Access the primary model under normal conditions"""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-fallback-normal",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-            enable_model_route=False,
-        )
-
-        cleanup_models.append(model["id"])
-
         route = gpustack_client.create_model_route(
             name="e2e-test-fallback-normal-route",
             categories=["llm"],
             targets=[
-                {"model_id": model["id"], "weight": 100},
+                {"model_id": shared_vllm_model["id"], "weight": 100},
                 {
                     "provider_id": openai_provider["id"],
                     "provider_model_name": "gpt-4o-mini",
@@ -240,7 +184,6 @@ class TestFallbackRoute:
 
         cleanup_routes.append(route["id"])
 
-        # Normal access should use the primary model
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Hello"}],
@@ -257,10 +200,6 @@ class TestFallbackRoute:
         cleanup_routes,
     ):
         """Trigger Fallback when the primary model is unavailable"""
-        # Create a non-existent model ID as the primary target (will fail)
-        # Note: This is a designed test scenario; actual GPUStack may behave differently
-
-        # Create a route with only the provider as a simplified test
         route = gpustack_client.create_model_route(
             name="e2e-test-fallback-only",
             categories=["llm"],
@@ -275,7 +214,6 @@ class TestFallbackRoute:
 
         cleanup_routes.append(route["id"])
 
-        # Verify access works
         response = gpustack_client.chat_completion(
             model=route["name"],
             messages=[{"role": "user", "content": "Fallback test"}],
@@ -292,43 +230,23 @@ class TestRouteAccessPolicy:
     def test_list_my_models(self, gpustack_client: GPUStackClient):
         """Get models accessible to the current user"""
         result = gpustack_client._get("/v2/my-models")
-
         assert "items" in result
-        # Admin user should be able to see all models
 
     def test_route_categories(
         self,
         gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
+        shared_vllm_model,
         cleanup_routes,
     ):
         """Verify Route category filtering"""
-        # Deploy LLM model
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-route-category",
-            backend="vLLM",
-            replicas=1,
-            categories=["llm"],
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-            enable_model_route=False,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Create a route with LLM category
         route = gpustack_client.create_model_route(
             name="e2e-test-llm-route",
             categories=["llm"],
-            targets=[{"model_id": model["id"], "weight": 100}],
+            targets=[{"model_id": shared_vllm_model["id"], "weight": 100}],
         )
 
         cleanup_routes.append(route["id"])
 
-        # Filter by category
         result = gpustack_client.list_model_routes(categories=["llm"])
         routes = result.get("items", [])
 

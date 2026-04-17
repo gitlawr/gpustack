@@ -14,85 +14,34 @@ from e2e.utils.models import ModelHelper
 @pytest.mark.vllm
 @pytest.mark.nvidia
 class TestVLLMCatalogDeploy:
-    """vLLM backend catalog deployment tests."""
+    """vLLM backend catalog deployment tests.
 
-    def test_deploy_qwen_vllm(
-        self,
-        gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
-    ):
-        """Deploy Qwen model using vLLM from catalog."""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-qwen-vllm",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
+    Uses the session-scoped shared_vllm_model fixture to avoid
+    redundant model deployments across tests.
+    """
 
-        cleanup_models.append(model["id"])
+    def test_deploy_qwen_vllm(self, shared_vllm_model):
+        """Verify vLLM model is deployed and ready."""
+        assert shared_vllm_model["ready_replicas"] >= 1, "Model not ready"
 
-        # Verify model state
-        assert model["ready_replicas"] >= 1, "Model not ready"
-
-    def test_vllm_model_inference(
-        self,
-        gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
-    ):
+    def test_vllm_model_inference(self, model_helper: ModelHelper, shared_vllm_model):
         """Verify vLLM model inference."""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-qwen-vllm-inference",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Test inference
         response = model_helper.verify_model_inference(
-            model_name=model["name"],
+            model_name=shared_vllm_model["name"],
             prompt="What is 2+2?",
         )
-
         assert response["choices"][0]["message"]["content"], "Empty response"
 
     def test_vllm_model_streaming(
-        self,
-        gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
+        self, gpustack_client: GPUStackClient, shared_vllm_model
     ):
         """Verify vLLM model streaming output."""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-qwen-vllm-stream",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Note: Streaming test requires special handling
-        # Simplified to non-streaming here
         response = gpustack_client.chat_completion(
-            model=model["name"],
+            model=shared_vllm_model["name"],
             messages=[{"role": "user", "content": "Count from 1 to 5"}],
             stream=False,
             max_tokens=50,
         )
-
         assert response["choices"][0]["message"]["content"]
 
 
@@ -103,14 +52,14 @@ class TestVLLMCatalogDeploy:
 class TestSGLangCatalogDeploy:
     """SGLang backend catalog deployment tests."""
 
-    def test_deploy_qwen_sglang(
+    @pytest.fixture(scope="class")
+    def shared_sglang_model(
         self,
         gpustack_client: GPUStackClient,
         model_helper: ModelHelper,
         e2e_config: E2EConfig,
-        cleanup_models,
     ):
-        """Deploy Qwen model using SGLang from catalog."""
+        """Class-scoped shared SGLang model."""
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-qwen-sglang",
@@ -119,35 +68,25 @@ class TestSGLangCatalogDeploy:
             wait=True,
             timeout=e2e_config.models.deploy_timeout,
         )
+        yield model
+        if e2e_config.test.cleanup:
+            try:
+                gpustack_client.delete_model(model["id"])
+            except Exception:
+                pass
 
-        cleanup_models.append(model["id"])
-
-        assert model["ready_replicas"] >= 1, "Model not ready"
+    def test_deploy_qwen_sglang(self, shared_sglang_model):
+        """Deploy Qwen model using SGLang from catalog."""
+        assert shared_sglang_model["ready_replicas"] >= 1, "Model not ready"
 
     def test_sglang_model_inference(
-        self,
-        gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
+        self, model_helper: ModelHelper, shared_sglang_model
     ):
         """Verify SGLang model inference."""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-qwen-sglang-inference",
-            backend="SGLang",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
         response = model_helper.verify_model_inference(
-            model_name=model["name"],
+            model_name=shared_sglang_model["name"],
             prompt="What is the capital of France?",
         )
-
         assert response["choices"][0]["message"]["content"]
 
 
@@ -156,47 +95,38 @@ class TestSGLangCatalogDeploy:
 class TestAMDModelDeploy:
     """AMD GPU model deployment tests."""
 
-    def test_deploy_qwen_amd(
+    @pytest.fixture(scope="class")
+    def shared_amd_model(
         self,
         gpustack_client: GPUStackClient,
         model_helper: ModelHelper,
         e2e_config: E2EConfig,
-        cleanup_models,
     ):
-        """Deploy Qwen model on AMD GPU."""
+        """Class-scoped shared AMD model."""
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-qwen-amd",
-            backend="vLLM",  # AMD uses ROCm vLLM
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
-        assert model["ready_replicas"] >= 1
-
-    def test_amd_model_inference(
-        self,
-        gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
-    ):
-        """Verify AMD GPU model inference."""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-qwen-amd-inference",
             backend="vLLM",
             replicas=1,
             wait=True,
             timeout=e2e_config.models.deploy_timeout,
         )
+        yield model
+        if e2e_config.test.cleanup:
+            try:
+                gpustack_client.delete_model(model["id"])
+            except Exception:
+                pass
 
-        cleanup_models.append(model["id"])
+    def test_deploy_qwen_amd(self, shared_amd_model):
+        """Deploy Qwen model on AMD GPU."""
+        assert shared_amd_model["ready_replicas"] >= 1
 
-        response = model_helper.verify_model_inference(model_name=model["name"])
+    def test_amd_model_inference(self, model_helper: ModelHelper, shared_amd_model):
+        """Verify AMD GPU model inference."""
+        response = model_helper.verify_model_inference(
+            model_name=shared_amd_model["name"]
+        )
         assert response["choices"][0]["message"]["content"]
 
 
@@ -205,47 +135,40 @@ class TestAMDModelDeploy:
 class TestAscendModelDeploy:
     """Ascend NPU model deployment tests."""
 
-    def test_deploy_qwen_ascend(
+    @pytest.fixture(scope="class")
+    def shared_ascend_model(
         self,
         gpustack_client: GPUStackClient,
         model_helper: ModelHelper,
         e2e_config: E2EConfig,
-        cleanup_models,
     ):
-        """Deploy Qwen model on Ascend NPU."""
+        """Class-scoped shared Ascend model."""
         model = model_helper.deploy_huggingface_model(
             repo_id=e2e_config.models.default_model,
             name="e2e-test-qwen-ascend",
-            backend="MindIE",  # Ascend uses MindIE
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
-        assert model["ready_replicas"] >= 1
-
-    def test_ascend_model_inference(
-        self,
-        gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
-    ):
-        """Verify Ascend NPU model inference."""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-qwen-ascend-inference",
             backend="MindIE",
             replicas=1,
             wait=True,
             timeout=e2e_config.models.deploy_timeout,
         )
+        yield model
+        if e2e_config.test.cleanup:
+            try:
+                gpustack_client.delete_model(model["id"])
+            except Exception:
+                pass
 
-        cleanup_models.append(model["id"])
+    def test_deploy_qwen_ascend(self, shared_ascend_model):
+        """Deploy Qwen model on Ascend NPU."""
+        assert shared_ascend_model["ready_replicas"] >= 1
 
-        response = model_helper.verify_model_inference(model_name=model["name"])
+    def test_ascend_model_inference(
+        self, model_helper: ModelHelper, shared_ascend_model
+    ):
+        """Verify Ascend NPU model inference."""
+        response = model_helper.verify_model_inference(
+            model_name=shared_ascend_model["name"]
+        )
         assert response["choices"][0]["message"]["content"]
 
 
@@ -260,7 +183,6 @@ class TestCustomBackendDeploy:
         e2e_config: E2EConfig,
     ):
         """Add community inference backend."""
-        # Note: Requires specific backend configuration
         pytest.skip("Custom backend test requires specific backend configuration")
 
     def test_deploy_with_custom_backend(

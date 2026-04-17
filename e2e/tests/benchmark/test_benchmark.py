@@ -8,35 +8,16 @@ import pytest
 
 from e2e.utils.client import GPUStackClient
 from e2e.utils.config import E2EConfig
-from e2e.utils.models import ModelHelper
 
 
 @pytest.mark.benchmark
 @pytest.mark.nvidia
 class TestBenchmark:
-    """Benchmark functionality tests"""
+    """Benchmark functionality tests.
 
-    @pytest.fixture
-    def deployed_model(
-        self,
-        gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
-    ):
-        """Deploy a model for benchmarking"""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-benchmark-model",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
-        return model
+    Uses the session-scoped shared_vllm_model to avoid deploying
+    a separate model for benchmarking.
+    """
 
     def test_list_benchmarks(self, gpustack_client: GPUStackClient):
         """List Benchmarks"""
@@ -48,44 +29,38 @@ class TestBenchmark:
     def test_create_benchmark(
         self,
         gpustack_client: GPUStackClient,
-        deployed_model,
+        shared_vllm_model,
         e2e_config: E2EConfig,
     ):
         """Create a Benchmark"""
         benchmark = gpustack_client.create_benchmark(
             name="e2e-test-benchmark",
-            model_id=deployed_model["id"],
+            model_id=shared_vllm_model["id"],
         )
 
         assert benchmark["id"] > 0
         assert benchmark["name"] == "e2e-test-benchmark"
 
-        # Cleanup
         if e2e_config.test.cleanup:
             gpustack_client.delete_benchmark(benchmark["id"])
 
     def test_benchmark_execution(
         self,
         gpustack_client: GPUStackClient,
-        deployed_model,
+        shared_vllm_model,
         e2e_config: E2EConfig,
     ):
         """Execute a Benchmark and verify results"""
         benchmark = gpustack_client.create_benchmark(
             name="e2e-test-benchmark-exec",
-            model_id=deployed_model["id"],
+            model_id=shared_vllm_model["id"],
         )
 
         try:
-            # Wait for benchmark to complete (simplified handling)
             time.sleep(30)
 
-            # Get benchmark details
             result = gpustack_client.get_benchmark(benchmark["id"])
-
             assert result["id"] == benchmark["id"]
-            # Verify benchmark has result data
-            # Specific fields depend on the API implementation
 
         finally:
             if e2e_config.test.cleanup:
@@ -94,19 +69,18 @@ class TestBenchmark:
     def test_benchmark_logs(
         self,
         gpustack_client: GPUStackClient,
-        deployed_model,
+        shared_vllm_model,
         e2e_config: E2EConfig,
     ):
         """Verify Benchmark logs"""
         benchmark = gpustack_client.create_benchmark(
             name="e2e-test-benchmark-logs",
-            model_id=deployed_model["id"],
+            model_id=shared_vllm_model["id"],
         )
 
         try:
             time.sleep(10)
 
-            # Getting benchmark details should include logs or status information
             result = gpustack_client.get_benchmark(benchmark["id"])
             assert result is not None
 
@@ -127,9 +101,7 @@ class TestGrafanaDashboard:
     ):
         """Verify Grafana is accessible"""
         if not e2e_config.monitoring.grafana_url:
-            # Try accessing via the GPUStack built-in path
             try:
-                # Grafana is typically proxied via the /grafana path
                 response = gpustack_client._client.get("/grafana/api/health")
                 assert response.status_code in [200, 302, 401]
             except Exception:
@@ -138,40 +110,21 @@ class TestGrafanaDashboard:
     def test_dashboard_data_available(self, gpustack_client: GPUStackClient):
         """Verify Dashboard data is available"""
         dashboard = gpustack_client.get_dashboard()
-
-        # Verify some data is returned
         assert dashboard is not None
 
     def test_model_dashboard_link(
         self,
         gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
+        shared_vllm_model,
     ):
         """Verify model Dashboard link"""
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-dashboard-link",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Try to get the dashboard link
-        # This is typically a redirect endpoint
         try:
             response = gpustack_client._client.get(
-                f"/v2/models/{model['id']}/dashboard",
+                f"/v2/models/{shared_vllm_model['id']}/dashboard",
                 follow_redirects=False,
             )
-            # Should return a redirect to Grafana
             assert response.status_code in [200, 302, 307]
         except Exception:
-            # Dashboard may not be configured
             pass
 
     def test_worker_dashboard_link(self, gpustack_client: GPUStackClient):
@@ -223,7 +176,6 @@ class TestPrometheus:
         try:
             response = gpustack_client._client.get("/metrics")
             if response.status_code == 200:
-                # Verify the response is in Prometheus format
                 content = response.text
                 assert "# HELP" in content or "# TYPE" in content
         except Exception:

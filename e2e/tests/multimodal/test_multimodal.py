@@ -48,47 +48,17 @@ class TestMultimodalNVIDIA:
 
         assert model["ready_replicas"] >= 1
 
-    def test_deploy_tts_model(
+    @pytest.fixture(scope="class")
+    def shared_tts_model(
         self,
         gpustack_client: GPUStackClient,
-        model_helper: ModelHelper,
         e2e_config: E2EConfig,
-        cleanup_models,
     ):
-        """Deploy a TTS model (Qwen3-tts-customvoice)"""
+        """Class-scoped shared TTS model."""
         model_name = e2e_config.models.multimodal.tts
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}",
-            source="huggingface",
-            huggingface_repo_id=model_name,
-            backend="VoxBox",  # TTS uses VoxBox backend
-            categories=["text_to_speech"],
-            replicas=1,
-        )
-
-        cleanup_models.append(model["id"])
-
-        model = wait_for_model_ready(
-            gpustack_client,
-            model["id"],
-            timeout=e2e_config.models.deploy_timeout,
-        )
-
-        assert model["ready_replicas"] >= 1
-
-    def test_tts_inference(
-        self,
-        gpustack_client: GPUStackClient,
-        e2e_config: E2EConfig,
-        cleanup_models,
-    ):
-        """Test TTS inference"""
-        model_name = e2e_config.models.multimodal.tts
-
-        # Deploy model
-        model = gpustack_client.create_model(
-            name=f"e2e-test-{model_name}-inference",
             source="huggingface",
             huggingface_repo_id=model_name,
             backend="VoxBox",
@@ -96,17 +66,32 @@ class TestMultimodalNVIDIA:
             replicas=1,
         )
 
-        cleanup_models.append(model["id"])
-
-        wait_for_model_ready(
+        model = wait_for_model_ready(
             gpustack_client,
             model["id"],
             timeout=e2e_config.models.deploy_timeout,
         )
 
-        # Test TTS
+        yield model
+
+        if e2e_config.test.cleanup:
+            try:
+                gpustack_client.delete_model(model["id"])
+            except Exception:
+                pass
+
+    def test_deploy_tts_model(self, shared_tts_model):
+        """Deploy a TTS model (Qwen3-tts-customvoice)"""
+        assert shared_tts_model["ready_replicas"] >= 1
+
+    def test_tts_inference(
+        self,
+        gpustack_client: GPUStackClient,
+        shared_tts_model,
+    ):
+        """Test TTS inference"""
         audio_content = gpustack_client.audio_speech(
-            model=model["name"],
+            model=shared_tts_model["name"],
             input="Hello, this is a test of text to speech.",
             voice="alloy",
         )

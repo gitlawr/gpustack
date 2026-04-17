@@ -17,17 +17,20 @@ from e2e.utils.wait import wait_for_model_ready
 @pytest.mark.vllm
 @pytest.mark.nvidia
 class TestVLLMMultiReplica:
-    """vLLM multi-replica deployment tests"""
+    """vLLM multi-replica deployment tests.
 
-    def test_deploy_multi_replica(
+    Uses a class-scoped shared 2-replica model to avoid
+    redundant deployments across tests.
+    """
+
+    @pytest.fixture(scope="class")
+    def shared_multi_replica_model(
         self,
         gpustack_client: GPUStackClient,
         model_helper: ModelHelper,
         e2e_config: E2EConfig,
-        cleanup_models,
     ):
-        """Deploy a multi-replica model"""
-        # Check if there are enough GPUs
+        """Class-scoped shared 2-replica model."""
         result = gpustack_client.list_gpu_devices()
         gpu_count = len(result.get("items", []))
 
@@ -42,74 +45,41 @@ class TestVLLMMultiReplica:
             wait=True,
             timeout=e2e_config.models.deploy_timeout * 2,
         )
+        yield model
+        if e2e_config.test.cleanup:
+            try:
+                gpustack_client.delete_model(model["id"])
+            except Exception:
+                pass
 
-        cleanup_models.append(model["id"])
-
-        assert model["ready_replicas"] >= 2, "Not all replicas ready"
+    def test_deploy_multi_replica(self, shared_multi_replica_model):
+        """Deploy a multi-replica model"""
+        assert (
+            shared_multi_replica_model["ready_replicas"] >= 2
+        ), "Not all replicas ready"
 
     def test_multi_replica_instance_logs(
         self,
-        gpustack_client: GPUStackClient,
         model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
+        shared_multi_replica_model,
     ):
         """Verify multi-replica instance log viewing"""
-        result = gpustack_client.list_gpu_devices()
-        gpu_count = len(result.get("items", []))
-
-        if gpu_count < 2:
-            pytest.skip("Need at least 2 GPUs for multi-replica test")
-
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-multi-replica-logs",
-            backend="vLLM",
-            replicas=2,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout * 2,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Get instance list
-        instances = model_helper.get_model_instances(model["id"])
+        instances = model_helper.get_model_instances(shared_multi_replica_model["id"])
         assert len(instances) >= 2, "Expected at least 2 instances"
 
-        # Verify logs for each instance
         for instance in instances:
             logs = model_helper.get_instance_logs(instance["id"])
             assert logs is not None, f"Failed to get logs for instance {instance['id']}"
 
     def test_multi_replica_inference(
         self,
-        gpustack_client: GPUStackClient,
         model_helper: ModelHelper,
-        e2e_config: E2EConfig,
-        cleanup_models,
+        shared_multi_replica_model,
     ):
         """Verify multi-replica inference load balancing"""
-        result = gpustack_client.list_gpu_devices()
-        gpu_count = len(result.get("items", []))
-
-        if gpu_count < 2:
-            pytest.skip("Need at least 2 GPUs for multi-replica test")
-
-        model = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-multi-replica-inference",
-            backend="vLLM",
-            replicas=2,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout * 2,
-        )
-
-        cleanup_models.append(model["id"])
-
-        # Send multiple requests and verify they all succeed
         for i in range(5):
             response = model_helper.verify_model_inference(
-                model_name=model["name"],
+                model_name=shared_multi_replica_model["name"],
                 prompt=f"Count to {i + 1}",
             )
             assert response["choices"][0]["message"]["content"]
@@ -169,14 +139,12 @@ class TestVLLMDistributed:
         if gpu_count < 2:
             pytest.skip("Need at least 2 GPUs for tensor parallel test")
 
-        # Deploy a large model using multiple GPUs
         model = gpustack_client.create_model(
             name="e2e-test-vllm-tp",
             source="huggingface",
             huggingface_repo_id=e2e_config.models.default_model,
             backend="vLLM",
             replicas=1,
-            # Use tensor parallel
             gpu_selector={"gpus_per_replica": 2},
             distributed_inference_across_workers=True,
         )
@@ -191,7 +159,6 @@ class TestVLLMDistributed:
 
         assert model["ready_replicas"] >= 1
 
-        # Verify inference
         response = gpustack_client.chat_completion(
             model=model["name"],
             messages=[{"role": "user", "content": "Hello"}],

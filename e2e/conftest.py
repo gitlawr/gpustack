@@ -195,6 +195,39 @@ def k8s_manager(e2e_config: E2EConfig) -> K8sManager:
     )
 
 
+@pytest.fixture(scope="session")
+def shared_vllm_model(
+    gpustack_client: GPUStackClient,
+    model_helper: ModelHelper,
+    e2e_config: E2EConfig,
+) -> Generator[dict, None, None]:
+    """Session-scoped shared vLLM model.
+
+    Deploys the default model with vLLM backend once and shares it across
+    all tests that only need a running model for read-only operations
+    (inference, routing, benchmarking, etc).
+    """
+    logger.info("Deploying shared vLLM model for session...")
+    model = model_helper.deploy_huggingface_model(
+        repo_id=e2e_config.models.default_model,
+        name="e2e-shared-vllm",
+        backend="vLLM",
+        replicas=1,
+        wait=True,
+        timeout=e2e_config.models.deploy_timeout,
+    )
+    logger.info(f"Shared vLLM model ready: {model['name']} (id={model['id']})")
+
+    yield model
+
+    if e2e_config.test.cleanup:
+        try:
+            gpustack_client.delete_model(model["id"])
+            logger.info("Cleaned up shared vLLM model")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup shared vLLM model: {e}")
+
+
 @pytest.fixture(scope="function")
 def cleanup_models(gpustack_client: GPUStackClient, e2e_config: E2EConfig):
     """
