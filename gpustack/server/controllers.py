@@ -177,6 +177,11 @@ class ModelController:
         # Skip DELETED events - model is being deleted, no need to sync replicas
         if event.type == EventType.DELETED:
             return
+        logger.debug(
+            f"model_controller: received {event.type} for "
+            f"model_id={getattr(model, 'id', None)} "
+            f"name={getattr(model, 'name', None)}"
+        )
         try:
             async with async_session() as session:
                 await sync_replicas(session, model)
@@ -216,12 +221,23 @@ class ModelInstanceController:
             async with async_session() as session:
                 model = await Model.one_by_id(session, model_instance.model_id)
                 if not model:
+                    logger.debug(
+                        f"model_instance_controller: no model found for instance "
+                        f"id={getattr(model_instance, 'id', None)} "
+                        f"model_id={getattr(model_instance, 'model_id', None)}, skip"
+                    )
                     return
                 model_deleting = model.deleted_at is not None
 
                 if event.type == EventType.DELETED:
                     # trigger model replica sync, but only if model is not deleted
                     if not model_deleting:
+                        logger.debug(
+                            f"model_instance_controller: DELETED instance "
+                            f"id={getattr(model_instance, 'id', None)} "
+                            f"name={getattr(model_instance, 'name', None)} -> "
+                            f"publishing model UPDATED for model_id={model.id}"
+                        )
                         copied_model = Model.model_validate(model.model_dump())
                         asyncio.create_task(
                             event_bus.publish(
@@ -257,6 +273,10 @@ async def sync_replicas(session: AsyncSession, model: Model):
     model = fresh_model
 
     instances = await ModelInstance.all_by_field(session, "model_id", model.id)
+    logger.debug(
+        f"sync_replicas: model_id={model.id} name={model.name} "
+        f"desired={model.replicas} current={len(instances)}"
+    )
     if len(instances) < model.replicas:
         for _ in range(model.replicas - len(instances)):
             name_prefix = ''.join(

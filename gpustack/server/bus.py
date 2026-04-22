@@ -258,9 +258,13 @@ class EventBus:
 
     def _route_event(self, event: Event, topic: str):
         """Route event to subscribers of the specific topic."""
-        if topic in self.subscribers:
-            for subscriber in self.subscribers[topic]:
-                asyncio.create_task(subscriber.enqueue(event))
+        subscribers = self.subscribers.get(topic, [])
+        logger.debug(
+            f"_route_event: topic={topic} type={event.type} "
+            f"id={event.id} subscriber_count={len(subscribers)}"
+        )
+        for subscriber in subscribers:
+            asyncio.create_task(subscriber.enqueue(event))
 
     def unsubscribe(self, topic: str, subscriber: Subscriber):
         """Unsubscribe from a topic."""
