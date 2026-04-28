@@ -3,20 +3,25 @@ from fastapi import APIRouter, Depends
 from gpustack.routes import (
     api_keys,
     auth,
+    cluster_access,
     config,
     dashboard,
     debug,
     draft_models,
     gpu_devices,
     inference_backend,
+    me_orgs,
     metrics,
     model_evaluations,
     model_files,
     model_instances,
     model_sets,
+    organization_members,
+    organizations,
     probes,
     proxy,
     update,
+    user_groups,
     users,
     models,
     openai,
@@ -73,6 +78,13 @@ v1_base_router = APIRouter(dependencies=[Depends(get_current_user)])
 v1_base_router.include_router(users.me_router, prefix="/users", tags=["Users"])
 v1_base_router.include_router(api_keys.router, prefix="/api-keys", tags=["API Keys"])
 v1_base_router.include_router(usage.router, prefix="/usage", tags=["Usage"])
+v1_base_router.include_router(
+    me_orgs.router, prefix="/users/me", tags=["My Organizations"]
+)
+v1_base_router.include_router(
+    organization_members.router, tags=["Organization Members"]
+)
+v1_base_router.include_router(user_groups.router, tags=["User Groups"])
 v1_base_router.include_router(
     metrics.router, prefix="/metrics", include_in_schema=False
 )
@@ -185,6 +197,15 @@ admin_routers = model_routers + [
         "router": model_routes.router,
         "prefix": "/model-routes",
         "tags": ["Model Routes"],
+    },
+    {
+        "router": organizations.router,
+        "prefix": "/organizations",
+        "tags": ["Organizations"],
+    },
+    {
+        "router": cluster_access.router,
+        "tags": ["Cluster Access"],
     },
 ]
 
