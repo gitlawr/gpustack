@@ -1,4 +1,8 @@
 """recreate non_admin_user_models view to support ALLOWED_PRINCIPALS
+plus a one-shot top-up of platform Org memberships missed by the foundation
+migration on fresh installs (where _init_user creates the admin row *after*
+migrations run, so the foundation's backfill SELECT sees an empty users
+table).
 
 The view drives /my-models visibility for non-admin users. Until now it joined
 only `usermodelroutelink` (legacy ALLOWED_USERS path). After P0 we have
@@ -27,6 +31,8 @@ access_policy_enum = sa.Enum(
     'PUBLIC', 'AUTHED', 'ALLOWED_USERS', name='accesspolicyenum'
 )
 access_policy_to_add = ['ALLOWED_PRINCIPALS']
+
+PLATFORM_ORG_ID = 1
 
 
 # revision identifiers, used by Alembic.
@@ -82,6 +88,61 @@ def upgrade() -> None:
     # definition.
     op.execute(model_user_after_drop_view_stmt)
     op.execute(model_user_after_create_view_stmt(bind.dialect.name))
+
+    # ---- Top up platform Org memberships --------------------------------
+    # Idempotent: any user that's already linked is left alone. Catches the
+    # bootstrap admin created by _init_user after the foundation migration
+    # had already run against an empty users table on a fresh install.
+    if bind.dialect.name == 'postgresql':
+        op.execute(
+            sa.text(
+                """
+                INSERT INTO organization_memberships
+                    (user_id, organization_id, role, created_at)
+                SELECT id, :org_id,
+                       CASE WHEN is_admin THEN 'OWNER'::orgrole
+                            ELSE 'MEMBER'::orgrole END,
+                       CURRENT_TIMESTAMP
+                FROM users
+                WHERE COALESCE(is_system, false) = false
+                ON CONFLICT (user_id, organization_id) DO NOTHING
+                """
+            ).bindparams(org_id=PLATFORM_ORG_ID)
+        )
+        op.execute(
+            sa.text(
+                """
+                UPDATE users
+                SET default_organization_id = :org_id
+                WHERE default_organization_id IS NULL
+                  AND COALESCE(is_system, false) = false
+                """
+            ).bindparams(org_id=PLATFORM_ORG_ID)
+        )
+    else:
+        op.execute(
+            sa.text(
+                """
+                INSERT OR IGNORE INTO organization_memberships
+                    (user_id, organization_id, role, created_at)
+                SELECT id, :org_id,
+                       CASE WHEN is_admin THEN 'OWNER' ELSE 'MEMBER' END,
+                       CURRENT_TIMESTAMP
+                FROM users
+                WHERE COALESCE(is_system, 0) = 0
+                """
+            ).bindparams(org_id=PLATFORM_ORG_ID)
+        )
+        op.execute(
+            sa.text(
+                """
+                UPDATE users
+                SET default_organization_id = :org_id
+                WHERE default_organization_id IS NULL
+                  AND COALESCE(is_system, 0) = 0
+                """
+            ).bindparams(org_id=PLATFORM_ORG_ID)
+        )
 
 
 def downgrade() -> None:

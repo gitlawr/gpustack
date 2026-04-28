@@ -12,12 +12,18 @@ import secrets
 import tenacity
 from sqlmodel.ext.asyncio.session import AsyncSession
 from gpustack.logging import setup_logging
+from datetime import datetime, timezone
 from gpustack.schemas.users import (
     User,
     UserRole,
     get_default_cluster_user,
     default_cluster_user_name,
 )
+from gpustack.schemas.organizations import (
+    OrganizationMembership,
+    PLATFORM_ORGANIZATION_ID,
+)
+from gpustack.schemas.principals import OrgRole
 from gpustack.schemas.models import ModelInstance
 from gpustack.schemas.api_keys import ApiKey
 from gpustack.schemas.workers import Worker
@@ -427,30 +433,49 @@ class Server:
         user = await User.first_by_field(
             session=session, field="username", value="admin"
         )
-        if not user:
-            bootstrap_password = self._config.bootstrap_password
-            require_password_change = False
-            if not bootstrap_password:
-                require_password_change = True
-                bootstrap_password = generate_secure_password()
-                bootstrap_password_file = os.path.join(
-                    self._config.data_dir, "initial_admin_password"
-                )
-                with open(bootstrap_password_file, "w") as file:
-                    file.write(bootstrap_password + "\n")
-                logger.info(
-                    "Generated initial admin password. "
-                    f"You can get it from {bootstrap_password_file}"
-                )
+        if user:
+            return
 
-            user = User(
-                username="admin",
-                full_name="Default System Admin",
-                hashed_password=get_secret_hash(bootstrap_password),
-                is_admin=True,
-                require_password_change=require_password_change,
+        bootstrap_password = self._config.bootstrap_password
+        require_password_change = False
+        if not bootstrap_password:
+            require_password_change = True
+            bootstrap_password = generate_secure_password()
+            bootstrap_password_file = os.path.join(
+                self._config.data_dir, "initial_admin_password"
             )
-            await User.create(session, user)
+            with open(bootstrap_password_file, "w") as file:
+                file.write(bootstrap_password + "\n")
+            logger.info(
+                "Generated initial admin password. "
+                f"You can get it from {bootstrap_password_file}"
+            )
+
+        # Bind the bootstrap admin to the platform organization. The
+        # foundation migration only backfills users that exist at migration
+        # time; the admin row is created here, *after* migrations run, so
+        # we attach the OWNER membership inline. Existing installs that
+        # missed the original backfill are caught by the top-up block at the
+        # end of migration 3a7e2c91d5b4 (my_models_view_principals).
+        user = User(
+            username="admin",
+            full_name="Default System Admin",
+            hashed_password=get_secret_hash(bootstrap_password),
+            is_admin=True,
+            require_password_change=require_password_change,
+            default_organization_id=PLATFORM_ORGANIZATION_ID,
+        )
+        await User.create(session, user)
+
+        session.add(
+            OrganizationMembership(
+                user_id=user.id,
+                organization_id=PLATFORM_ORGANIZATION_ID,
+                role=OrgRole.OWNER,
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+        )
+        await session.commit()
 
     async def _migrate_legacy_token(self, session: AsyncSession):
         if not self._config.token:
