@@ -7,8 +7,8 @@ GPUStack 当前只区分管理员（admin）和普通用户两类身份，普通
 本设计在现有 User/Admin 两层身份之上引入 **Organization → UserGroup → User** 三层租户模型：
 
 - 用户可加入多个 Organization（跨组织成员）
-- 资源永远归属单个 Organization，跨 Org 默认硬隔离
-- 管理员显式将 Cluster 授权给 Org / Group / User
+- **租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）归属单个 Organization，跨 Org 默认硬隔离
+- **平台基础设施**（Cluster / Worker / CloudCredential）不归属任何 Org，由平台 admin 持有；通过 `cluster_access` 显式授权给 Org / Group / User，可一对多
 - GPU 实例配额通过 K8s `ResourceQuota` 落地
 - 平台公共资源通过 ModelRoute 显式发布到其他 Org
 
@@ -20,7 +20,7 @@ GitHub Issue: TBD
 
 | 编号 | 需求 |
 |---|---|
-| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org，资源归属单个 Org |
+| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org，**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）归属单个 Org。**平台基础设施**（Cluster / Worker）不归属 Org，独立由平台 admin 管理 |
 | F2 | 引入 UserGroup（Org 内子单元）以支持部门/团队级资源共享 |
 | F3 | 普通用户仅可见/管理在当前 Org 上下文中归属于自己或自己所在 Group/Org 的资源 |
 | F4 | 管理员可将 Cluster 授权给 Org / Group / User |
@@ -41,17 +41,20 @@ GitHub Issue: TBD
 | N4 | 模型推理并发数/调用速率配额 | 走计费/限流路径，不在本期 |
 | N5 | SSH 网关路由细节 | 单独设计 |
 | N6 | 跨 Org "默认共享" 资源（取代旧 `is_system` 概念） | 与硬隔离/计费冲突；统一通过 ModelRoute 显式发布 |
+| N7 | Org 自建 / 自管 Cluster（"BYO cluster"）| 一期所有 Cluster 由平台 admin 持有；Org 自治集群涉及计费、admin 干预权、credential 隔离等政策决策，下沉到[未来扩展](#未来扩展bring-your-own-cluster) |
 
 ## 解决方案
 
 ### 整体思路
 
-**身份层与资源层解耦**：
+**身份层、平台基础设施层与租户资源层解耦**：
 
 - **身份层**：在 `User` 之上新增 `Organization`、`OrganizationMembership`、`UserGroup`、`UserGroupMembership` 描述"用户在组织中的归属与角色"。
-- **授权层**：新增 `cluster_access` 描述"哪个 principal（org/group/user）能访问哪个 cluster"。
-- **资源层**：所有可租户化资源增加 `organization_id`（强制）+ `owner_type/owner_id`（精细化），形成"硬隔离 + 精细化可见性"的双层归属。
+- **平台基础设施层**：`Cluster`、`Worker`、`CloudCredential` 不带 `organization_id`，由平台 admin 全局管理；通过新增的 `cluster_access` 表把 cluster 显式授权给 principal（org / group / user），同一 cluster 可同时授权给多个 principal。
+- **租户资源层**：所有租户资源（`models` / `model_instances` / `model_routes` / `api_keys` 等）增加 `organization_id`（强制）+ `owner_type/owner_id`（精细化），形成"硬隔离 + 精细化可见性"的双层归属。
 - **K8s 资源层**：通过 `tenant_namespaces`、`tenant_quotas` 把租户语义投射到 K8s namespace + ResourceQuota，由 reconciler 维护一致性。
+
+**为什么 Cluster 不归属单个 Org**：Cluster 代表物理/云端的计算池，先天是共享基础设施——admin 把同一台 K8s Cluster 同时授权给"研发"和"算法"两个 Org 是常态。如果硬塞 `organization_id` 进 `clusters`，要么逼 admin 为每个 Org 复制 cluster（资源浪费），要么需要额外的"共享 cluster"豁免逻辑（破坏硬隔离的简单性）。`cluster_access` 这张多对多授权表是更直接的表达。Org 真正"独占"的是该 Org 在该 Cluster 上对应的 K8s namespace 和 ResourceQuota——租户隔离的边界从"Cluster 整体"下沉到了"namespace"。
 
 ### 跨 Org 用户的请求语义
 
@@ -149,6 +152,7 @@ stmt = stmt.where(
 | L6 | API Key 与 Org 是绑定关系，跨 Org 必须使用不同的 API key（不支持运行时切 Org） |
 | L7 | 一个 (Org × Cluster) 当前对应一个 namespace；如需进一步隔离 Group（独立 NetworkPolicy 等），需扩展 `tenant_namespaces` 增加 group 维度 |
 | L8 | 平台 admin 默认是 platform Org owner，权限来源冗余，需文档说明 |
+| L9 | 所有 Cluster / CloudCredential / Worker 由平台 admin 持有，Org 无法自建集群或接入私有云账号；详见[未来扩展：Bring-Your-Own Cluster](#未来扩展bring-your-own-cluster) |
 
 ---
 
@@ -525,3 +529,66 @@ P0 必须先完成；P1 是所有后续工作的前置；P2 / P3 / P4 可并行�
 | 跨 Org 用户在 UI 切换 Org 时缓存污染 | 切换 Org 触发前端 store 全量重置 + 路由刷新 |
 | API Key 与 Org 强绑定带来的迁移问题 | 旧 API key 默认绑定 platform Org，使用语义不变；用户跨 Org 时需新建 key |
 | 平台 admin 旁路过宽 | 关键写操作打审计日志；后续可在 `is_admin` 之上叠加更细粒度权限 |
+
+## 未来扩展：Bring-Your-Own Cluster
+
+本期所有 Cluster 由平台 admin 持有。落地之后即将出现的诉求是 **Org 自建并自管 Cluster**，例如：
+
+- 企业租户带着自己的 AWS / GCP 账号入驻，不愿把 cloud key 交给平台 admin
+- 部门买了一批 GPU 机器，希望加到自家 Org 的 worker pool，不走 admin 排队
+- 数据合规要求某些 Org 的工作负载只能跑在他们自己注册的本地 K8s 集群
+
+之所以一期不做，是因为决策点未收敛：是否对 Org 自管集群收管理费？平台 admin 是否保留干预权（强制删 / 审计 / 资源回收）？credential 隔离的边界？跨 Org "分租"是否允许？这些是产品/政策问题，不是纯技术问题，先把 admin-managed 的闭环跑通更重要。
+
+下面是预期的扩展路径，一期写代码时已有意识地不挡这条路：
+
+### Schema 增量
+
+```sql
+ALTER TABLE clusters
+    ADD COLUMN organization_id INTEGER NULL REFERENCES organizations(id);
+-- NULL = 平台共享集群（admin 管，现状）
+-- NOT NULL = 该 Org 自管集群
+
+ALTER TABLE cloud_credentials
+    ADD COLUMN organization_id INTEGER NULL REFERENCES organizations(id);
+-- 同上：NULL = 平台共享，NOT NULL = Org 私有
+
+ALTER TABLE worker_pools
+    ADD COLUMN organization_id INTEGER NULL REFERENCES organizations(id);
+-- 跟随其 cluster 的归属
+```
+
+字段全部可空，对现存数据无破坏；当前所有 cluster 视为 `organization_id = NULL` 继续工作。
+
+### 权限语义
+
+| 主体 | platform-owned cluster | org-owned cluster |
+|---|---|---|
+| 平台 admin | CRUD + 授权 | 可见、可干预（审计 / 强制回收） |
+| Org owner / admin | 只读 + 在被授权范围内使用 | 在自家 Org 内 CRUD；可对外授权（"分租"给其他 Org） |
+| Org member | 按 `cluster_access` | 按 `cluster_access` |
+
+### `cluster_access` 行为
+
+- **platform-owned**：完全靠 `cluster_access` 显式授权（即一期行为）
+- **org-owned**：拥有方 Org **隐式**具备访问权（不需要写 `cluster_access` 行）；如果想分享给其他 Org / Group / User，依然写 `cluster_access`
+
+### Quota / Namespace
+
+`(Org × Cluster) → namespace + ResourceQuota` 的模型不动：
+- 自家 Org 在自家 cluster 上仍然要建 namespace（这样 Group 级别再隔离才有空间）
+- 对 owner Org 默认 quota 一般为 unlimited，由 owner 自己决定是否给 Group 设子配额
+
+### 计费策略（产品决策）
+
+二选一：
+
+- **统一计量**：所有 namespace 的 GPU/CPU/内存用量都计费，不区分 cluster 归属。优点是逻辑简单；缺点是 Org 自带集群也被收"管理费"，模糊了"自建"的价值
+- **按 cluster 归属计量**：platform-owned cluster 的用量计费；org-owned cluster 跳过 quota 计量，只走 audit 日志。优点是"自带硬件零边际成本"对租户更友好；缺点是计费代码要分两套路径
+
+这个决策应该在落地前由产品/商业侧明确。
+
+### 工作量估计
+
+约 1 个 PR：schema 改动 + 权限层的归属判定分支 + 前端 cluster 创建表单加"归属 Org"选择（admin 可选 platform 或任意 Org，Org owner 默认且锁定为自己 Org）。如果同时做计费分支，估 2 个 PR。

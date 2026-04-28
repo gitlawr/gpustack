@@ -17,14 +17,14 @@ Resolution order for current_org_id:
 """
 
 from dataclasses import dataclass, field
-from typing import Annotated, List, Optional, Set, Tuple
+from typing import Annotated, Any, List, Optional, Set, Tuple
 
 from fastapi import Depends, Header, Request
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from gpustack.api.auth import get_current_user
-from gpustack.api.exceptions import ForbiddenException
+from gpustack.api.exceptions import ForbiddenException, NotFoundException
 from gpustack.schemas.api_keys import ApiKey
 from gpustack.schemas.cluster_access import ClusterAccess
 from gpustack.schemas.organizations import OrganizationMembership
@@ -70,7 +70,7 @@ async def _resolve_membership(
         OrganizationMembership.user_id == user_id,
         OrganizationMembership.organization_id == org_id,
     )
-    return (await session.exec(stmt)).scalar_one_or_none()
+    return (await session.exec(stmt)).first()
 
 
 async def _user_group_ids(
@@ -87,7 +87,7 @@ async def _user_group_ids(
             UserGroup.organization_id == org_id,
         )
     )
-    return [row for row in (await session.exec(stmt)).scalars().all()]
+    return list((await session.exec(stmt)).all())
 
 
 async def _accessible_clusters(
@@ -112,7 +112,7 @@ async def _accessible_clusters(
     from sqlalchemy import or_
 
     stmt = select(ClusterAccess.cluster_id).where(or_(*or_clauses))
-    return set((await session.exec(stmt)).scalars().all())
+    return set((await session.exec(stmt)).all())
 
 
 def _resolve_requested_org_id(
@@ -130,6 +130,12 @@ def _resolve_requested_org_id(
         except ValueError as exc:
             raise ForbiddenException(message="Invalid X-Organization-Id") from exc
 
+    # Platform admins default to "no org context" (cross-org platform view)
+    # when nothing is supplied. They opt into act-as mode by sending
+    # X-Organization-Id explicitly. Non-admins fall back to their default
+    # organization so they can never run requests outside an org context.
+    if user.is_admin:
+        return None
     return user.default_organization_id
 
 
@@ -193,6 +199,92 @@ async def require_platform_admin(
     if not ctx.is_platform_admin:
         raise PlatformAdminError(message="Platform admin permission required")
     return ctx
+
+
+def tenant_list_conditions(
+    ctx: TenantContext,
+    model: Any,
+    *,
+    use_owner: bool = True,
+) -> List[Any]:
+    """Build SQLAlchemy WHERE clauses to scope a list query to the caller.
+
+    Visibility model:
+    - Platform admin without org context (no header / no api_key org)
+      sees everything — returns no conditions.
+    - Platform admin WITH org context filters by ``organization_id`` only;
+      they bypass the per-principal owner filter so admin can see every
+      resource inside the org regardless of whether it's owned by a group
+      / user they don't belong to.
+    - Non-admin must be in the current org (``get_tenant_context`` already
+      enforced membership). They see resources whose
+      ``(owner_type, owner_id)`` is in ``accessible_principals``.
+
+    ``use_owner=False`` skips the owner-tuple filter — useful for resources
+    that don't carry ``owner_type/owner_id`` (api_keys / model_instances).
+    """
+    conditions: List[Any] = []
+    if ctx.is_platform_admin and ctx.current_org_id is None:
+        return conditions
+
+    if ctx.current_org_id is not None and hasattr(model, "organization_id"):
+        conditions.append(model.organization_id == ctx.current_org_id)
+
+    if (
+        not ctx.is_platform_admin
+        and use_owner
+        and hasattr(model, "owner_type")
+        and hasattr(model, "owner_id")
+        and ctx.accessible_principals
+    ):
+        conditions.append(
+            tuple_(model.owner_type, model.owner_id).in_(
+                [(p[0], p[1]) for p in ctx.accessible_principals]
+            )
+        )
+    return conditions
+
+
+def assert_resource_visible(
+    ctx: TenantContext,
+    resource: Any,
+    *,
+    use_owner: bool = True,
+    not_found_message: str = "Resource not found",
+) -> None:
+    """Raise 404 if the caller is not allowed to see ``resource``.
+
+    Mirrors the semantics of ``tenant_list_conditions`` for single-item
+    GET / PUT / DELETE handlers: same visibility rules, raised as 404
+    rather than 403 to avoid leaking the existence of cross-tenant rows.
+    """
+    if resource is None:
+        raise NotFoundException(message=not_found_message)
+
+    if ctx.is_platform_admin and ctx.current_org_id is None:
+        return
+
+    org_id = getattr(resource, "organization_id", None)
+    if (
+        ctx.current_org_id is not None
+        and org_id is not None
+        and org_id != ctx.current_org_id
+    ):
+        raise NotFoundException(message=not_found_message)
+
+    if ctx.is_platform_admin:
+        return
+
+    if not use_owner:
+        return
+
+    owner_type = getattr(resource, "owner_type", None)
+    owner_id = getattr(resource, "owner_id", None)
+    if owner_type is None or owner_id is None:
+        return
+
+    if (owner_type, owner_id) not in ctx.accessible_principals:
+        raise NotFoundException(message=not_found_message)
 
 
 def require_org_role(*allowed: OrgRole):

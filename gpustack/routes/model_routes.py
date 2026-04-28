@@ -30,6 +30,11 @@ from gpustack.schemas.model_provider import ModelProvider
 from gpustack.schemas.models import Model
 from gpustack.server.db import async_session
 from gpustack.server.deps import SessionDep, TenantContextDep
+from gpustack.api.tenant import (
+    TenantContext,
+    assert_resource_visible,
+    tenant_list_conditions,
+)
 from gpustack.schemas.users import User
 from gpustack.api.exceptions import (
     AlreadyExistsException,
@@ -55,12 +60,14 @@ my_models_router = APIRouter()
 
 @router.get("", response_model=ModelRoutesPublic, response_model_exclude_none=True)
 async def get_model_routes(
+    ctx: TenantContextDep,
     params: ModelRouteListParams = Depends(),
     name: str = None,
     search: str = None,
     categories: Optional[List[str]] = Query(None, description="Filter by categories."),
 ):
     return await _get_model_routes(
+        ctx=ctx,
         params=params,
         name=name,
         search=search,
@@ -76,6 +83,7 @@ async def _get_model_routes(
     user_id: Optional[int] = None,
     organization_id: Optional[int] = None,
     target_class: Union[ModelRoute, MyModel] = ModelRoute,
+    ctx: Optional[TenantContext] = None,
 ):
     fuzzy_fields = {}
     if search:
@@ -90,6 +98,16 @@ async def _get_model_routes(
     if organization_id is not None:
         fields["organization_id"] = organization_id
 
+    # Apply tenant scoping to the streaming path too. Skipped for the MyModel
+    # view which handles visibility through its own SQL view definition.
+    if (
+        ctx is not None
+        and target_class is ModelRoute
+        and ctx.current_org_id is not None
+        and "organization_id" not in fields
+    ):
+        fields["organization_id"] = ctx.current_org_id
+
     if params.watch:
         return StreamingResponse(
             target_class.streaming(
@@ -101,7 +119,14 @@ async def _get_model_routes(
         )
 
     async with async_session() as session:
-        extra_conditions = []
+        extra_conditions: list = []
+        # Apply tenant scoping when caller passed a TenantContext. ModelRoute
+        # doesn't carry owner_type/owner_id (visibility is via the
+        # model_route_principals table), so we only filter by org here.
+        if ctx is not None and target_class is ModelRoute:
+            extra_conditions.extend(
+                tenant_list_conditions(ctx, ModelRoute, use_owner=False)
+            )
         if categories:
             conditions = build_category_conditions(session, Model, categories)
             extra_conditions.append(or_(*conditions))
@@ -120,9 +145,10 @@ async def _get_model_routes(
 @router.get("/{id}", response_model=ModelRoutePublic, response_model_exclude_none=True)
 async def get_model_route(
     session: SessionDep,
+    ctx: TenantContextDep,
     id: int,
 ):
-    return await _get_model_route(session=session, id=id)
+    return await _get_model_route(session=session, id=id, ctx=ctx)
 
 
 async def _get_model_route(
@@ -131,6 +157,7 @@ async def _get_model_route(
     target_class: Union[ModelRoute, MyModel] = ModelRoute,
     user_id: Optional[int] = None,
     organization_id: Optional[int] = None,
+    ctx: Optional[TenantContext] = None,
 ):
     fields = {"id": id}
     if user_id is not None:
@@ -143,11 +170,20 @@ async def _get_model_route(
     )
     if not existing or existing.deleted_at is not None:
         raise NotFoundException(f"ModelAccess with id '{id}' not found.")
+    if ctx is not None and target_class is ModelRoute:
+        assert_resource_visible(
+            ctx,
+            existing,
+            use_owner=False,
+            not_found_message=f"ModelAccess with id '{id}' not found.",
+        )
     return existing
 
 
 @router.post("", response_model=ModelRoutePublic, response_model_exclude_none=True)
-async def create_model_route(session: SessionDep, input: ModelRouteCreate):
+async def create_model_route(
+    session: SessionDep, ctx: TenantContextDep, input: ModelRouteCreate
+):
     existing = await ModelRoute.one_by_fields(
         session,
         {'deleted_at': None, "name": input.name},
@@ -160,6 +196,9 @@ async def create_model_route(session: SessionDep, input: ModelRouteCreate):
     targets = input.targets or []
     await validate_targets(session, targets)
     source["targets"] = len(targets)
+    # Stamp the route's owning org from the caller's tenant context.
+    if ctx.current_org_id is not None:
+        source.setdefault("organization_id", ctx.current_org_id)
     try:
         route: ModelRoute = await ModelRoute.create(
             session=session, source=source, auto_commit=False
@@ -186,6 +225,7 @@ async def create_model_route(session: SessionDep, input: ModelRouteCreate):
 async def update_model_route(
     id: int,
     session: SessionDep,
+    ctx: TenantContextDep,
     input: ModelRouteUpdate,
 ):
     existing = await ModelRoute.one_by_id(
@@ -194,6 +234,12 @@ async def update_model_route(
     )
     if not existing or existing.deleted_at is not None:
         raise NotFoundException(f"ModelRoute with id '{id}' not found.")
+    assert_resource_visible(
+        ctx,
+        existing,
+        use_owner=False,
+        not_found_message=f"ModelRoute with id '{id}' not found.",
+    )
     duplicated_name = await ModelRoute.one_by_fields(
         session,
         {'deleted_at': None, "name": input.name},
@@ -231,6 +277,7 @@ async def update_model_route(
 async def delete_model_route(
     id: int,
     session: SessionDep,
+    ctx: TenantContextDep,
 ):
     existing = await ModelRoute.one_by_id(
         session=session,
@@ -242,6 +289,12 @@ async def delete_model_route(
     )
     if not existing or existing.deleted_at is not None:
         raise NotFoundException(f"ModelRoute with id '{id}' not found.")
+    assert_resource_visible(
+        ctx,
+        existing,
+        use_owner=False,
+        not_found_message=f"ModelRoute with id '{id}' not found.",
+    )
     try:
         await revoke_model_access_cache(session=session, model=existing)
         await ModelRouteService(session).delete(existing)

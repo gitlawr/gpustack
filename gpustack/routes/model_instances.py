@@ -18,8 +18,12 @@ from gpustack.api.exceptions import (
 )
 from gpustack.schemas.workers import Worker
 from gpustack.schemas.clusters import Cluster
+from gpustack.api.tenant import (
+    assert_resource_visible,
+    tenant_list_conditions,
+)
 from gpustack.server.db import async_session
-from gpustack.server.deps import ListParamsDep, SessionDep
+from gpustack.server.deps import ListParamsDep, SessionDep, TenantContextDep
 from gpustack.schemas.models import (
     BackendEnum,
     ModelInstance,
@@ -75,6 +79,7 @@ def _unmap_container_display_name(
 
 @router.get("", response_model=ModelInstancesPublic)
 async def get_model_instances(
+    ctx: TenantContextDep,
     params: ListParamsDep,
     id: Optional[int] = None,
     model_id: Optional[int] = None,
@@ -94,6 +99,9 @@ async def get_model_instances(
     if state:
         fields["state"] = state
 
+    if ctx.current_org_id is not None:
+        fields["organization_id"] = ctx.current_org_id
+
     if params.watch:
         return StreamingResponse(
             ModelInstance.streaming(fields=fields),
@@ -101,9 +109,15 @@ async def get_model_instances(
         )
 
     async with async_session() as session:
+        # Instances don't carry their own owner_type/owner_id — visibility
+        # follows the parent Model. Org scoping (organization_id) is enough
+        # at the list level because the migration backfilled instances to
+        # match their model.
+        extra_conditions = tenant_list_conditions(ctx, ModelInstance, use_owner=False)
         return await ModelInstance.paginated_by_query(
             session=session,
             fields=fields,
+            extra_conditions=extra_conditions,
             page=params.page,
             per_page=params.perPage,
         )
@@ -112,11 +126,16 @@ async def get_model_instances(
 @router.get("/{id}", response_model=ModelInstancePublic)
 async def get_model_instance(
     session: SessionDep,
+    ctx: TenantContextDep,
     id: int,
 ):
     model_instance = await ModelInstance.one_by_id(session, id)
-    if not model_instance:
-        raise NotFoundException(message="Model instance not found")
+    assert_resource_visible(
+        ctx,
+        model_instance,
+        use_owner=False,
+        not_found_message="Model instance not found",
+    )
     return model_instance
 
 
@@ -416,11 +435,18 @@ async def create_model_instance(
 
 @router.put("/{id}", response_model=ModelInstancePublic)
 async def update_model_instance(
-    session: SessionDep, id: int, model_instance_in: ModelInstanceUpdate
+    session: SessionDep,
+    ctx: TenantContextDep,
+    id: int,
+    model_instance_in: ModelInstanceUpdate,
 ):
     model_instance = await ModelInstance.one_by_id(session, id, for_update=True)
-    if not model_instance:
-        raise NotFoundException(message="Model instance not found")
+    assert_resource_visible(
+        ctx,
+        model_instance,
+        use_owner=False,
+        not_found_message="Model instance not found",
+    )
 
     try:
         await ModelInstanceService(session).update(model_instance, model_instance_in)
@@ -432,10 +458,14 @@ async def update_model_instance(
 
 
 @router.delete("/{id}")
-async def delete_model_instance(session: SessionDep, id: int):
+async def delete_model_instance(session: SessionDep, ctx: TenantContextDep, id: int):
     model_instance = await ModelInstance.one_by_id(session, id, for_update=True)
-    if not model_instance:
-        raise NotFoundException(message="Model instance not found")
+    assert_resource_visible(
+        ctx,
+        model_instance,
+        use_owner=False,
+        not_found_message="Model instance not found",
+    )
 
     try:
         await ModelInstanceService(session).delete(model_instance)
