@@ -29,7 +29,7 @@ from gpustack.schemas.model_routes import (
 from gpustack.schemas.model_provider import ModelProvider
 from gpustack.schemas.models import Model
 from gpustack.server.db import async_session
-from gpustack.server.deps import SessionDep, CurrentUserDep
+from gpustack.server.deps import SessionDep, TenantContextDep
 from gpustack.schemas.users import User
 from gpustack.api.exceptions import (
     AlreadyExistsException,
@@ -74,6 +74,7 @@ async def _get_model_routes(
     search: str = None,
     categories: Optional[List[str]] = None,
     user_id: Optional[int] = None,
+    organization_id: Optional[int] = None,
     target_class: Union[ModelRoute, MyModel] = ModelRoute,
 ):
     fuzzy_fields = {}
@@ -86,6 +87,8 @@ async def _get_model_routes(
 
     if user_id is not None:
         fields["user_id"] = user_id
+    if organization_id is not None:
+        fields["organization_id"] = organization_id
 
     if params.watch:
         return StreamingResponse(
@@ -127,10 +130,13 @@ async def _get_model_route(
     id: int,
     target_class: Union[ModelRoute, MyModel] = ModelRoute,
     user_id: Optional[int] = None,
+    organization_id: Optional[int] = None,
 ):
     fields = {"id": id}
     if user_id is not None:
         fields["user_id"] = user_id
+    if organization_id is not None:
+        fields["organization_id"] = organization_id
     existing = await target_class.one_by_fields(
         session=session,
         fields=fields,
@@ -711,16 +717,29 @@ async def add_model_authorization(
 
 @my_models_router.get("", response_model=ModelRoutesPublic)
 async def get_my_models(
-    user: CurrentUserDep,
+    ctx: TenantContextDep,
     params: ModelRouteListParams = Depends(),
     search: str = None,
     categories: Optional[List[str]] = Query(None, description="Filter by categories."),
 ):
+    """List the model routes available to the calling user.
+
+    For non-admin users: visibility is governed by `non_admin_user_models`,
+    which already encodes PUBLIC/AUTHED/ALLOWED_USERS/ALLOWED_PRINCIPALS
+    semantics. We do NOT additionally filter by current_org_id — routes
+    published cross-org via ALLOWED_PRINCIPALS would otherwise be hidden.
+    For platform admins: optionally filter by org if a context was provided.
+    """
+    user = ctx.user
     user_id = None
     target_class = ModelRoute
+    organization_id = None
     if not user.is_admin:
         target_class = MyModel
         user_id = user.id
+    else:
+        # Admin can opt into a per-org view by setting the org context.
+        organization_id = ctx.current_org_id
 
     return await _get_model_routes(
         params=params,
@@ -728,6 +747,7 @@ async def get_my_models(
         categories=categories,
         target_class=target_class,
         user_id=user_id,
+        organization_id=organization_id,
     )
 
 
@@ -735,17 +755,22 @@ async def get_my_models(
 async def get_my_model(
     session: SessionDep,
     id: int,
-    user: CurrentUserDep,
+    ctx: TenantContextDep,
 ):
+    user = ctx.user
     user_id = None
     target_class = ModelRoute
+    organization_id = None
     if not user.is_admin:
         target_class = MyModel
         user_id = user.id
+    else:
+        organization_id = ctx.current_org_id
 
     return await _get_model_route(
         session=session,
         id=id,
         user_id=user_id,
+        organization_id=organization_id,
         target_class=target_class,
     )
