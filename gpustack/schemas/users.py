@@ -68,6 +68,12 @@ class UserBase(SQLModel):
         default=None,
         sa_column=Column(Integer, ForeignKey("workers.id", ondelete="CASCADE")),
     )
+    default_organization_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(
+            Integer, ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
+        ),
+    )
 
 
 class UserCreate(UserBase):

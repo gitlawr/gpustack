@@ -105,6 +105,40 @@ from gpustack.schemas.model_routes import (
     ModelRouteTargetPublic,
     ModelRouteTargetsPublic,
 )
+from gpustack.schemas.organizations import (
+    Organization,
+    OrganizationCreate,
+    OrganizationUpdate,
+    OrganizationPublic,
+    OrganizationsPublic,
+    OrganizationMembership,
+    OrganizationMembershipPublic,
+)
+from gpustack.schemas.user_groups import (
+    UserGroup,
+    UserGroupCreate,
+    UserGroupUpdate,
+    UserGroupPublic,
+    UserGroupsPublic,
+    UserGroupMembership,
+    UserGroupMembershipPublic,
+)
+from gpustack.schemas.cluster_access import (
+    ClusterAccess,
+    ClusterAccessPublic,
+)
+from gpustack.schemas.tenant_namespaces import (
+    TenantNamespace,
+    TenantNamespacePublic,
+    TenantNamespacesPublic,
+)
+from gpustack.schemas.tenant_quotas import (
+    TenantQuota,
+    TenantQuotaUpdate,
+    TenantQuotaPublic,
+    TenantQuotasPublic,
+)
+from gpustack.schemas.links import ModelRoutePrincipalLink  # noqa: F401
 
 
 __all__ = [
@@ -204,4 +238,27 @@ __all__ = [
     "ModelRouteTargetUpdate",
     "ModelRouteTargetPublic",
     "ModelRouteTargetsPublic",
+    "Organization",
+    "OrganizationCreate",
+    "OrganizationUpdate",
+    "OrganizationPublic",
+    "OrganizationsPublic",
+    "OrganizationMembership",
+    "OrganizationMembershipPublic",
+    "UserGroup",
+    "UserGroupCreate",
+    "UserGroupUpdate",
+    "UserGroupPublic",
+    "UserGroupsPublic",
+    "UserGroupMembership",
+    "UserGroupMembershipPublic",
+    "ClusterAccess",
+    "ClusterAccessPublic",
+    "TenantNamespace",
+    "TenantNamespacePublic",
+    "TenantNamespacesPublic",
+    "TenantQuota",
+    "TenantQuotaUpdate",
+    "TenantQuotaPublic",
+    "TenantQuotasPublic",
 ]

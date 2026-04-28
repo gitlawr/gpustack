@@ -1,11 +1,12 @@
 from enum import Enum
 from datetime import datetime
 from typing import ClassVar, Optional, List, TYPE_CHECKING
-from sqlalchemy import Column, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Integer, UniqueConstraint
 from sqlmodel import Field, SQLModel, Text, JSON, Relationship
 
 from gpustack.mixins import BaseModelMixin
 from gpustack.schemas.common import ListParams, PaginatedList, UTCDateTime
+from gpustack.schemas.organizations import PLATFORM_ORGANIZATION_ID
 
 if TYPE_CHECKING:
     from gpustack.schemas.users import User
@@ -48,11 +49,23 @@ class ApiKeyBase(ApiKeyUpdate):
 
 class ApiKey(ApiKeyBase, BaseModelMixin, table=True):
     __tablename__ = 'api_keys'
-    __table_args__ = (UniqueConstraint('user_id', 'name', name='uix_user_id_name'),)
+    __table_args__ = (
+        UniqueConstraint(
+            'user_id', 'organization_id', 'name', name='uix_user_org_name'
+        ),
+    )
     id: Optional[int] = Field(default=None, primary_key=True)
     access_key: str = Field(unique=True, index=True)
     hashed_secret_key: str = Field(unique=True)
     user_id: int = Field(foreign_key='users.id', nullable=False)
+    organization_id: int = Field(
+        default=PLATFORM_ORGANIZATION_ID,
+        sa_column=Column(
+            Integer,
+            ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+    )
     expires_at: Optional[datetime] = Field(sa_column=Column(UTCDateTime), default=None)
     user: Optional["User"] = Relationship(
         back_populates="api_keys",

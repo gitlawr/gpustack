@@ -21,6 +21,7 @@ from gpustack.schemas.common import (
     ItemList,
 )
 from gpustack.schemas.links import UserModelRouteLink
+from gpustack.schemas.organizations import PLATFORM_ORGANIZATION_ID
 
 if TYPE_CHECKING:
     from gpustack.schemas.users import User
@@ -35,6 +36,7 @@ class AccessPolicyEnum(str, Enum):
     PUBLIC = "public"
     AUTHED = "authed"
     ALLOWED_USERS = "allowed_users"
+    ALLOWED_PRINCIPALS = "allowed_principals"
 
 
 class TargetStateEnum(str, Enum):
@@ -237,6 +239,11 @@ class ModelRouteBase(ModelRouteUpdateBase):
     targets: int = Field(default=0, nullable=False, ge=0)
     ready_targets: int = Field(default=0, nullable=False, ge=0)
     access_policy: AccessPolicyEnum = Field(default=AccessPolicyEnum.AUTHED)
+    organization_id: int = Field(
+        default=PLATFORM_ORGANIZATION_ID,
+        foreign_key="organizations.id",
+        nullable=False,
+    )
 
 
 class ModelRoute(ModelRouteBase, BaseModelMixin, table=True):

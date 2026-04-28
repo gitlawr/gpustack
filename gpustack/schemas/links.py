@@ -1,4 +1,5 @@
 from pydantic import ConfigDict
+from sqlalchemy import Enum as SQLEnum
 from sqlmodel import (
     Column,
     Field,
@@ -6,6 +7,8 @@ from sqlmodel import (
     Integer,
     SQLModel,
 )
+
+from gpustack.schemas.principals import PrincipalType
 
 
 class ModelInstanceModelFileLink(SQLModel, table=True):
@@ -66,4 +69,23 @@ class UserModelRouteLink(SQLModel, table=True):
             ForeignKey("users.id", ondelete="CASCADE"),
             primary_key=True,
         ),
+    )
+
+
+class ModelRoutePrincipalLink(SQLModel, table=True):
+    __tablename__ = 'model_route_principals'
+
+    route_id: int | None = Field(
+        default=None,
+        sa_column=Column(
+            Integer,
+            ForeignKey("model_routes.id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+    )
+    principal_type: PrincipalType = Field(
+        sa_column=Column(SQLEnum(PrincipalType), primary_key=True, nullable=False),
+    )
+    principal_id: int = Field(
+        sa_column=Column(Integer, primary_key=True, nullable=False),
     )

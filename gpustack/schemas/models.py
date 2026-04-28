@@ -5,7 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, model_validator
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, Enum as SQLEnum, ForeignKey, Integer
 from sqlmodel import Field, Relationship, SQLModel, Text
 
 from gpustack.schemas.common import (
@@ -25,6 +25,8 @@ from gpustack.schemas.model_routes import (
     ModelRouteTarget,
     AccessPolicyEnum,
 )
+from gpustack.schemas.organizations import PLATFORM_ORGANIZATION_ID
+from gpustack.schemas.principals import PrincipalType
 
 if TYPE_CHECKING:
     from gpustack.schemas.model_files import ModelFile
@@ -245,6 +247,19 @@ class ModelSpecBase(SQLModel, ModelSource):
 
 class ModelBase(ModelSpecBase):
     cluster_id: Optional[int] = Field(default=None, foreign_key="clusters.id")
+    organization_id: int = Field(
+        default=PLATFORM_ORGANIZATION_ID,
+        sa_column=Column(
+            Integer,
+            ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+    )
+    owner_type: PrincipalType = Field(
+        default=PrincipalType.ORG,
+        sa_column=Column(SQLEnum(PrincipalType), nullable=False),
+    )
+    owner_id: int = Field(default=PLATFORM_ORGANIZATION_ID, nullable=False)
     # Deprecated field, kept for backward compatibility
     access_policy: AccessPolicyEnum = Field(default=AccessPolicyEnum.AUTHED)
 
@@ -484,6 +499,14 @@ class ModelInstanceBase(SQLModel, ModelSource):
     model_config = ConfigDict(protected_namespaces=())
 
     cluster_id: Optional[int] = Field(default=None, foreign_key="clusters.id")
+    organization_id: int = Field(
+        default=PLATFORM_ORGANIZATION_ID,
+        sa_column=Column(
+            Integer,
+            ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+    )
 
     def get_deployment_metadata(
         self,
