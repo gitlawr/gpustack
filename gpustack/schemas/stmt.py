@@ -162,9 +162,32 @@ FROM
     users u
 INNER JOIN model_routes as m
     ON m.access_policy in ('PUBLIC', 'AUTHED')
-    OR EXISTS (
-        SELECT 1 FROM usermodelroutelink uml
-        WHERE uml.route_id = m.id AND uml.user_id = u.id
+    OR (
+        m.access_policy = 'ALLOWED_USERS'
+        AND EXISTS (
+            SELECT 1 FROM usermodelroutelink uml
+            WHERE uml.route_id = m.id AND uml.user_id = u.id
+        )
+    )
+    OR (
+        m.access_policy = 'ALLOWED_PRINCIPALS'
+        AND EXISTS (
+            SELECT 1 FROM model_route_principals p
+            WHERE p.route_id = m.id
+              AND (
+                  (p.principal_type = 'USER' AND p.principal_id = u.id)
+                  OR (p.principal_type = 'ORG' AND p.principal_id IN (
+                      SELECT om.organization_id
+                      FROM organization_memberships om
+                      WHERE om.user_id = u.id
+                  ))
+                  OR (p.principal_type = 'GROUP' AND p.principal_id IN (
+                      SELECT ugm.group_id
+                      FROM user_group_memberships ugm
+                      WHERE ugm.user_id = u.id
+                  ))
+              )
+        )
     )
 WHERE
     u.is_admin = {sql_false} AND u.is_system = {sql_false}

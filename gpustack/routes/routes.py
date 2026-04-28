@@ -15,6 +15,7 @@ from gpustack.routes import (
     model_evaluations,
     model_files,
     model_instances,
+    model_route_principals,
     model_sets,
     organization_members,
     organizations,
@@ -197,6 +198,11 @@ admin_routers = model_routers + [
         "router": model_routes.router,
         "prefix": "/model-routes",
         "tags": ["Model Routes"],
+    },
+    {
+        "router": model_route_principals.router,
+        "prefix": "/model-routes",
+        "tags": ["Model Route Principals"],
     },
     {
         "router": organizations.router,
