@@ -1,0 +1,527 @@
+# 多租户设计
+
+## 概述
+
+GPUStack 当前只区分管理员（admin）和普通用户两类身份，普通用户的能力局限于通过 `ModelRoute` 调用管理员上架的模型推理。随着 **GPU 实例管理**（K8s Pod + SSH 访问）功能的引入，普通用户需要能够独立创建和管理自己的工作负载，且不同用户/部门之间的资源必须互相隔离。
+
+本设计在现有 User/Admin 两层身份之上引入 **Organization → UserGroup → User** 三层租户模型：
+
+- 用户可加入多个 Organization（跨组织成员）
+- 资源永远归属单个 Organization，跨 Org 默认硬隔离
+- 管理员显式将 Cluster 授权给 Org / Group / User
+- GPU 实例配额通过 K8s `ResourceQuota` 落地
+- 平台公共资源通过 ModelRoute 显式发布到其他 Org
+
+GitHub Issue: TBD
+
+## 需求
+
+### 必须实现
+
+| 编号 | 需求 |
+|---|---|
+| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org，资源归属单个 Org |
+| F2 | 引入 UserGroup（Org 内子单元）以支持部门/团队级资源共享 |
+| F3 | 普通用户仅可见/管理在当前 Org 上下文中归属于自己或自己所在 Group/Org 的资源 |
+| F4 | 管理员可将 Cluster 授权给 Org / Group / User |
+| F5 | 用户可在多个被授权的 Cluster 上创建 GPU 实例（K8s Pod） |
+| F6 | 每个 (Org × Cluster) 自动 provision 一个 K8s namespace，GPU 实例落入对应 namespace |
+| F7 | 管理员可为 (Org × Cluster) 设置 GPU/CPU/内存/Pod 数量配额，落地到 K8s `ResourceQuota` |
+| F8 | 同一用户可在不同 Org 之间切换上下文，行为完全独立 |
+| F9 | 现有 `ModelRoute` 扩展为支持 principal（org/group/user）粒度的发布 |
+| F10 | 现有功能（admin 上架模型、推理调用、Worker、Cluster 等）平滑迁移，admin 体验不变 |
+
+### 不在本设计范围内
+
+| 编号 | 项 | 原因 |
+|---|---|---|
+| N1 | GPU 实例 CRD 设计 | K8s 团队负责 |
+| N2 | Backend ↔ K8s API 反向代理实现 | 单独设计 |
+| N3 | UserGroup 级别配额 | 一期不做，预留字段与扩展点 |
+| N4 | 模型推理并发数/调用速率配额 | 走计费/限流路径，不在本期 |
+| N5 | SSH 网关路由细节 | 单独设计 |
+| N6 | 跨 Org "默认共享" 资源（取代旧 `is_system` 概念） | 与硬隔离/计费冲突；统一通过 ModelRoute 显式发布 |
+
+## 解决方案
+
+### 整体思路
+
+**身份层与资源层解耦**：
+
+- **身份层**：在 `User` 之上新增 `Organization`、`OrganizationMembership`、`UserGroup`、`UserGroupMembership` 描述"用户在组织中的归属与角色"。
+- **授权层**：新增 `cluster_access` 描述"哪个 principal（org/group/user）能访问哪个 cluster"。
+- **资源层**：所有可租户化资源增加 `organization_id`（强制）+ `owner_type/owner_id`（精细化），形成"硬隔离 + 精细化可见性"的双层归属。
+- **K8s 资源层**：通过 `tenant_namespaces`、`tenant_quotas` 把租户语义投射到 K8s namespace + ResourceQuota，由 reconciler 维护一致性。
+
+### 跨 Org 用户的请求语义
+
+每个 API 请求必须能解析出 `current_organization_id`，否则无法定位资源：
+
+- **UI 会话**：登录后选择 Org，前端在请求头携带 `X-Organization-Id`
+- **API Key**：每个 API key 在创建时绑定到 (user, org)，服务端从 `access_key` 反查得到 org，**忽略请求头**（避免误用）
+- **平台 Admin (`is_admin=true`)**：可不携带 org 上下文，看到全平台；如携带则以该 Org 上下文 act-as
+
+### 三层身份并存
+
+```
+User                     — 全局身份；登录、SSH 公钥、API key 主体
+OrganizationMembership   — 用户在某 Org 内的角色（owner / admin / member）
+TenantContext            — 单次请求解析后的执行上下文
+```
+
+平台 `is_admin` 与 Org role **完全解耦**：是不是平台超管，与是不是某 Org 的 owner 互不蕴含。
+
+### 统一过滤
+
+通用查询过滤封装在 FastAPI 依赖中：
+
+```python
+stmt = stmt.where(Resource.organization_id == ctx.current_org_id)
+stmt = stmt.where(Resource.cluster_id.in_(ctx.accessible_cluster_ids))
+stmt = stmt.where(
+    tuple_(Resource.owner_type, Resource.owner_id).in_(ctx.accessible_principals)
+)
+```
+
+`organization_id` 一层放在最外，是所有租户隔离的兜底——任何遗漏的过滤最差也只会跨 owner，不会跨 Org。
+
+### K8s GPU 实例多租户
+
+- 每个 (Org × K8s Cluster) 自动 provision 一个 namespace：`gpustack-{org-slug}`
+- 用户创建 GPU 实例 → backend 反向代理 → 落入该 namespace
+- `ResourceQuota` apply 到 namespace，K8s 调度时自动拦截超限请求
+- backend 不维护 GPU 实例状态表，**CRD 是 source of truth**
+
+## 用户交互
+
+### 平台 Admin
+
+**变更前**：admin 看到所有 cluster、所有 model、所有 worker；为非 admin 用户上架模型并通过 ModelRoute 显式授权。
+
+**变更后**，新增工作流：
+
+1. **组织管理**：在"组织管理"页面创建/编辑 Org，关联计费账户
+2. **用户管理**：现有用户列表保留；为每个用户管理其加入的 Org 列表，并为每个 (user, org) 设置 Org 内角色
+3. **集群授权**：Cluster 详情页新增"访问授权"标签，把 cluster 授权给 Org / Group / User
+4. **配额设置**：Cluster 详情页或 Org 详情页设置 (Org × Cluster) 配额
+5. **Group 管理**：可由 admin 代管，也可由 Org owner 在其 Org 内自治
+
+保留现有：模型上架/管理、Worker 管理、推理监控等。Admin 上架的模型默认归属内置 **platform Org**，通过 ModelRoute 发布给其他 Org。
+
+### Org owner / Org admin
+
+普通用户的子集，由平台 admin 在添加成员时指定角色。新增能力：
+
+- 管理本 Org 的 UserGroup
+- 管理本 Org 内成员的 group 归属
+- 查看本 Org 在各 cluster 的配额使用情况
+- 管理本 Org 内 owner_type='org' 的资源
+
+### 普通用户
+
+**变更前**：登录后看到 `/my-models`，使用自己的 API key 调推理。
+
+**变更后**：
+
+1. 登录后右上角增加 **Org 切换器**，列出加入的所有 Org，默认选中 `default_organization_id`
+2. 切换 Org 后整个 UI 重新加载该 Org 的资源（列表、配额、API key 等）
+3. **GPU 实例**：在被授权的 cluster 上创建 GPU 实例，上传 SSH 公钥，运行后 SSH 接入
+4. **API Key**：创建时强制选择归属 Org；调用时该 key 仅能访问该 Org 的资源
+5. **推理调用**：行为不变，但 `/my-models` 仅返回发布到当前 Org 的 ModelRoute 关联的模型
+
+### CLI / API 调用变更
+
+| 场景 | 变更前 | 变更后 |
+|---|---|---|
+| `Authorization: Bearer <api_key>` | 等价于 user 身份 | 等价于 (user, key.org_id) 上下文 |
+| 平台 admin 调用列表 API | 看到全平台 | 默认看到全平台；带 `X-Organization-Id` 时按该 Org 过滤 |
+| 普通用户列表 API | 看到自己的 | 必须带 `X-Organization-Id` 或使用绑定 Org 的 API key；返回当前 Org 内可见资源 |
+
+## 已知问题和限制
+
+| 编号 | 限制 |
+|---|---|
+| L1 | UserGroup 级 ResourceQuota 一期不实现；同 Org 内多个 Group 共享 Org 级配额 |
+| L2 | 模型推理调用频率/并发不在 Quota 体系内，依赖现有计费/限流 |
+| L3 | 跨 Org 共享必须通过 ModelRoute 显式发布，不存在"全 Org 默认共享"的资源 |
+| L4 | `owner_type/owner_id` 是多态字段，无 DB 级 FK 约束，需依赖应用层校验 |
+| L5 | 平台 admin 的 `is_admin=true` 是全局旁路，没有更细粒度的"平台运维 vs 平台超管"分级 |
+| L6 | API Key 与 Org 是绑定关系，跨 Org 必须使用不同的 API key（不支持运行时切 Org） |
+| L7 | 一个 (Org × Cluster) 当前对应一个 namespace；如需进一步隔离 Group（独立 NetworkPolicy 等），需扩展 `tenant_namespaces` 增加 group 维度 |
+| L8 | 平台 admin 默认是 platform Org owner，权限来源冗余，需文档说明 |
+
+---
+
+## 实现细节
+
+### 架构
+
+#### 模块分层
+
+```
+┌──────────────────────────────────────────────┐
+│ Routes Layer                                 │
+│  - 平台级   (require_platform_admin)         │
+│  - Org 级   (require_org_role)               │
+│  - 用户级   (TenantContext + 过滤)           │
+└──────────────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────┐
+│ TenantContext (FastAPI Dependency)           │
+│  解析: current_user, current_org_id,         │
+│        accessible_cluster_ids,               │
+│        accessible_principals                 │
+└──────────────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────┐
+│ Services Layer (现有)                         │
+│  list/get/update/delete 调用统一过滤函数      │
+└──────────────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────┐
+│ Storage Layer                                 │
+│  + organizations / organization_memberships   │
+│  + user_groups / user_group_memberships       │
+│  + cluster_access                             │
+│  + tenant_namespaces / tenant_quotas          │
+│  ~ models / api_keys 加 organization_id       │
+└──────────────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────┐
+│ Reconcilers (后台进程)                         │
+│  - NamespaceReconciler                        │
+│  - QuotaReconciler                            │
+└──────────────────────────────────────────────┘
+```
+
+#### 新增组件
+
+**TenantContext 依赖**
+统一替代大多数业务路由上的 `CurrentUserDep`。`CurrentUserDep` 仅保留给 `/me/*` 这类纯用户身份的端点。
+
+**NamespaceReconciler**（后台进程）
+- 输入：`tenant_namespaces` 表的状态
+- 输出：在目标 K8s cluster 创建/删除 namespace、ServiceAccount、RoleBinding
+- 触发：行变更事件 + 定期全量校准
+
+**QuotaReconciler**（后台进程）
+- 输入：`tenant_quotas` 表 + `tenant_namespaces` 表
+- 输出：每个 (org, cluster) 对应 namespace 上的 `ResourceQuota` 对象
+- 触发：行变更事件 + 定期全量校准
+
+部署形态：
+- 一期与 server 同进程跑，作为 lifespan 启动的 task
+- 后期可拆为独立 deployment + leader election
+
+#### 数据模型
+
+**新增表**：
+
+```sql
+CREATE TABLE organizations (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    description TEXT,
+    billing_account_ref TEXT,
+    is_platform BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE organization_memberships (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    created_at TIMESTAMP,
+    PRIMARY KEY (user_id, organization_id)
+);
+
+CREATE TABLE user_groups (
+    id INTEGER PRIMARY KEY,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    UNIQUE (organization_id, name)
+);
+
+CREATE TABLE user_group_memberships (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, group_id)
+);
+
+CREATE TABLE cluster_access (
+    cluster_id INTEGER NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    principal_type TEXT NOT NULL CHECK (principal_type IN ('org','group','user')),
+    principal_id INTEGER NOT NULL,
+    granted_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP,
+    PRIMARY KEY (cluster_id, principal_type, principal_id)
+);
+
+CREATE TABLE tenant_namespaces (
+    id INTEGER PRIMARY KEY,
+    cluster_id INTEGER NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    namespace_name TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',  -- pending|provisioning|ready|error|deleting
+    state_message TEXT,
+    UNIQUE (cluster_id, organization_id),
+    UNIQUE (cluster_id, namespace_name)
+);
+
+CREATE TABLE tenant_quotas (
+    id INTEGER PRIMARY KEY,
+    cluster_id INTEGER NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    gpu INTEGER,                  -- requests.nvidia.com/gpu
+    cpu_milli INTEGER,            -- requests.cpu (millicores)
+    memory_bytes BIGINT,          -- requests.memory
+    pod_count INTEGER,            -- pods
+    UNIQUE (cluster_id, organization_id)
+);
+```
+
+**已有表的字段扩展**：
+
+```sql
+ALTER TABLE users
+    ADD COLUMN default_organization_id INTEGER REFERENCES organizations(id);
+
+ALTER TABLE api_keys
+    ADD COLUMN organization_id INTEGER NOT NULL REFERENCES organizations(id);
+ALTER TABLE api_keys DROP CONSTRAINT uix_user_id_name;
+ALTER TABLE api_keys
+    ADD CONSTRAINT uix_user_org_name UNIQUE (user_id, organization_id, name);
+
+ALTER TABLE models
+    ADD COLUMN organization_id INTEGER NOT NULL REFERENCES organizations(id);
+ALTER TABLE models ADD COLUMN owner_type TEXT NOT NULL DEFAULT 'org';
+ALTER TABLE models ADD COLUMN owner_id INTEGER NOT NULL;
+
+ALTER TABLE model_instances
+    ADD COLUMN organization_id INTEGER NOT NULL REFERENCES organizations(id);
+-- model_instances 的 owner 跟随其 model
+```
+
+**ModelRoute 扩展**：
+
+```sql
+ALTER TABLE model_routes
+    ADD COLUMN organization_id INTEGER NOT NULL REFERENCES organizations(id);
+
+CREATE TABLE model_route_principals (
+    route_id INTEGER NOT NULL REFERENCES model_routes(id) ON DELETE CASCADE,
+    principal_type TEXT NOT NULL CHECK (principal_type IN ('org','group','user')),
+    principal_id INTEGER NOT NULL,
+    PRIMARY KEY (route_id, principal_type, principal_id)
+);
+
+-- access_policy 增加枚举值 ALLOWED_PRINCIPALS（保留 ALLOWED_USERS 兼容）
+```
+
+### API 改动
+
+#### 路由分层
+
+```python
+# 平台超管 only
+platform_admin_router = APIRouter(dependencies=[Depends(require_platform_admin)])
+platform_admin_router.include_router(organizations.router, prefix="/organizations")
+platform_admin_router.include_router(cluster_access.router, prefix="/clusters/{id}/access")
+# Worker / Cluster CRUD / 模型上架 仍在平台级
+
+# Org 级（require_org_role 校验当前 user 在 current_org 中的 role）
+org_router = APIRouter(dependencies=[Depends(get_tenant_context), Depends(require_org_admin)])
+org_router.include_router(user_groups.router, prefix="/organizations/{org_id}/groups")
+org_router.include_router(memberships.router, prefix="/organizations/{org_id}/members")
+org_router.include_router(quotas.router, prefix="/organizations/{org_id}/quotas")
+
+# 用户级（任何已登录、已选定 Org 的用户）
+tenant_router = APIRouter(dependencies=[Depends(get_tenant_context)])
+tenant_router.include_router(api_keys.router, ...)         # 隐含按 current_org 过滤
+tenant_router.include_router(my_models.router, ...)         # ModelRoute 按 principal 解析
+tenant_router.include_router(gpu_instances.router, ...)     # 反向代理到 K8s
+
+# 自身身份（不需要 Org 上下文）
+me_router = APIRouter(dependencies=[Depends(get_current_user)])
+me_router.include_router(me.router, ...)                    # /me/organizations 等
+```
+
+#### 新增端点
+
+| 路径 | 方法 | 权限 | 说明 |
+|---|---|---|---|
+| `/v1/organizations` | GET, POST | 平台 admin | 列表 / 创建 Org |
+| `/v1/organizations/{id}` | GET, PUT, DELETE | 平台 admin | Org 详情 / 编辑 / 删除 |
+| `/v1/organizations/{id}/members` | GET, POST | 平台 admin / Org owner | 成员管理 |
+| `/v1/organizations/{id}/members/{user_id}` | PUT, DELETE | 平台 admin / Org owner | 角色变更 / 移除 |
+| `/v1/organizations/{id}/groups` | GET, POST | 平台 admin / Org admin+ | Group 管理 |
+| `/v1/organizations/{id}/groups/{gid}/members` | GET, POST, DELETE | 平台 admin / Org admin+ | Group 成员管理 |
+| `/v1/clusters/{id}/access` | GET, POST, DELETE | 平台 admin | 集群访问授权 |
+| `/v1/organizations/{id}/quotas` | GET, PUT | 平台 admin | 配额管理（org × cluster） |
+| `/v1/me/organizations` | GET | 任意登录用户 | 我加入的 Org |
+| `/v1/me/organizations/{id}/clusters` | GET | 任意登录用户 | 当前 Org 我能访问的 cluster |
+
+#### 现有端点的行为变更
+
+| 端点 | 变更 |
+|---|---|
+| `POST /v1/api-keys` | 必须携带 `X-Organization-Id`（或使用已绑定 Org 的 API key 调用）；保存时记录 `organization_id` |
+| `GET /v1/api-keys` | 只返回当前 Org 下的 key |
+| `POST /v1/models`、`GET /v1/models` | 加 `organization_id` 过滤；admin 创建的默认归属 platform Org |
+| `GET /v1/clusters` | 平台 admin 看全部；普通用户看当前 Org 在 `cluster_access` 中授权的 |
+| `GET /my-models` | 解析当前 Org 上下文中的 ModelRoute principal 匹配项 |
+
+#### 请求头与认证
+
+```
+Authorization: Bearer <token>          # 不变
+X-Organization-Id: <org_id>            # 新增；UI 会话路径必须；API key 路径忽略
+```
+
+API Key 反查流程：`access_key` → `ApiKey` 行 → 取 `user_id` 与 `organization_id` → 组装 TenantContext。
+
+### 其他
+
+#### 数据迁移
+
+迁移在 alembic upgrade 中完成：
+
+1. 创建 `organizations` 表，插入 `id=1, slug='platform', is_platform=true`
+2. 创建 `organization_memberships`，把所有现有 user 加入 platform Org，role 由 `is_admin` 决定（true → owner，false → member）
+3. 创建 `user_groups`、`user_group_memberships`、`cluster_access`、`tenant_namespaces`、`tenant_quotas`（空表）
+4. `users.default_organization_id` 全部回填 1
+5. `api_keys.organization_id` 全部回填 1
+6. `models / model_instances / model_routes.organization_id` 全部回填 1
+7. `models.owner_type='org', owner_id=1` 回填
+8. 把现有所有 cluster 在 `cluster_access` 中授权给 platform Org（保留现状）
+9. 现有 ModelRoute 的 `UserModelRouteLink` 复制一份到 `model_route_principals`（principal_type='user'）
+
+迁移须在 sqlite 与 postgres 双 DB 测试通过；`ALTER TABLE` 兼容性由 alembic 的 `batch_alter_table` 处理。
+
+#### 平台 Org 与平台 admin 的关系
+
+- 平台 admin = `users.is_admin=true`，全局旁路所有 Org 隔离
+- 平台 Org = `organizations.is_platform=true` 的内置 Org，承载平台公共资产（admin 上架的模型等）
+- 平台 admin 默认是平台 Org 的 owner，但两者职责不同：
+  - 平台 admin：管理跨 Org 资源（创建 Org、cluster_access、worker 等）
+  - 平台 Org owner：管理平台 Org 内部资产（公共模型、Group 等）
+- 实务上同一人持有两个角色，但权限来源不同，便于审计
+
+#### ModelRoute 兼容期
+
+新增 `model_route_principals` 表后：
+- 旧 `UserModelRouteLink` 表保留 30 天兼容期，读取时 union 两表
+- `access_policy` 加 `ALLOWED_PRINCIPALS`，旧的 `ALLOWED_USERS` 视为只看 principal_type='user' 的子集
+- 兼容期结束后由独立迁移移除旧表
+
+#### 反向代理对接（仅说明接口契约）
+
+GPU 实例操作走 backend 反向代理 K8s API（具体由另一份设计覆盖）。本设计提供以下契约：
+
+- 给定 (user, current_org_id, cluster_id)，反向代理层应：
+  1. 校验 user 在 current_org 中的成员资格
+  2. 校验 (current_org / user / user 的 group) 任一在 `cluster_access` 中有该 cluster
+  3. 解析出目标 namespace（`tenant_namespaces` 中 `(cluster_id, current_org_id)` 唯一一行）
+  4. 解析或按需创建该 user 在该 namespace 的 ServiceAccount Token
+  5. 在 K8s API URL 中注入 namespace 路径段后转发
+
+#### Reconciler 同步语义
+
+**NamespaceReconciler**：
+- Desired = `tenant_namespaces` 中 state ∈ {pending, provisioning, ready}
+- Actual = K8s cluster 中以 `gpustack.ai/managed=true` 标签筛选的 namespace
+- 差异处理：缺失 → 创建 ns + 绑定 RBAC；多余（state=deleting）→ 删除 ns
+
+**QuotaReconciler**：
+- Desired = `tenant_quotas` 中已对应 ready namespace 的行
+- Actual = 各 namespace 上以 `gpustack.ai/quota-managed=true` 标签筛选的 ResourceQuota
+- 差异处理：apply / patch / delete
+
+两个 reconciler 都采用 **事件驱动 + 周期全量** 双路径；周期间隔 5 分钟，事件触发延迟 1–3 秒。
+
+### 研发计划
+
+按 PR 维度分阶段，每个阶段对外可单独发布；admin 体验在 P0–P2 期间不变。
+
+#### P0：Schema 基础（1 个 PR）
+
+- alembic 迁移：新增 7 张表 + 现有表字段
+- 数据回填到 platform Org（id=1）
+- SQLModel 定义新表
+- **不改路由、不改业务逻辑**
+- 测试：sqlite + postgres 双 DB 迁移通过 + 回滚通过
+
+工作量：约 3 天。
+
+#### P1：Auth 改造（1 个 PR）
+
+- `TenantContext` 依赖实现
+- `require_platform_admin` / `require_org_role` 实现
+- API Key 反查携带 `organization_id`
+- 现有所有 list/get 接口套上 TenantContext 过滤（不改路由结构、不改 URL）
+- **现有所有 API 行为对 admin 完全不变**（platform Org 是默认上下文）
+- 测试：admin 可见性、平台 Org 普通用户可见性、跨 Org 看不到对方资源
+
+工作量：约 5 天。
+
+#### P2：Org / Group / Membership API（1–2 个 PR）
+
+- `/v1/organizations` 全套 CRUD
+- `/v1/organizations/{id}/members`、`/groups`、`/groups/{id}/members`
+- `/v1/clusters/{id}/access` 授权管理
+- `/v1/me/organizations`、`/v1/me/organizations/{id}/clusters`
+- 文档与 admin UI（UI 可单独 PR）
+
+工作量：约 7 天。
+
+#### P3：K8s 多租户基础设施（2 个 PR）
+
+- PR a：`tenant_namespaces` reconciler + `cluster_access` 触发的自动 namespace provision
+- PR b：`tenant_quotas` reconciler + admin 配额设置 API
+
+工作量：约 7 天。
+
+#### P4：ModelRoute 扩展（1 个 PR）
+
+- `model_route_principals` 表上线
+- `access_policy` 增加 `ALLOWED_PRINCIPALS`
+- `/my-models` 接口按 principal 解析当前 Org 上下文
+- UI"模型发布"对话框支持选 org/group/user
+
+工作量：约 3 天。
+
+#### P5：UI 改造（独立 track，与 P2–P4 并行）
+
+- Org 切换器
+- Org / Group / Member 管理页
+- 配额展示与设置页
+- API Key 创建时选 Org
+- 集群授权页
+
+工作量：前端单独估，约 10 天。
+
+#### 阶段依赖关系
+
+```
+P0 ──┬─→ P1 ──┬─→ P2 ──→ P3
+     │        │
+     │        └─→ P4
+     │
+     └─→ P5（前端，依赖 P2/P3/P4 的 API 出来）
+```
+
+P0 必须先完成；P1 是所有后续工作的前置；P2 / P3 / P4 可并行；P5 跟随 API 节奏。
+
+#### 风险与缓解
+
+| 风险 | 缓解 |
+|---|---|
+| 迁移过程中现有用户体验中断 | P0–P1 设计为对 admin 行为零变更；普通用户原本仅有 `/my-models`，迁移后等价 |
+| `owner_type/owner_id` 多态字段无 FK 校验，可能产生脏数据 | 应用层校验 + 周期一致性扫描；删除 user/group 时联动把资源 owner 改回 org 兜底 |
+| Reconciler 与 K8s 状态不一致 | 事件驱动 + 周期全量校准两条路径并存；ResourceQuota 用标签做 ownership 标识 |
+| 跨 Org 用户在 UI 切换 Org 时缓存污染 | 切换 Org 触发前端 store 全量重置 + 路由刷新 |
+| API Key 与 Org 强绑定带来的迁移问题 | 旧 API key 默认绑定 platform Org，使用语义不变；用户跨 Org 时需新建 key |
+| 平台 admin 旁路过宽 | 关键写操作打审计日志；后续可在 `is_admin` 之上叠加更细粒度权限 |
