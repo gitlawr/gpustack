@@ -62,7 +62,7 @@ async def _list_memberships(session, org_id: int) -> List[OrganizationMembership
     stmt = select(OrganizationMembership).where(
         OrganizationMembership.organization_id == org_id
     )
-    return list((await session.exec(stmt)).scalars().all())
+    return list((await session.exec(stmt)).all())
 
 
 async def _find_membership(
@@ -72,7 +72,7 @@ async def _find_membership(
         OrganizationMembership.organization_id == org_id,
         OrganizationMembership.user_id == user_id,
     )
-    return (await session.exec(stmt)).scalar_one_or_none()
+    return (await session.exec(stmt)).first()
 
 
 async def _has_other_owner(session, org_id: int, exclude_user_id: int) -> bool:

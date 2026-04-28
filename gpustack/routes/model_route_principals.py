@@ -70,7 +70,7 @@ async def _validate_principal(
 async def list_route_principals(session: SessionDep, id: int):
     await _load_route(session, id)
     stmt = select(ModelRoutePrincipalLink).where(ModelRoutePrincipalLink.route_id == id)
-    return list((await session.exec(stmt)).scalars().all())
+    return list((await session.exec(stmt)).all())
 
 
 @router.post("/{id}/principals", response_model=PrincipalView)
@@ -120,7 +120,7 @@ async def remove_route_principal(
         ModelRoutePrincipalLink.principal_type == principal_type,
         ModelRoutePrincipalLink.principal_id == principal_id,
     )
-    link = (await session.exec(stmt)).scalar_one_or_none()
+    link = (await session.exec(stmt)).first()
     if not link:
         raise NotFoundException(message="Principal not attached to route")
 

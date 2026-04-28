@@ -161,7 +161,7 @@ async def list_group_members(
         raise ForbiddenException(message="Not a member of this organization")
 
     stmt = select(UserGroupMembership).where(UserGroupMembership.group_id == group_id)
-    return list((await session.exec(stmt)).scalars().all())
+    return list((await session.exec(stmt)).all())
 
 
 @router.post(
@@ -184,7 +184,7 @@ async def add_group_member(
         OrganizationMembership.organization_id == org_id,
         OrganizationMembership.user_id == body.user_id,
     )
-    org_membership = (await session.exec(membership_stmt)).scalar_one_or_none()
+    org_membership = (await session.exec(membership_stmt)).first()
     if not org_membership:
         raise InvalidException(
             message=f"User {body.user_id} is not a member of organization {org_id}"
@@ -230,7 +230,7 @@ async def remove_group_member(
         UserGroupMembership.group_id == group_id,
         UserGroupMembership.user_id == user_id,
     )
-    link = (await session.exec(stmt)).scalar_one_or_none()
+    link = (await session.exec(stmt)).first()
     if not link:
         raise NotFoundException(message="Group membership not found")
 

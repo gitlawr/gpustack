@@ -64,7 +64,7 @@ async def list_cluster_access(
 ):
     await _load_cluster(session, cluster_id)
     stmt = select(ClusterAccess).where(ClusterAccess.cluster_id == cluster_id)
-    return list((await session.exec(stmt)).scalars().all())
+    return list((await session.exec(stmt)).all())
 
 
 @router.post("/clusters/{cluster_id}/access", response_model=ClusterAccessPublic)
@@ -116,7 +116,7 @@ async def revoke_cluster_access(
         ClusterAccess.principal_type == principal_type,
         ClusterAccess.principal_id == principal_id,
     )
-    access = (await session.exec(stmt)).scalar_one_or_none()
+    access = (await session.exec(stmt)).first()
     if not access:
         raise NotFoundException(message="Access grant not found")
 

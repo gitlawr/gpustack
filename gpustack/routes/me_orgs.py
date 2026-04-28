@@ -72,7 +72,7 @@ async def list_my_clusters_in_org(
             UserGroup.organization_id == org_id,
         )
     )
-    group_ids = list((await session.exec(group_stmt)).scalars().all())
+    group_ids = list((await session.exec(group_stmt)).all())
 
     or_clauses = [
         (ClusterAccess.principal_type == PrincipalType.ORG)
@@ -87,7 +87,7 @@ async def list_my_clusters_in_org(
         )
 
     cluster_id_stmt = select(ClusterAccess.cluster_id).where(or_(*or_clauses))
-    cluster_ids = set((await session.exec(cluster_id_stmt)).scalars().all())
+    cluster_ids = set((await session.exec(cluster_id_stmt)).all())
 
     if not cluster_ids:
         return []
@@ -95,4 +95,4 @@ async def list_my_clusters_in_org(
     cluster_stmt = select(Cluster).where(
         Cluster.id.in_(cluster_ids), Cluster.deleted_at.is_(None)
     )
-    return list((await session.exec(cluster_stmt)).scalars().all())
+    return list((await session.exec(cluster_stmt)).all())
