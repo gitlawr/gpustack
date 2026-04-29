@@ -58,13 +58,69 @@ async def _validate_principal(
             raise InvalidException(message=f"User {principal_id} not found")
 
 
+async def _resolve_principal_names(
+    session, rows: List[ClusterAccess]
+) -> List[ClusterAccessPublic]:
+    """Bulk-resolve human-readable labels for each (principal_type, id).
+
+    Done in three batched lookups (one per principal type) instead of
+    per-row joins; cluster_access lists are tiny in practice but the
+    pattern keeps it O(1) round-trips no matter how many rows there are.
+    """
+    org_ids = {r.principal_id for r in rows if r.principal_type == PrincipalType.ORG}
+    group_ids = {
+        r.principal_id for r in rows if r.principal_type == PrincipalType.GROUP
+    }
+    user_ids = {r.principal_id for r in rows if r.principal_type == PrincipalType.USER}
+
+    org_names: dict[int, str] = {}
+    if org_ids:
+        result = await session.exec(
+            select(Organization).where(Organization.id.in_(org_ids))
+        )
+        org_names = {o.id: o.name for o in result.all()}
+
+    group_names: dict[int, str] = {}
+    if group_ids:
+        result = await session.exec(
+            select(UserGroup).where(UserGroup.id.in_(group_ids))
+        )
+        group_names = {g.id: g.name for g in result.all()}
+
+    user_names: dict[int, str] = {}
+    if user_ids:
+        result = await session.exec(select(User).where(User.id.in_(user_ids)))
+        user_names = {u.id: u.username for u in result.all()}
+
+    out: List[ClusterAccessPublic] = []
+    for r in rows:
+        if r.principal_type == PrincipalType.ORG:
+            name = org_names.get(r.principal_id)
+        elif r.principal_type == PrincipalType.GROUP:
+            name = group_names.get(r.principal_id)
+        else:
+            name = user_names.get(r.principal_id)
+        out.append(
+            ClusterAccessPublic(
+                cluster_id=r.cluster_id,
+                principal_type=r.principal_type,
+                principal_id=r.principal_id,
+                principal_name=name,
+                granted_by=r.granted_by,
+                created_at=r.created_at,
+            )
+        )
+    return out
+
+
 @router.get("/clusters/{cluster_id}/access", response_model=List[ClusterAccessPublic])
 async def list_cluster_access(
     session: SessionDep, ctx: TenantContextDep, cluster_id: int
 ):
     await _load_cluster(session, cluster_id)
     stmt = select(ClusterAccess).where(ClusterAccess.cluster_id == cluster_id)
-    return list((await session.exec(stmt)).all())
+    rows = list((await session.exec(stmt)).all())
+    return await _resolve_principal_names(session, rows)
 
 
 @router.post("/clusters/{cluster_id}/access", response_model=ClusterAccessPublic)
@@ -99,7 +155,9 @@ async def grant_cluster_access(
     except Exception as e:
         await session.rollback()
         raise InvalidException(message=f"Failed to grant cluster access: {e}")
-    return access
+
+    enriched = await _resolve_principal_names(session, [access])
+    return enriched[0]
 
 
 @router.delete("/clusters/{cluster_id}/access/{principal_type}/{principal_id}")

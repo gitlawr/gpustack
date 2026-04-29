@@ -49,5 +49,10 @@ class ClusterAccessPublic(SQLModel):
     cluster_id: int
     principal_type: PrincipalType
     principal_id: int
+    # Human-readable label for the principal — username for User,
+    # name for Organization / UserGroup. Resolved server-side because
+    # only the server can join the right table per principal_type;
+    # the client otherwise falls back to "#<id>" which is unfriendly.
+    principal_name: Optional[str] = None
     granted_by: Optional[int] = None
     created_at: datetime
