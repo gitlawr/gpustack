@@ -22,7 +22,7 @@ GitHub Issue: TBD
 |---|---|
 | F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org，**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）归属单个 Org。**平台基础设施**（Cluster / Worker）不归属 Org，独立由平台 admin 管理 |
 | F2 | 引入 UserGroup（Org 内子单元）以支持部门/团队级资源共享 |
-| F3 | 普通用户仅可见/管理在当前 Org 上下文中归属于自己或自己所在 Group/Org 的资源 |
+| F3 | 普通用户仅可见/管理在当前 Org 上下文中可见的资源；v1 中所有用户创建的资源都 owner=org，等价于"全 Org 可见"。schema 上保留 `owner_type/owner_id` 三档（org/group/user），为后续精细化预留 |
 | F4 | 管理员可将 Cluster 授权给 Org / Group / User |
 | F5 | 用户可在多个被授权的 Cluster 上创建 GPU 实例（K8s Pod） |
 | F6 | 每个 (Org × Cluster) 自动 provision 一个 K8s namespace，GPU 实例落入对应 namespace |
@@ -58,11 +58,16 @@ GitHub Issue: TBD
 
 ### 跨 Org 用户的请求语义
 
-每个 API 请求必须能解析出 `current_organization_id`，否则无法定位资源：
+每个 API 请求按以下优先级解析 `current_organization_id`：
 
-- **UI 会话**：登录后选择 Org，前端在请求头携带 `X-Organization-Id`
-- **API Key**：每个 API key 在创建时绑定到 (user, org)，服务端从 `access_key` 反查得到 org，**忽略请求头**（避免误用）
-- **平台 Admin (`is_admin=true`)**：可不携带 org 上下文，看到全平台；如携带则以该 Org 上下文 act-as
+1. **API Key 调用**：从 `access_key` 反查 `api_keys.organization_id`（**忽略请求头**，避免误用）
+2. **UI 会话 + 请求头**：携带 `X-Organization-Id` 时使用该值
+3. **普通用户无请求头**：回退到 `users.default_organization_id`
+4. **平台 Admin 无请求头**：解析为 `None`（act-across-all 模式，列表过滤跳过）；如携带请求头则以该 Org 上下文 act-as
+
+UI 表现：
+- 普通用户右上角切换器只能在加入的 Org 中切，永远有具体 org 上下文
+- 平台 Admin 切换器多一档"All"，对应"无 org 上下文"——用于跨 Org 全平台视角
 
 ### 三层身份并存
 
@@ -88,9 +93,16 @@ stmt = stmt.where(
 
 `organization_id` 一层放在最外，是所有租户隔离的兜底——任何遗漏的过滤最差也只会跨 owner，不会跨 Org。
 
+**两类身份完全旁路过滤**（统一通过一个 `_bypass_tenant_filter(ctx)` 谓词判断）：
+
+- **平台 admin 且无 Org 上下文**：跨 Org 全平台视图
+- **系统用户 (`user.is_system=True`)**：worker / cluster service account 等服务端自己派生的内部账号——它们要跨 Org 读取资源（worker 取 instance 对应的 Model 详情、cluster 心跳等都不带 Org 上下文），不能被租户过滤拦下。
+
+平台 admin 带 Org 上下文（act-as 模式）会经过 `organization_id` 过滤但跳过 `owner` 过滤——admin 在 Org 内可见全部资源不论 owner 是 group / user。
+
 ### K8s GPU 实例多租户
 
-- 每个 (Org × K8s Cluster) 自动 provision 一个 namespace：`gpustack-{org-slug}`
+- 每个 (Org × K8s Cluster) 自动 provision 一个 namespace：`gpustack-{org-slug}`（例如内置 Org 是 `gpustack-default`，自建 Org `acme` 是 `gpustack-acme`）
 - 用户创建 GPU 实例 → backend 反向代理 → 落入该 namespace
 - `ResourceQuota` apply 到 namespace，K8s 调度时自动拦截超限请求
 - backend 不维护 GPU 实例状态表，**CRD 是 source of truth**
@@ -115,10 +127,10 @@ stmt = stmt.where(
 
 普通用户的子集，由平台 admin 在添加成员时指定角色。新增能力：
 
-- 管理本 Org 的 UserGroup
+- 管理本 Org 的 UserGroup（组织内的子分组）
 - 管理本 Org 内成员的 group 归属
 - 查看本 Org 在各 cluster 的配额使用情况
-- 管理本 Org 内 owner_type='org' 的资源
+- 管理本 Org 内的资源（v1 中所有资源都是 owner_type='org'，全 Org 可见）
 
 ### 普通用户
 
@@ -128,9 +140,26 @@ stmt = stmt.where(
 
 1. 登录后右上角增加 **Org 切换器**，列出加入的所有 Org，默认选中 `default_organization_id`
 2. 切换 Org 后整个 UI 重新加载该 Org 的资源（列表、配额、API key 等）
-3. **GPU 实例**：在被授权的 cluster 上创建 GPU 实例，上传 SSH 公钥，运行后 SSH 接入
-4. **API Key**：创建时强制选择归属 Org；调用时该 key 仅能访问该 Org 的资源
-5. **推理调用**：行为不变，但 `/my-models` 仅返回发布到当前 Org 的 ModelRoute 关联的模型
+3. **GPU 实例**：在被授权的 cluster 上创建 GPU 实例，上传 SSH 公钥，运行后 SSH 接入；UI 不让用户选择 owner，自动归 Org（同 RunPod team / Lambda team 默认共享行为）
+4. **API Key**：归属 Org 隐式由当前切换器值决定（`X-Organization-Id`）；调用时该 key 仅能访问该 Org 的资源。平台 admin 在 "All" 模式下创建 key 时弹一个目标 Org 选择器以指定 key 应绑哪个 Org
+5. **推理调用**：行为不变。`/my-models` 返回的 ModelRoute 由 `non_admin_user_models` 视图决定，按 `access_policy` 过滤：
+   - `PUBLIC` / `AUTHED` → 所有非 admin 用户都看见（admin 上架的公共服务默认就是这个语义）
+   - `ALLOWED_USERS` → 仅 `usermodelroutelink` 中显式列出的用户（旧路径，兼容期保留）
+   - `ALLOWED_PRINCIPALS` → 视图内 join `model_route_principals` 按 user / org / group 任一匹配；这是跨 Org 精细化发布的入口
+
+#### 资源可见性 — Org 内默认共享，UI 不暴露 owner 选择器
+
+一期所有租户资源（Model / ModelRoute / ModelInstance / **GPU Instance** / ApiKey 之外）创建时自动设 `owner_type='org', owner_id=current_org_id`，**UI 不提供 visibility / owner 选择器**——同 Org 内成员默认互相可见，对照 RunPod team / Lambda team 的行为。
+
+理由：
+- 多数客户场景（小到中等团队）想要的就是"团队工作区式"共享；强制让用户每次创建都选 visibility 是 over-engineering
+- Group 级 / User 级私有归属在 schema 上保留（`owner_type` 字段是 `org/group/user` 三档），但**v1 流程不放出 UI**，避免画蛇添足
+- 哪天真有"组内私货"诉求再加 advanced 折叠区的选择器，schema 已就位
+
+`owner_type='group'` / `owner_type='user'` 在 v1 仅用于：
+- admin 在 Cluster Access 给 group / user 授权（粗粒度准入门）
+- admin 在 ModelRoute `ALLOWED_PRINCIPALS` 发布给 group / user
+普通用户不会感知到这两个值的存在。
 
 ### CLI / API 调用变更
 
@@ -375,8 +404,8 @@ me_router.include_router(me.router, ...)                    # /me/organizations 
 | `POST /v1/api-keys` | 必须携带 `X-Organization-Id`（或使用已绑定 Org 的 API key 调用）；保存时记录 `organization_id` |
 | `GET /v1/api-keys` | 只返回当前 Org 下的 key |
 | `POST /v1/models`、`GET /v1/models` | 加 `organization_id` 过滤；admin 创建的默认归属 platform Org |
-| `GET /v1/clusters` | 平台 admin 看全部；普通用户看当前 Org 在 `cluster_access` 中授权的 |
-| `GET /my-models` | 解析当前 Org 上下文中的 ModelRoute principal 匹配项 |
+| `GET /v1/clusters` | 平台 admin 看全部；普通用户看 `accessible_cluster_ids`（来自 `cluster_access` 中授权给当前 Org / 用户所在 group / 用户本人的 cluster）。一期普通用户看不到 Cluster 管理菜单，过滤主要为 GPU 实例创建路径上的 cluster 选择器服务 |
+| `GET /my-models` | 走 `non_admin_user_models` 视图，按 `access_policy` 过滤；详见上一节 |
 
 #### 请求头与认证
 
@@ -393,26 +422,28 @@ API Key 反查流程：`access_key` → `ApiKey` 行 → 取 `user_id` 与 `orga
 
 迁移在 alembic upgrade 中完成：
 
-1. 创建 `organizations` 表，插入 `id=1, slug='platform', is_platform=true`
-2. 创建 `organization_memberships`，把所有现有 user 加入 platform Org，role 由 `is_admin` 决定（true → owner，false → member）
+1. 创建 `organizations` 表，插入 `id=1, name='Default', slug='default', is_platform=true` 作为内置 Org
+2. 创建 `organization_memberships`，把所有现有 user 加入 default Org，role 由 `is_admin` 决定（true → owner，false → member）
 3. 创建 `user_groups`、`user_group_memberships`、`cluster_access`、`tenant_namespaces`、`tenant_quotas`（空表）
 4. `users.default_organization_id` 全部回填 1
 5. `api_keys.organization_id` 全部回填 1
 6. `models / model_instances / model_routes.organization_id` 全部回填 1
 7. `models.owner_type='org', owner_id=1` 回填
-8. 把现有所有 cluster 在 `cluster_access` 中授权给 platform Org（保留现状）
+8. 把现有所有 cluster 在 `cluster_access` 中授权给 default Org（保留现状）
 9. 现有 ModelRoute 的 `UserModelRouteLink` 复制一份到 `model_route_principals`（principal_type='user'）
 
 迁移须在 sqlite 与 postgres 双 DB 测试通过；`ALTER TABLE` 兼容性由 alembic 的 `batch_alter_table` 处理。
 
 #### 平台 Org 与平台 admin 的关系
 
-- 平台 admin = `users.is_admin=true`，全局旁路所有 Org 隔离
-- 平台 Org = `organizations.is_platform=true` 的内置 Org，承载平台公共资产（admin 上架的模型等）
-- 平台 admin 默认是平台 Org 的 owner，但两者职责不同：
-  - 平台 admin：管理跨 Org 资源（创建 Org、cluster_access、worker 等）
-  - 平台 Org owner：管理平台 Org 内部资产（公共模型、Group 等）
+- **平台 admin** = `users.is_admin=true`，全局旁路所有 Org 隔离（同 system user 一样进 `_bypass_tenant_filter`）
+- **内置 Org** = `organizations.is_platform=true` 的特殊 Org，name="Default" / slug="default"，id 永远是 `PLATFORM_ORGANIZATION_ID = 1`；承载平台公共资产（admin 上架的模型等）
+- 平台 admin 默认是内置 Org 的 owner，但两者职责不同：
+  - **平台 admin**：管理跨 Org 资源（创建 Org、cluster_access、worker 等）
+  - **内置 Org owner**：管理该 Org 内部资产（公共模型、Group 等）
 - 实务上同一人持有两个角色，但权限来源不同，便于审计
+
+**为什么内置 Org 起名 "Default" 而不是 "Platform"**：每个普通用户登录时这就是他们看到的 Org（除非 admin 把他们加到别的 Org），slug 也作为 K8s namespace 模板的一部分（`gpustack-default`）。"Default" 更准确反映"兜底租户"的角色，避免和"平台基础设施"概念混淆。
 
 #### ModelRoute 兼容期
 
