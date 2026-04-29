@@ -202,6 +202,23 @@ async def require_platform_admin(
     return ctx
 
 
+def _bypass_tenant_filter(ctx: TenantContext) -> bool:
+    """Identify request contexts that should not be tenant-scoped.
+
+    Two categories bypass:
+    - Platform admin with no org context (cross-org platform view).
+    - System users (worker / cluster service accounts that the server
+      itself spawns). They authenticate as ``is_system=True`` and need
+      to read every Org's resources to do their job — e.g. a worker
+      fetching the Model row for an instance assigned to it.
+    """
+    if ctx.user is not None and getattr(ctx.user, "is_system", False):
+        return True
+    if ctx.is_platform_admin and ctx.current_org_id is None:
+        return True
+    return False
+
+
 def tenant_list_conditions(
     ctx: TenantContext,
     model: Any,
@@ -211,8 +228,8 @@ def tenant_list_conditions(
     """Build SQLAlchemy WHERE clauses to scope a list query to the caller.
 
     Visibility model:
-    - Platform admin without org context (no header / no api_key org)
-      sees everything — returns no conditions.
+    - System users (workers / cluster service accounts) and platform
+      admin without org context see everything — returns no conditions.
     - Platform admin WITH org context filters by ``organization_id`` only;
       they bypass the per-principal owner filter so admin can see every
       resource inside the org regardless of whether it's owned by a group
@@ -225,7 +242,7 @@ def tenant_list_conditions(
     that don't carry ``owner_type/owner_id`` (api_keys / model_instances).
     """
     conditions: List[Any] = []
-    if ctx.is_platform_admin and ctx.current_org_id is None:
+    if _bypass_tenant_filter(ctx):
         return conditions
 
     if ctx.current_org_id is not None and hasattr(model, "organization_id"):
@@ -262,7 +279,7 @@ def assert_resource_visible(
     if resource is None:
         raise NotFoundException(message=not_found_message)
 
-    if ctx.is_platform_admin and ctx.current_org_id is None:
+    if _bypass_tenant_filter(ctx):
         return
 
     org_id = getattr(resource, "organization_id", None)
