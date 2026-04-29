@@ -22,8 +22,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 PLATFORM_ORG_ID = 1
-PLATFORM_ORG_SLUG = 'platform'
-PLATFORM_ORG_NAME = 'Platform'
+PLATFORM_ORG_SLUG = 'default'
+PLATFORM_ORG_NAME = 'Default'
 
 
 def _enums():
