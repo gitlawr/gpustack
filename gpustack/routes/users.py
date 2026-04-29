@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
@@ -8,6 +10,11 @@ from gpustack.api.exceptions import (
     ConflictException,
 )
 from gpustack.security import get_secret_hash
+from gpustack.schemas.organizations import (
+    OrganizationMembership,
+    PLATFORM_ORGANIZATION_ID,
+)
+from gpustack.schemas.principals import OrgRole
 from gpustack.server.db import async_session
 from gpustack.server.deps import CurrentUserDep, SessionDep
 from gpustack.schemas.users import (
@@ -74,10 +81,27 @@ async def create_user(session: SessionDep, user_in: UserCreate):
             full_name=user_in.full_name,
             is_admin=user_in.is_admin,
             is_active=user_in.is_active,
+            # Bind every newly-created user to the built-in platform Org so
+            # the org switcher has at least one entry to show. Admins can
+            # later move them into a different org by adding a membership
+            # there and updating default_organization_id.
+            default_organization_id=PLATFORM_ORGANIZATION_ID,
         )
         if user_in.password:
             to_create.hashed_password = get_secret_hash(user_in.password)
         user = await User.create(session, to_create)
+
+        # Mirror the membership created by _init_user / the foundation
+        # migration: admin → OWNER, otherwise → MEMBER.
+        session.add(
+            OrganizationMembership(
+                user_id=user.id,
+                organization_id=PLATFORM_ORGANIZATION_ID,
+                role=OrgRole.OWNER if user.is_admin else OrgRole.MEMBER,
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+        )
+        await session.commit()
     except Exception as e:
         raise InternalServerErrorException(message=f"Failed to create user: {e}")
 

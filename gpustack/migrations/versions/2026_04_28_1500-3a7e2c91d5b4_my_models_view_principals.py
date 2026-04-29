@@ -21,6 +21,7 @@ from alembic import op
 import sqlalchemy as sa
 
 import gpustack.utils.sql_enum as sql_enum
+from gpustack.migrations.utils import column_exists
 from gpustack.schemas.stmt import (
     model_user_after_create_view_stmt,
     model_user_after_drop_view_stmt,
