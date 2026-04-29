@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, List, Optional, Set, Tuple
 
 from fastapi import Depends, Header, Request
-from sqlalchemy import select, tuple_
+from sqlalchemy import tuple_
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from gpustack.api.auth import get_current_user
