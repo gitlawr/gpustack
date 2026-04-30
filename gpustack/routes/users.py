@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
+from typing import List
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlmodel import select
 
 from gpustack.api.exceptions import (
@@ -14,6 +16,7 @@ from gpustack.security import get_secret_hash
 from gpustack.schemas.organizations import (
     Organization,
     OrganizationMembership,
+    OrganizationPublic,
     PLATFORM_ORGANIZATION_ID,
 )
 from gpustack.schemas.principals import OrgRole
@@ -32,6 +35,13 @@ from gpustack.schemas.users import (
 from gpustack.server.services import UserService
 
 router = APIRouter()
+
+
+class UserMembership(BaseModel):
+    organization: OrganizationPublic
+    role: OrgRole
+
+    model_config = {"from_attributes": True}
 
 
 @router.get("", response_model=UsersPublic)
@@ -69,6 +79,34 @@ async def get_user(session: SessionDep, id: int):
     if not user:
         raise NotFoundException(message="User not found")
     return user
+
+
+@router.get("/{id}/memberships", response_model=List[UserMembership])
+async def list_user_memberships(session: SessionDep, id: int):
+    """Admin-only: list the team Orgs a user belongs to. Personal Orgs are
+    excluded — they are intrinsic to the user, not something an admin
+    grants/revokes."""
+    user = await User.one_by_id(session, id)
+    if not user:
+        raise NotFoundException(message="User not found")
+
+    stmt = (
+        select(OrganizationMembership, Organization)
+        .join(
+            Organization,
+            Organization.id == OrganizationMembership.organization_id,
+        )
+        .where(
+            OrganizationMembership.user_id == id,
+            Organization.is_personal == False,  # noqa: E712
+            Organization.deleted_at.is_(None),
+        )
+    )
+    rows = (await session.exec(stmt)).all()
+    return [
+        UserMembership(organization=org, role=membership.role)
+        for membership, org in rows
+    ]
 
 
 @router.post("", response_model=UserPublic)
