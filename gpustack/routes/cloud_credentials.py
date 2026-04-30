@@ -8,8 +8,14 @@ from gpustack.api.exceptions import (
     InternalServerErrorException,
     NotFoundException,
 )
+from gpustack.api.tenant import (
+    assert_org_owned_writable,
+    assert_resource_visible,
+    tenant_list_conditions,
+    validate_org_owned_owner,
+)
 from gpustack.server.db import async_session
-from gpustack.server.deps import SessionDep
+from gpustack.server.deps import SessionDep, TenantContextDep
 from gpustack.schemas.clusters import (
     CloudCredentialCreate,
     CloudCredentialListParams,
@@ -27,6 +33,7 @@ router = APIRouter()
 
 @router.get("", response_model=CloudCredentialsPublic)
 async def list(
+    ctx: TenantContextDep,
     params: CloudCredentialListParams = Depends(),
     name: str = None,
     search: str = None,
@@ -46,10 +53,14 @@ async def list(
         )
 
     async with async_session() as session:
+        # Credentials carry only organization_id (no owner_type tuple);
+        # filter scopes to current org for non-admin and admin-with-context.
+        extra_conditions = tenant_list_conditions(ctx, CloudCredential, use_owner=False)
         return await CloudCredential.paginated_by_query(
             session=session,
             fields=fields,
             fuzzy_fields=fuzzy_fields,
+            extra_conditions=extra_conditions,
             page=params.page,
             per_page=params.perPage,
             order_by=params.order_by,
@@ -57,16 +68,26 @@ async def list(
 
 
 @router.get("/{id}", response_model=CloudCredentialPublic)
-async def get(session: SessionDep, id: int):
+async def get(session: SessionDep, ctx: TenantContextDep, id: int):
     existing = await CloudCredential.one_by_id(session, id)
     if not existing or existing.deleted_at is not None:
         raise NotFoundException(message=f"cloud credential {id} not found")
-
+    assert_resource_visible(
+        ctx,
+        existing,
+        use_owner=False,
+        not_found_message=f"cloud credential {id} not found",
+    )
     return existing
 
 
 @router.post("", response_model=CloudCredentialPublic)
-async def create(session: SessionDep, input: CloudCredentialCreate):
+async def create(
+    session: SessionDep, ctx: TenantContextDep, input: CloudCredentialCreate
+):
+    validate_org_owned_owner(
+        input.organization_id, ctx, resource_label="cloud credential"
+    )
     existing = await CloudCredential.one_by_fields(
         session,
         {"deleted_at": None, "name": input.name},
@@ -85,10 +106,16 @@ async def create(session: SessionDep, input: CloudCredentialCreate):
 
 
 @router.put("/{id}", response_model=CloudCredentialPublic)
-async def update(session: SessionDep, id: int, input: CloudCredentialUpdate):
+async def update(
+    session: SessionDep,
+    ctx: TenantContextDep,
+    id: int,
+    input: CloudCredentialUpdate,
+):
     existing = await CloudCredential.one_by_id(session, id)
     if not existing or existing.deleted_at is not None:
         raise NotFoundException(message=f"cloud credential {id} not found")
+    assert_org_owned_writable(ctx, existing, resource_label="cloud credential")
 
     try:
         await CloudCredential.update(existing, session=session, source=input)
@@ -101,10 +128,11 @@ async def update(session: SessionDep, id: int, input: CloudCredentialUpdate):
 
 
 @router.delete("/{id}")
-async def delete(session: SessionDep, id: int):
+async def delete(session: SessionDep, ctx: TenantContextDep, id: int):
     existing = await CloudCredential.one_by_id(session, id)
     if not existing or existing.deleted_at is not None:
         raise NotFoundException(message=f"cloud credential {id} not found")
+    assert_org_owned_writable(ctx, existing, resource_label="cloud credential")
 
     try:
         await existing.delete(session=session)
@@ -116,7 +144,7 @@ async def delete(session: SessionDep, id: int):
 
 @router.api_route("/{id}/provider-proxy/{path:path}", methods=["GET"])
 async def proxy_cluster_provider_api(
-    request: Request, session: SessionDep, id: int, path: str
+    request: Request, session: SessionDep, ctx: TenantContextDep, id: int, path: str
 ):
     """
     To support other provider in the future, use api_route instead of get.
@@ -125,6 +153,15 @@ async def proxy_cluster_provider_api(
     credential = await CloudCredential.one_by_id(session=session, id=id)
     if not credential:
         raise NotFoundException(message=f"Credential {id} not found")
+    # Proxying via the credential's secret bridges into the cloud
+    # provider's API; treat as a "use" / read-class permission, gated
+    # the same way as a visibility check.
+    assert_resource_visible(
+        ctx,
+        credential,
+        use_owner=False,
+        not_found_message=f"Credential {id} not found",
+    )
     if credential.provider in [ClusterProvider.Docker, ClusterProvider.Kubernetes]:
         raise NotFoundException(message=f"Provider {credential.provider} not supported")
     provider = factory.get(credential.provider, None)

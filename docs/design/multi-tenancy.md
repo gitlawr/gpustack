@@ -8,7 +8,7 @@ GPUStack 当前只区分管理员（admin）和普通用户两类身份，普通
 
 - 用户可加入多个 Organization（跨组织成员）
 - **租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）归属单个 Organization，跨 Org 默认硬隔离
-- **平台基础设施**（Cluster / Worker / CloudCredential）不归属任何 Org，由平台 admin 持有；通过 `cluster_access` 显式授权给 Org / Group / User，可一对多
+- **基础设施**（Cluster / Worker / CloudCredential / WorkerPool）支持双形态：NULL `organization_id` = 平台共享（admin 管，原行为），非 NULL = 该 Org 自管（BYO cluster）；任意一种形态都通过 `cluster_access` 进一步授权给其他 Org / Group / User
 - GPU 实例配额通过 K8s `ResourceQuota` 落地
 - 平台公共资源通过 ModelRoute 显式发布到其他 Org
 
@@ -20,7 +20,7 @@ GitHub Issue: TBD
 
 | 编号 | 需求 |
 |---|---|
-| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org，**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）归属单个 Org。**平台基础设施**（Cluster / Worker）不归属 Org，独立由平台 admin 管理 |
+| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org。**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）强制归属单个 Org；**基础设施**（Cluster / Worker / CloudCredential / WorkerPool）有 nullable `organization_id`，平台 admin 可建平台共享或代某 Org 建，Org owner/admin 可在自家 Org 内 CRUD（BYO cluster） |
 | F2 | 引入 UserGroup（Org 内子单元）以支持部门/团队级资源共享 |
 | F3 | 普通用户仅可见/管理在当前 Org 上下文中可见的资源；v1 中所有用户创建的资源都 owner=org，等价于"全 Org 可见"。schema 上保留 `owner_type/owner_id` 三档（org/group/user），为后续精细化预留 |
 | F4 | 管理员可将 Cluster 授权给 Org / Group / User |
@@ -41,7 +41,6 @@ GitHub Issue: TBD
 | N4 | 模型推理并发数/调用速率配额 | 走计费/限流路径，不在本期 |
 | N5 | SSH 网关路由细节 | 单独设计 |
 | N6 | 跨 Org "默认共享" 资源（取代旧 `is_system` 概念） | 与硬隔离/计费冲突；统一通过 ModelRoute 显式发布 |
-| N7 | Org 自建 / 自管 Cluster（"BYO cluster"）| 一期所有 Cluster 由平台 admin 持有；Org 自治集群涉及计费、admin 干预权、credential 隔离等政策决策，下沉到[未来扩展](#未来扩展bring-your-own-cluster) |
 
 ## 解决方案
 
@@ -181,7 +180,8 @@ stmt = stmt.where(
 | L6 | API Key 与 Org 是绑定关系，跨 Org 必须使用不同的 API key（不支持运行时切 Org） |
 | L7 | 一个 (Org × Cluster) 当前对应一个 namespace；如需进一步隔离 Group（独立 NetworkPolicy 等），需扩展 `tenant_namespaces` 增加 group 维度 |
 | L8 | 平台 admin 默认是 platform Org owner，权限来源冗余，需文档说明 |
-| L9 | 所有 Cluster / CloudCredential / Worker 由平台 admin 持有，Org 无法自建集群或接入私有云账号；详见[未来扩展：Bring-Your-Own Cluster](#未来扩展bring-your-own-cluster) |
+| L9 | BYO cluster 一期采用统一计量（不区分 cluster 归属对资源用量都计入 Org），不区别"自带硬件"和"平台共享" |
+| L10 | BYO cluster 的 `set-default` 仍仅限平台 admin（Org 自管 cluster 不影响"平台默认"概念） |
 
 ---
 
@@ -561,65 +561,64 @@ P0 必须先完成；P1 是所有后续工作的前置；P2 / P3 / P4 可并行�
 | API Key 与 Org 强绑定带来的迁移问题 | 旧 API key 默认绑定 platform Org，使用语义不变；用户跨 Org 时需新建 key |
 | 平台 admin 旁路过宽 | 关键写操作打审计日志；后续可在 `is_admin` 之上叠加更细粒度权限 |
 
-## 未来扩展：Bring-Your-Own Cluster
+## Bring-Your-Own Cluster（v1 已落地）
 
-本期所有 Cluster 由平台 admin 持有。落地之后即将出现的诉求是 **Org 自建并自管 Cluster**，例如：
-
-- 企业租户带着自己的 AWS / GCP 账号入驻，不愿把 cloud key 交给平台 admin
-- 部门买了一批 GPU 机器，希望加到自家 Org 的 worker pool，不走 admin 排队
-- 数据合规要求某些 Org 的工作负载只能跑在他们自己注册的本地 K8s 集群
-
-之所以一期不做，是因为决策点未收敛：是否对 Org 自管集群收管理费？平台 admin 是否保留干预权（强制删 / 审计 / 资源回收）？credential 隔离的边界？跨 Org "分租"是否允许？这些是产品/政策问题，不是纯技术问题，先把 admin-managed 的闭环跑通更重要。
-
-下面是预期的扩展路径，一期写代码时已有意识地不挡这条路：
-
-### Schema 增量
+`Cluster` / `CloudCredential` / `WorkerPool` 三张表都加了 nullable `organization_id`：
 
 ```sql
 ALTER TABLE clusters
-    ADD COLUMN organization_id INTEGER NULL REFERENCES organizations(id);
--- NULL = 平台共享集群（admin 管，现状）
--- NOT NULL = 该 Org 自管集群
-
+    ADD COLUMN organization_id INTEGER NULL
+    REFERENCES organizations(id) ON DELETE SET NULL;
 ALTER TABLE cloud_credentials
-    ADD COLUMN organization_id INTEGER NULL REFERENCES organizations(id);
--- 同上：NULL = 平台共享，NOT NULL = Org 私有
-
+    ADD COLUMN organization_id INTEGER NULL
+    REFERENCES organizations(id) ON DELETE SET NULL;
 ALTER TABLE worker_pools
-    ADD COLUMN organization_id INTEGER NULL REFERENCES organizations(id);
--- 跟随其 cluster 的归属
+    ADD COLUMN organization_id INTEGER NULL
+    REFERENCES organizations(id) ON DELETE SET NULL;
+-- NULL = 平台共享（admin 管）；非 NULL = 该 Org 自管。
+-- ON DELETE SET NULL：Org 被删时不级联删 cluster，留给 admin 决策处理。
 ```
 
-字段全部可空，对现存数据无破坏；当前所有 cluster 视为 `organization_id = NULL` 继续工作。
+WorkerPool 的 `organization_id` 在创建时由其 cluster 同步过来（denormalized），列表过滤时不用 join。
 
 ### 权限语义
 
-| 主体 | platform-owned cluster | org-owned cluster |
-|---|---|---|
-| 平台 admin | CRUD + 授权 | 可见、可干预（审计 / 强制回收） |
-| Org owner / admin | 只读 + 在被授权范围内使用 | 在自家 Org 内 CRUD；可对外授权（"分租"给其他 Org） |
-| Org member | 按 `cluster_access` | 按 `cluster_access` |
+| 主体 | platform-owned (org_id=NULL) | org-owned (org_id=自家 Org) | 别人家的 org-owned |
+|---|---|---|---|
+| 平台 admin | CRUD（含 set-default） | CRUD（强制回收 / 审计） | CRUD |
+| Org owner / admin | 列表里看见（如有 cluster_access）；不能改 | 在自家 Org 内 CRUD；可签 `cluster_access` 给别人 | 看不见（除非有 cluster_access） |
+| Org member | 按 `cluster_access` | 隐式可见（同 Org 即可见，无需 cluster_access 行） | 按 `cluster_access` |
+| System user (worker / cluster account) | 全部可见可读（bypass） | 同上 | 同上 |
+
+平台共享 cluster 的"读"权限仍由 `cluster_access` 表显式发；写权限只有平台 admin 有。Org 自管 cluster 的"读"权限对该 Org 成员是隐式的（同 Org 自动可见），写权限属于该 Org 的 owner / admin。
+
+### 创建路径校验
+
+- 平台 admin：可以建 platform-shared (`organization_id = NULL`) 或任意 Org-owned
+- Org owner / admin：只能建 `organization_id = 自己当前 Org`；不能建 platform-shared
+- 其他 Org member / 普通用户：不能创建任何 cluster
 
 ### `cluster_access` 行为
 
-- **platform-owned**：完全靠 `cluster_access` 显式授权（即一期行为）
-- **org-owned**：拥有方 Org **隐式**具备访问权（不需要写 `cluster_access` 行）；如果想分享给其他 Org / Group / User，依然写 `cluster_access`
+- **platform-owned**：访问权完全靠 `cluster_access` 显式授权
+- **org-owned**：拥有方 Org **隐式**具备访问权；如果想分享给其他 Org / Group / User，写 `cluster_access` 行（"分租"）
 
 ### Quota / Namespace
 
-`(Org × Cluster) → namespace + ResourceQuota` 的模型不动：
-- 自家 Org 在自家 cluster 上仍然要建 namespace（这样 Group 级别再隔离才有空间）
-- 对 owner Org 默认 quota 一般为 unlimited，由 owner 自己决定是否给 Group 设子配额
+`(Org × Cluster) → namespace + ResourceQuota` 模型不变。Org 在自家 cluster 上仍然落入 `gpustack-{org-slug}` namespace（这样 Group 级别再隔离仍有空间）。Org 自管的 cluster 上对 owner Org 默认 quota 通常为 unlimited，admin 看心情干预。
 
-### 计费策略（产品决策）
+### 计费
 
-二选一：
+v1 采用**统一计量**：所有 namespace 的 GPU/CPU/内存用量都计入 Org，**不区分 cluster 归属**。Org 自带硬件也走计量但通常计费规则可以打折/豁免，由商业侧另行决定。这个简化让计费代码只一条路径，避免分支。
 
-- **统一计量**：所有 namespace 的 GPU/CPU/内存用量都计费，不区分 cluster 归属。优点是逻辑简单；缺点是 Org 自带集群也被收"管理费"，模糊了"自建"的价值
-- **按 cluster 归属计量**：platform-owned cluster 的用量计费；org-owned cluster 跳过 quota 计量，只走 audit 日志。优点是"自带硬件零边际成本"对租户更友好；缺点是计费代码要分两套路径
+如果将来要做"Org 自管 cluster 零边际成本"，再加 cluster-level "billable" 标签即可。
 
-这个决策应该在落地前由产品/商业侧明确。
+### 路由分层调整
 
-### 工作量估计
+`/v1/clusters`、`/v1/cloud-credentials`、`/v1/worker-pools` 从 `v1_admin_router` 移到 `v1_base_router`——任何登录用户都能进 endpoint，但 endpoint 内部用 `assert_cluster_writable` / `assert_org_owned_writable` / `validate_org_owned_owner` 做按行的所有权校验。`set-default` 和 worker token 这种平台级动作仍然在路由内部 raise `is_admin` 限制。
 
-约 1 个 PR：schema 改动 + 权限层的归属判定分支 + 前端 cluster 创建表单加"归属 Org"选择（admin 可选 platform 或任意 Org，Org owner 默认且锁定为自己 Org）。如果同时做计费分支，估 2 个 PR。
+### UI 变化
+
+- Cluster Management 菜单的 access flag 从 `canSeeAdmin` 改成 `canManageInfra`（admin 或在任一 Org 持有 owner/admin 角色的用户都看得到）
+- Cluster / CloudCredential 创建表单新增 **Owner** 下拉：admin 可选 "Platform-shared" 或任一 Org；Org owner/admin 默认锁定为自己当前 Org，没有第二个选择
+- 列表（cluster / credential / worker_pool）过滤已经在 server 端做了 visibility，前端不用变

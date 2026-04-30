@@ -145,6 +145,51 @@ def upgrade() -> None:
             ).bindparams(org_id=PLATFORM_ORG_ID)
         )
 
+    # ---- BYO cluster: tag platform infrastructure with optional org ownership
+    # NULL  = platform-shared (admin-managed, today's behaviour)
+    # NOT NULL = the Org that owns this cluster / credential / pool
+    # ON DELETE SET NULL — deleting an Org orphans the row to platform
+    # rather than cascade-deleting the cluster (admin then decides what
+    # to do with it).
+    if not column_exists("clusters", "organization_id"):
+        with op.batch_alter_table("clusters", schema=None) as batch_op:
+            batch_op.add_column(
+                sa.Column("organization_id", sa.Integer(), nullable=True)
+            )
+            batch_op.create_foreign_key(
+                "fk_clusters_organization_id_organizations",
+                "organizations",
+                ["organization_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+
+    if not column_exists("cloud_credentials", "organization_id"):
+        with op.batch_alter_table("cloud_credentials", schema=None) as batch_op:
+            batch_op.add_column(
+                sa.Column("organization_id", sa.Integer(), nullable=True)
+            )
+            batch_op.create_foreign_key(
+                "fk_cloud_credentials_organization_id_organizations",
+                "organizations",
+                ["organization_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+
+    if not column_exists("worker_pools", "organization_id"):
+        with op.batch_alter_table("worker_pools", schema=None) as batch_op:
+            batch_op.add_column(
+                sa.Column("organization_id", sa.Integer(), nullable=True)
+            )
+            batch_op.create_foreign_key(
+                "fk_worker_pools_organization_id_organizations",
+                "organizations",
+                ["organization_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+
 
 def downgrade() -> None:
     bind = op.get_bind()

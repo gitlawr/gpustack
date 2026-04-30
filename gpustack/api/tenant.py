@@ -25,7 +25,11 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from gpustack.api.auth import get_current_user
-from gpustack.api.exceptions import ForbiddenException, NotFoundException
+from gpustack.api.exceptions import (
+    ForbiddenException,
+    InvalidException,
+    NotFoundException,
+)
 from gpustack.schemas.api_keys import ApiKey
 from gpustack.schemas.cluster_access import ClusterAccess
 from gpustack.schemas.organizations import OrganizationMembership
@@ -261,6 +265,137 @@ def tenant_list_conditions(
             )
         )
     return conditions
+
+
+def cluster_visibility_conditions(
+    ctx: TenantContext,
+    model: Any,
+) -> List[Any]:
+    """Visibility filter specific to Cluster-like infrastructure rows.
+
+    Clusters can be visible to a non-admin caller through TWO independent
+    paths, so the regular ``organization_id`` equality filter would be
+    too narrow:
+
+    - **Own-Org cluster** (``cluster.organization_id == current_org_id``):
+      the org's BYO cluster.
+    - **Granted via cluster_access** (``cluster.id`` ∈
+      ``ctx.accessible_cluster_ids``): platform-shared clusters the admin
+      authorised, or another Org's cluster sublet to us via cluster_access.
+
+    Either path makes the cluster visible. System users and platform
+    admins (no-org-context) bypass entirely.
+    """
+    from sqlalchemy import or_
+
+    if _bypass_tenant_filter(ctx):
+        return []
+
+    or_clauses = []
+    if ctx.current_org_id is not None:
+        or_clauses.append(model.organization_id == ctx.current_org_id)
+    if ctx.accessible_cluster_ids:
+        or_clauses.append(model.id.in_(ctx.accessible_cluster_ids))
+
+    if not or_clauses:
+        # No avenue to see anything; force an empty result rather than
+        # leak the full table when accessible_cluster_ids is empty.
+        return [model.id == -1]
+
+    return [or_(*or_clauses)]
+
+
+def assert_cluster_visible(
+    ctx: TenantContext,
+    cluster: Any,
+    *,
+    not_found_message: str = "Cluster not found",
+) -> None:
+    """404 if the caller can't see this cluster (own-Org OR cluster_access)."""
+    if cluster is None:
+        raise NotFoundException(message=not_found_message)
+    if _bypass_tenant_filter(ctx):
+        return
+    cluster_org = getattr(cluster, "organization_id", None)
+    if (
+        ctx.current_org_id is not None
+        and cluster_org is not None
+        and cluster_org == ctx.current_org_id
+    ):
+        return
+    if cluster.id in ctx.accessible_cluster_ids:
+        return
+    raise NotFoundException(message=not_found_message)
+
+
+def assert_org_owned_writable(
+    ctx: TenantContext,
+    resource: Any,
+    *,
+    resource_label: str = "resource",
+) -> None:
+    """403 if the caller can't mutate an org-owned infrastructure row.
+
+    Used for clusters / cloud_credentials / worker_pools — anything with
+    a nullable ``organization_id`` and these write rules:
+
+    - Platform admin / system user → allowed (bypass)
+    - **Org-owned** (org_id == current_org_id): only the Org's
+      owner / admin can write
+    - **Platform-shared** (org_id IS NULL): only platform admin (handled
+      by the bypass branch above) — Org owners cannot mutate platform
+      infra they don't own
+    - **Other Org's row**: never writable
+    """
+    if _bypass_tenant_filter(ctx):
+        return
+    res_org = getattr(resource, "organization_id", None)
+    if res_org is None:
+        raise PlatformAdminError(
+            message=f"Only platform admin can modify platform-shared {resource_label}"
+        )
+    if res_org != ctx.current_org_id:
+        raise OrgRoleError(
+            message=f"{resource_label.capitalize()} does not belong to current Org"
+        )
+    if ctx.org_role not in (OrgRole.OWNER, OrgRole.ADMIN):
+        raise OrgRoleError(
+            message=f"Insufficient organization role to modify this {resource_label}"
+        )
+
+
+def assert_cluster_writable(
+    ctx: TenantContext,
+    cluster: Any,
+) -> None:
+    assert_org_owned_writable(ctx, cluster, resource_label="cluster")
+
+
+def validate_org_owned_owner(
+    input_org_id: Optional[int],
+    ctx: TenantContext,
+    *,
+    resource_label: str = "resource",
+) -> None:
+    """Decide whether the caller can create a row owned by ``input_org_id``.
+
+    - Platform admin: any value (including NULL = platform-shared)
+    - Org owner / admin: must equal current_org_id; can't create platform-shared
+    """
+    if ctx.is_platform_admin:
+        return
+    if input_org_id is None:
+        raise InvalidException(
+            message=f"Only platform admin can create platform-shared {resource_label}s"
+        )
+    if ctx.current_org_id is None or input_org_id != ctx.current_org_id:
+        raise InvalidException(
+            message="organization_id must match the current organization"
+        )
+    if ctx.org_role not in (OrgRole.OWNER, OrgRole.ADMIN):
+        raise InvalidException(
+            message=f"Insufficient organization role to create a {resource_label}"
+        )
 
 
 def assert_resource_visible(

@@ -170,6 +170,11 @@ class WorkerPoolBase(WorkerPoolCreate):
     cluster_id: int = Field(
         sa_column=Column(Integer, ForeignKey("clusters.id", ondelete="CASCADE"))
     )
+    # Mirrors the cluster's organization_id. The route layer copies the
+    # parent cluster's value so the row can be filtered without a join.
+    organization_id: Optional[int] = Field(
+        default=None, foreign_key="organizations.id", nullable=True
+    )
 
 
 class WorkerPool(WorkerPoolBase, BaseModelMixin, table=True):
@@ -253,6 +258,10 @@ class CloudCredentialBase(SQLModel):
     provider: ClusterProvider = Field(default=ClusterProvider.DigitalOcean)
     key: Optional[str] = None
     options: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    # NULL = platform-shared; non-NULL = owned by this Org.
+    organization_id: Optional[int] = Field(
+        default=None, foreign_key="organizations.id", nullable=True
+    )
 
 
 class CloudCredentialUpdate(CloudCredentialBase):
@@ -349,6 +358,11 @@ class ClusterCreateBase(ClusterUpdate):
         default=None, foreign_key="cloud_credentials.id"
     )
     region: Optional[str] = None
+    # NULL = platform-shared (admin-managed); non-NULL = owned by this Org.
+    # ON DELETE SET NULL is enforced at the DB level via the migration.
+    organization_id: Optional[int] = Field(
+        default=None, foreign_key="organizations.id", nullable=True
+    )
 
 
 class ClusterCreate(ClusterCreateBase):

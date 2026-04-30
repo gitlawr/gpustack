@@ -95,6 +95,20 @@ v1_base_router.include_router(
     prefix="/my-models",
     tags=["My Models"],
 )
+# BYO cluster: clusters / cloud-credentials / worker-pools live on the
+# user-level router so Org owner / admin can CRUD their own infra. The
+# routes themselves enforce per-row ownership via assert_cluster_writable
+# and friends, so platform-only operations (e.g. set-default) still
+# require is_admin inside the handler.
+v1_base_router.include_router(clusters.router, prefix="/clusters", tags=["Clusters"])
+v1_base_router.include_router(
+    cloud_credentials.router,
+    prefix="/cloud-credentials",
+    tags=["Cloud Credentials"],
+)
+v1_base_router.include_router(
+    worker_pools.router, prefix="/worker-pools", tags=["Worker Pools"]
+)
 
 cluster_client_router = APIRouter()
 cluster_client_router.add_api_route(
@@ -177,18 +191,6 @@ admin_routers = model_routers + [
         "tags": ["Model Evaluations"],
     },
     {"router": gpu_devices.router, "prefix": "/gpu-devices", "tags": ["GPU Devices"]},
-    # following routers are introduced by gpustack v2.0
-    {
-        "router": cloud_credentials.router,
-        "prefix": "/cloud-credentials",
-        "tags": ["Cloud Credentials"],
-    },
-    {
-        "router": worker_pools.router,
-        "prefix": "/worker-pools",
-        "tags": ["Worker Pools"],
-    },
-    {"router": clusters.router, "prefix": "/clusters", "tags": ["Clusters"]},
     {
         "router": model_provider.router,
         "prefix": "/model-providers",
