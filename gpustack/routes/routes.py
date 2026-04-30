@@ -232,6 +232,15 @@ v1_admin_router = APIRouter()
 for admin_router in admin_routers:
     v1_admin_router.include_router(**admin_router)
 
+# Order matters: FastAPI dispatches the FIRST router whose path matches.
+# v1_base_router and worker_client_router register overlapping endpoints
+# (e.g. /v2/models, /v2/workers) — putting v1_base_router first means
+# regular user requests resolve through ``get_current_user`` (which also
+# accepts worker / cluster system users), and only routes that are unique
+# to the worker / cluster client paths fall through to those routers.
+management_router.include_router(
+    v1_base_router, dependencies=[Depends(get_current_user)], prefix=versioned_prefix
+)
 management_router.include_router(
     worker_client_router,
     dependencies=[Depends(get_worker_user)],
@@ -241,9 +250,6 @@ management_router.include_router(
     cluster_client_router,
     dependencies=[Depends(get_cluster_user)],
     prefix=versioned_prefix,
-)
-management_router.include_router(
-    v1_base_router, dependencies=[Depends(get_current_user)], prefix=versioned_prefix
 )
 management_router.include_router(
     v1_admin_router, dependencies=[Depends(get_admin_user)], prefix=versioned_prefix
