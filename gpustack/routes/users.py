@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from typing import Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -12,16 +11,12 @@ from gpustack.api.exceptions import (
     ConflictException,
 )
 from gpustack.security import get_secret_hash
-from gpustack.schemas.cluster_access import ClusterAccess
-from gpustack.schemas.clusters import Cluster
-from gpustack.schemas.links import ModelRoutePrincipalLink
-from gpustack.schemas.model_routes import ModelRoute
 from gpustack.schemas.organizations import (
     Organization,
     OrganizationMembership,
     PLATFORM_ORGANIZATION_ID,
 )
-from gpustack.schemas.principals import OrgRole, PrincipalType
+from gpustack.schemas.principals import OrgRole
 from gpustack.server.db import async_session
 from gpustack.server.deps import CurrentUserDep, SessionDep
 from gpustack.schemas.users import (
@@ -199,59 +194,6 @@ async def update_user_activation(
     return user
 
 
-async def _personal_org_has_shared_resources(
-    session, personal_org_id: int, user_id: int
-) -> Optional[str]:
-    """Return a human reason string if the Personal Org owns resources
-    that have been shared outside the user's own scope; None otherwise.
-
-    Two flavours of "shared" are checked:
-
-    1. ModelRoutes owned by the Personal Org with `model_route_principals`
-       rows pointing to a principal other than (USER, this user). Means
-       the user has published one of their routes to other orgs / groups
-       / users — deleting the user would yank those publications away.
-    2. Clusters owned by the Personal Org with `cluster_access` rows for
-       any principal other than (USER, this user) — i.e. they've sublet
-       a cluster to other tenants.
-    """
-    # Find route ids owned by this Personal Org that have any non-self
-    # principal_link.
-    route_stmt = (
-        select(ModelRoutePrincipalLink.route_id)
-        .join(ModelRoute, ModelRoute.id == ModelRoutePrincipalLink.route_id)
-        .where(
-            ModelRoute.organization_id == personal_org_id,
-            ~(
-                (ModelRoutePrincipalLink.principal_type == PrincipalType.USER)
-                & (ModelRoutePrincipalLink.principal_id == user_id)
-            ),
-        )
-        .limit(1)
-    )
-    if (await session.exec(route_stmt)).first() is not None:
-        return "User's Personal Org has model routes published to others"
-
-    # Find cluster_access grants on clusters owned by this Personal Org
-    # that point to a principal other than this user.
-    access_stmt = (
-        select(ClusterAccess.cluster_id)
-        .join(Cluster, Cluster.id == ClusterAccess.cluster_id)
-        .where(
-            Cluster.organization_id == personal_org_id,
-            ~(
-                (ClusterAccess.principal_type == PrincipalType.USER)
-                & (ClusterAccess.principal_id == user_id)
-            ),
-        )
-        .limit(1)
-    )
-    if (await session.exec(access_stmt)).first() is not None:
-        return "User's Personal Org has cluster access granted to others"
-
-    return None
-
-
 @router.delete("/{id}")
 async def delete_user(session: SessionDep, id: int):
     user_service = UserService(session)
@@ -262,24 +204,18 @@ async def delete_user(session: SessionDep, id: int):
     if await is_only_admin_user(session, user):
         raise ConflictException(message="Cannot delete the only admin user")
 
-    # Block delete if the user's Personal Org has things shared outside.
-    # default_organization_id points at the Personal Org for normal users;
-    # admins might have it pointing at the Default Org so we look up by
-    # slug as a fallback.
+    # The user's Personal Org gets cascade-deleted alongside the user
+    # (see below). Anything that was published / sublet from that Personal
+    # Org goes with it: model_routes / model_route_principals / clusters
+    # owned by the Personal Org, plus all cluster_access rows attached to
+    # those clusters, are removed via FK cascades. Recipients of those
+    # shared resources lose access — which is the correct behaviour, since
+    # the resources were inherently coupled to a now-departed maintainer.
     personal_stmt = select(Organization).where(
         Organization.is_personal == True,  # noqa: E712
         Organization.slug == f"user-{user.id}",
     )
     personal = (await session.exec(personal_stmt)).first()
-    if personal is not None:
-        reason = await _personal_org_has_shared_resources(session, personal.id, user.id)
-        if reason:
-            raise ConflictException(
-                message=(
-                    f"{reason}. Reassign or revoke the shared resources before "
-                    "deleting the user."
-                )
-            )
 
     try:
         await user_service.delete(user)

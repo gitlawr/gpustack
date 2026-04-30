@@ -4,7 +4,7 @@ Each authenticated request resolves to a TenantContext that captures:
 - the user identity
 - whether they are a platform-level super-admin
 - which Organization they are operating in for this request (current_org_id)
-- which Org-level role they hold there (owner / admin / member)
+- which Org-level role they hold there (owner / manager / member)
 - which clusters are accessible in that org context
 - which principals (org / groups / user) the request can claim ownership for
 
@@ -358,7 +358,7 @@ def assert_org_owned_writable(
         raise OrgRoleError(
             message=f"{resource_label.capitalize()} does not belong to current Org"
         )
-    if ctx.org_role not in (OrgRole.OWNER, OrgRole.ADMIN):
+    if ctx.org_role not in (OrgRole.OWNER, OrgRole.MANAGER):
         raise OrgRoleError(
             message=f"Insufficient organization role to modify this {resource_label}"
         )
@@ -392,7 +392,7 @@ def validate_org_owned_owner(
         raise InvalidException(
             message="organization_id must match the current organization"
         )
-    if ctx.org_role not in (OrgRole.OWNER, OrgRole.ADMIN):
+    if ctx.org_role not in (OrgRole.OWNER, OrgRole.MANAGER):
         raise InvalidException(
             message=f"Insufficient organization role to create a {resource_label}"
         )

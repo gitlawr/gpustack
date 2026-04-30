@@ -46,7 +46,7 @@ def _can_manage(ctx, target_role: OrgRole | None) -> bool:
         return True
     if ctx.org_role == OrgRole.OWNER:
         return True
-    if ctx.org_role == OrgRole.ADMIN and target_role != OrgRole.OWNER:
+    if ctx.org_role == OrgRole.MANAGER and target_role != OrgRole.OWNER:
         return True
     return False
 

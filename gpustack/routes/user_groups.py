@@ -39,7 +39,7 @@ def _can_manage_groups(ctx, org_id: int) -> bool:
         return True
     if ctx.current_org_id != org_id:
         return False
-    return ctx.org_role in (OrgRole.OWNER, OrgRole.ADMIN)
+    return ctx.org_role in (OrgRole.OWNER, OrgRole.MANAGER)
 
 
 async def _load_org(session, org_id: int) -> Organization:

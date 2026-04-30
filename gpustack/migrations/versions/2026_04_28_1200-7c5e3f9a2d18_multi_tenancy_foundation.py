@@ -27,7 +27,7 @@ PLATFORM_ORG_NAME = 'Default'
 
 
 def _enums():
-    org_role = sa.Enum('OWNER', 'ADMIN', 'MEMBER', name='orgrole')
+    org_role = sa.Enum('OWNER', 'MANAGER', 'MEMBER', name='orgrole')
     principal_type = sa.Enum('ORG', 'GROUP', 'USER', name='principaltype')
     tenant_ns_state = sa.Enum(
         'PENDING', 'PROVISIONING', 'READY', 'ERROR', 'DELETING',
