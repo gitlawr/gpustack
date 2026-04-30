@@ -202,18 +202,29 @@ tenant_routers = model_routers + [
         "prefix": "/model-evaluations",
         "tags": ["Model Evaluations"],
     },
-]
-
-# Platform-only routers — admin can manage globally; non-admin gets 403.
-admin_routers = [
-    {"router": dashboard.router, "prefix": "/dashboard", "tags": ["Dashboard"]},
-    {"router": users.router, "prefix": "/users", "tags": ["Users"]},
+    # Read-only platform catalogs (no tenant data) — every logged-in user
+    # needs them to deploy models, including Org owners/managers.
     {"router": model_sets.router, "prefix": "/model-sets", "tags": ["Model Sets"]},
     {
         "router": draft_models.router,
         "prefix": "/draft-models",
         "tags": ["Draft Models"],
     },
+    # Inference backends are platform-wide (admin curates) but every Org
+    # owner/manager needs to read them to pick a backend at deploy time.
+    # Worker / cluster system users also reach this through v1_base_router
+    # since `get_current_user` accepts ``is_system=True`` callers.
+    {
+        "router": inference_backend.router,
+        "prefix": "/inference-backends",
+        "tags": ["Inference Backend"],
+    },
+]
+
+# Platform-only routers — admin can manage globally; non-admin gets 403.
+admin_routers = [
+    {"router": dashboard.router, "prefix": "/dashboard", "tags": ["Dashboard"]},
+    {"router": users.router, "prefix": "/users", "tags": ["Users"]},
     {
         "router": organizations.router,
         "prefix": "/organizations",
