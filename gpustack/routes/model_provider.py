@@ -30,8 +30,12 @@ from gpustack.api.exceptions import (
     NotFoundException,
     InvalidException,
 )
+from gpustack.api.tenant import (
+    assert_resource_visible,
+    tenant_list_conditions,
+)
 from gpustack.server.db import async_session
-from gpustack.server.deps import SessionDep
+from gpustack.server.deps import SessionDep, TenantContextDep
 from openai.types import Model as OAIModel
 from openai.pagination import SyncPage
 
@@ -41,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 @router.get("", response_model=ModelProvidersPublic, response_model_exclude_none=True)
 async def get_model_providers(
+    ctx: TenantContextDep,
     params: ModelProviderListParams = Depends(),
     name: str = None,
     search: str = None,
@@ -53,6 +58,8 @@ async def get_model_providers(
     if name:
         fields = {"name": name}
 
+    extra_conditions = list(tenant_list_conditions(ctx, ModelProvider, use_owner=False))
+
     if params.watch:
         return StreamingResponse(
             ModelProvider.streaming(fields=fields, fuzzy_fields=fuzzy_fields),
@@ -64,6 +71,7 @@ async def get_model_providers(
             session=session,
             fields=fields,
             fuzzy_fields=fuzzy_fields,
+            extra_conditions=extra_conditions,
             page=params.page,
             per_page=params.perPage,
             order_by=params.order_by,
@@ -126,7 +134,9 @@ def parse_api_tokens(
 
 
 @router.post("", response_model=ModelProviderPublic, response_model_exclude_none=True)
-async def create_model_provider(session: SessionDep, input: ModelProviderCreate):
+async def create_model_provider(
+    session: SessionDep, ctx: TenantContextDep, input: ModelProviderCreate
+):
     existing = await ModelProvider.one_by_fields(
         session,
         {'deleted_at': None, "name": input.name},
@@ -149,6 +159,9 @@ async def create_model_provider(session: SessionDep, input: ModelProviderCreate)
     input_dict["api_tokens"] = parse_api_tokens(
         existing_tokens=existing_tokens, api_tokens=input.api_tokens
     )
+    # Tenant scope: bind to caller's current Org. Platform admin in
+    # "All" mode (no current_org_id) creates platform-shared (NULL).
+    input_dict["organization_id"] = ctx.current_org_id
     try:
         created = await ModelProvider.create(session=session, source=input_dict)
         return ModelProvider._convert_to_public_class(created)
@@ -161,10 +174,14 @@ async def create_model_provider(session: SessionDep, input: ModelProviderCreate)
 @router.get(
     "/{id}", response_model=ModelProviderPublic, response_model_exclude_none=True
 )
-async def get_model_provider(session: SessionDep, id: int):
+async def get_model_provider(session: SessionDep, ctx: TenantContextDep, id: int):
     provider = await ModelProvider.one_by_id(session=session, id=id)
-    if not provider:
-        raise NotFoundException(message=f"provider {id} not found")
+    assert_resource_visible(
+        ctx,
+        provider,
+        use_owner=False,
+        not_found_message=f"provider {id} not found",
+    )
     return ModelProvider._convert_to_public_class(provider)
 
 
@@ -183,11 +200,18 @@ def deleted_model_names(
     "/{id}", response_model=ModelProviderPublic, response_model_exclude_none=True
 )
 async def update_model_provider(
-    session: SessionDep, id: int, input: ModelProviderUpdate
+    session: SessionDep,
+    ctx: TenantContextDep,
+    id: int,
+    input: ModelProviderUpdate,
 ):
     provider = await ModelProvider.one_by_id(session=session, id=id)
-    if not provider:
-        raise NotFoundException(message=f"provider {id} not found")
+    assert_resource_visible(
+        ctx,
+        provider,
+        use_owner=False,
+        not_found_message=f"provider {id} not found",
+    )
     validate_provider(input)
     deleted_models = deleted_model_names(provider.models or [], input.models or [])
     try:
@@ -220,7 +244,7 @@ async def update_model_provider(
 
 
 @router.delete("/{id}")
-async def delete_model_provider(session: SessionDep, id: int):
+async def delete_model_provider(session: SessionDep, ctx: TenantContextDep, id: int):
     existing = await ModelProvider.one_by_id(
         session=session,
         id=id,
@@ -228,6 +252,12 @@ async def delete_model_provider(session: SessionDep, id: int):
     )
     if not existing or existing.deleted_at is not None:
         raise NotFoundException(message=f"provider {id} not found")
+    assert_resource_visible(
+        ctx,
+        existing,
+        use_owner=False,
+        not_found_message=f"provider {id} not found",
+    )
     try:
         await existing.delete(session=session)
     except Exception as e:
@@ -340,12 +370,19 @@ async def get_models_from_provider(
 @router.post("/{id}/get-models")
 async def get_models_from_specific_provider(
     session: SessionDep,
+    ctx: TenantContextDep,
     id: int,
     input: ProviderModelsInput,
 ):
     provider = await ModelProvider.one_by_id(session=session, id=id)
     if not provider or provider.deleted_at is not None:
         raise NotFoundException(message=f"provider {id} not found")
+    assert_resource_visible(
+        ctx,
+        provider,
+        use_owner=False,
+        not_found_message=f"provider {id} not found",
+    )
     if provider.api_tokens is None or len(provider.api_tokens) == 0:
         raise InvalidException(
             message=f"provider {provider.name} id: {id} has no API tokens configured"
@@ -436,12 +473,19 @@ async def try_model_with_provider(
 )
 async def try_model_with_specific_provider(
     session: SessionDep,
+    ctx: TenantContextDep,
     id: int,
     input: TestProviderModelInput,
 ):
     provider = await ModelProvider.one_by_id(session=session, id=id)
     if not provider or provider.deleted_at is not None:
         raise NotFoundException(message=f"provider {id} not found")
+    assert_resource_visible(
+        ctx,
+        provider,
+        use_owner=False,
+        not_found_message=f"provider {id} not found",
+    )
     if provider.api_tokens is None or len(provider.api_tokens) == 0:
         raise InvalidException(
             message=f"provider {provider.name} id: {id} has no API tokens configured"

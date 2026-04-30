@@ -1,7 +1,7 @@
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from math import ceil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from sqlalchemy import Date, Select, String, and_, asc, cast, desc, literal
@@ -49,7 +49,7 @@ from gpustack.schemas.usage import (
     UsageTimelinePoint,
 )
 from gpustack.schemas.common import Pagination
-from gpustack.server.deps import CurrentUserDep, SessionDep
+from gpustack.server.deps import CurrentUserDep, SessionDep, TenantContextDep
 from gpustack.utils.usage_snapshots import (
     format_usage_api_key_label,
     format_usage_date_label,
@@ -403,9 +403,12 @@ def _apply_usage_scope_and_filters(
     *,
     user: User,
     filters,
+    org_id: Optional[int] = None,
 ) -> Select:
     if not user.is_admin:
         statement = statement.where(ModelUsage.user_id == user.id)
+    if org_id is not None:
+        statement = statement.where(ModelUsage.organization_id == org_id)
 
     for group_by, items in [
         (USAGE_GROUP_BY_MODEL, filters.models),
@@ -544,6 +547,7 @@ def _check_permission(user: User, request) -> None:
 async def get_usage_timeseries(
     session: SessionDep,
     user: CurrentUserDep,
+    ctx: TenantContextDep,
     request: UsageTimeSeriesRequest,
 ):
     _check_permission(user, request)
@@ -553,6 +557,7 @@ async def get_usage_timeseries(
         _base_statement(),
         user=user,
         filters=request.filters,
+        org_id=ctx.current_org_id,
     )
     if request.group_by == USAGE_GROUP_BY_API_KEY:
         base_statement = _exclude_incomplete_api_key_identity(base_statement)
@@ -735,6 +740,7 @@ def _build_breakdown_item(
 async def get_usage_breakdown(
     session: SessionDep,
     user: CurrentUserDep,
+    ctx: TenantContextDep,
     request: UsageBreakdownRequest,
 ):
     _check_permission(user, request)
@@ -744,6 +750,7 @@ async def get_usage_breakdown(
         _base_statement(),
         user=user,
         filters=request.filters,
+        org_id=ctx.current_org_id,
     )
     if _single_group_by(request.group_by, USAGE_GROUP_BY_API_KEY):
         base_statement = _exclude_incomplete_api_key_identity(base_statement)

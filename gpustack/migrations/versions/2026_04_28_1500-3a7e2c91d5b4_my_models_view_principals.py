@@ -190,6 +190,64 @@ def upgrade() -> None:
                 ondelete="SET NULL",
             )
 
+    # ---- Cluster-derived resources: denormalize organization_id ----------
+    # Workers, GPU view (via workers col), model_files, benchmarks,
+    # model_evaluations, model_provider, model_usages all need a
+    # tenant pointer for per-row filtering. NULL = belongs to a
+    # platform-shared cluster (admin-managed). ON DELETE SET NULL keeps
+    # rows alive when an Org is deleted (but Org delete cascades clusters
+    # which delete their workers anyway).
+    # Note: ModelEvaluation is a synchronous request/response (no table),
+    # so it doesn't appear here.
+    for tbl in (
+        "workers",
+        "model_files",
+        "benchmarks",
+        "model_providers",
+        "model_usages",
+    ):
+        if not column_exists(tbl, "organization_id"):
+            with op.batch_alter_table(tbl, schema=None) as batch_op:
+                batch_op.add_column(
+                    sa.Column("organization_id", sa.Integer(), nullable=True)
+                )
+                batch_op.create_foreign_key(
+                    f"fk_{tbl}_organization_id_organizations",
+                    "organizations",
+                    ["organization_id"],
+                    ["id"],
+                    ondelete="SET NULL",
+                )
+
+    # model_files only had worker_id; add cluster_id for direct
+    # cluster_access-based filtering.
+    if not column_exists("model_files", "cluster_id"):
+        with op.batch_alter_table("model_files", schema=None) as batch_op:
+            batch_op.add_column(
+                sa.Column("cluster_id", sa.Integer(), nullable=True)
+            )
+
+    # Recreate gpu_devices_view so it picks up the new w.organization_id
+    # column; the SELECT is taken from gpustack.schemas.stmt.
+    from gpustack.schemas.stmt import (
+        worker_after_drop_view_stmt_sqlite,
+        worker_after_create_view_stmt_sqlite,
+        worker_after_drop_view_stmt_mysql,
+        worker_after_create_view_stmt_mysql,
+        worker_after_drop_view_stmt_postgres,
+        worker_after_create_view_stmt_postgres,
+    )
+
+    if bind.dialect.name == "sqlite":
+        op.execute(worker_after_drop_view_stmt_sqlite)
+        op.execute(worker_after_create_view_stmt_sqlite)
+    elif bind.dialect.name == "mysql":
+        op.execute(worker_after_drop_view_stmt_mysql)
+        op.execute(worker_after_create_view_stmt_mysql)
+    elif bind.dialect.name == "postgresql":
+        op.execute(worker_after_drop_view_stmt_postgres)
+        op.execute(worker_after_create_view_stmt_postgres)
+
     # ---- Personal Orgs: every non-system user gets their own namespace
     # Adds an is_personal flag, then for each existing user creates a
     # Personal Org named "Personal" with slug "user-{id}", makes them

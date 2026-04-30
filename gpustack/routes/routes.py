@@ -109,6 +109,9 @@ v1_base_router.include_router(
 v1_base_router.include_router(
     worker_pools.router, prefix="/worker-pools", tags=["Worker Pools"]
 )
+# Workers are visible to anyone who can see their cluster; mutations gated
+# by an explicit is_admin check inside each handler.
+v1_base_router.include_router(workers.router, prefix="/workers", tags=["Workers"])
 
 cluster_client_router = APIRouter()
 cluster_client_router.add_api_route(
@@ -175,21 +178,9 @@ worker_client_router.include_router(
     inference_backend.router, prefix="/inference-backends", tags=["Inference Backend"]
 )
 
-admin_routers = model_routers + [
-    {"router": dashboard.router, "prefix": "/dashboard", "tags": ["Dashboard"]},
-    {"router": workers.router, "prefix": "/workers", "tags": ["Workers"]},
-    {"router": users.router, "prefix": "/users", "tags": ["Users"]},
-    {"router": model_sets.router, "prefix": "/model-sets", "tags": ["Model Sets"]},
-    {
-        "router": draft_models.router,
-        "prefix": "/draft-models",
-        "tags": ["Draft Models"],
-    },
-    {
-        "router": model_evaluations.router,
-        "prefix": "/model-evaluations",
-        "tags": ["Model Evaluations"],
-    },
+# Tenant-aware routers: any logged-in user can hit them; the handlers
+# filter by TenantContext (organization_id / cluster visibility).
+tenant_routers = model_routers + [
     {"router": gpu_devices.router, "prefix": "/gpu-devices", "tags": ["GPU Devices"]},
     {
         "router": model_provider.router,
@@ -207,6 +198,23 @@ admin_routers = model_routers + [
         "tags": ["Model Route Principals"],
     },
     {
+        "router": model_evaluations.router,
+        "prefix": "/model-evaluations",
+        "tags": ["Model Evaluations"],
+    },
+]
+
+# Platform-only routers — admin can manage globally; non-admin gets 403.
+admin_routers = [
+    {"router": dashboard.router, "prefix": "/dashboard", "tags": ["Dashboard"]},
+    {"router": users.router, "prefix": "/users", "tags": ["Users"]},
+    {"router": model_sets.router, "prefix": "/model-sets", "tags": ["Model Sets"]},
+    {
+        "router": draft_models.router,
+        "prefix": "/draft-models",
+        "tags": ["Draft Models"],
+    },
+    {
         "router": organizations.router,
         "prefix": "/organizations",
         "tags": ["Organizations"],
@@ -216,6 +224,9 @@ admin_routers = model_routers + [
         "tags": ["Cluster Access"],
     },
 ]
+
+for tr in tenant_routers:
+    v1_base_router.include_router(**tr)
 
 v1_admin_router = APIRouter()
 for admin_router in admin_routers:

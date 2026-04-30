@@ -305,6 +305,69 @@ def cluster_visibility_conditions(
     return [or_(*or_clauses)]
 
 
+def cluster_resource_visibility_conditions(
+    ctx: TenantContext,
+    model: Any,
+) -> List[Any]:
+    """Visibility filter for resources that carry BOTH ``organization_id``
+    (denormalized from cluster) AND ``cluster_id`` — Worker, ModelFile,
+    Benchmark, ModelEvaluation, etc.
+
+    A row is visible if:
+    - it's owned by the caller's current Org (``organization_id`` match), OR
+    - its cluster is granted via ``cluster_access`` (``cluster_id`` ∈
+      ``accessible_cluster_ids``).
+
+    NULL ``organization_id`` rows live on platform-shared clusters; they're
+    only visible through the second branch (cluster_access) for non-admin.
+    """
+    from sqlalchemy import or_
+
+    if _bypass_tenant_filter(ctx):
+        return []
+
+    or_clauses = []
+    if ctx.current_org_id is not None and hasattr(model, "organization_id"):
+        or_clauses.append(model.organization_id == ctx.current_org_id)
+    if ctx.accessible_cluster_ids and hasattr(model, "cluster_id"):
+        or_clauses.append(model.cluster_id.in_(ctx.accessible_cluster_ids))
+
+    if not or_clauses:
+        # No access path; force empty result rather than leak.
+        anchor = getattr(model, "cluster_id", None) or getattr(model, "id", None)
+        return [anchor == -1]
+    return [or_(*or_clauses)]
+
+
+def assert_cluster_resource_visible(
+    ctx: TenantContext,
+    resource: Any,
+    *,
+    not_found_message: str = "Resource not found",
+) -> None:
+    """Single-row mirror of ``cluster_resource_visibility_conditions``.
+
+    Resource must carry ``organization_id`` and/or ``cluster_id``.
+    """
+    if resource is None:
+        raise NotFoundException(message=not_found_message)
+    if _bypass_tenant_filter(ctx):
+        return
+
+    org_id = getattr(resource, "organization_id", None)
+    cluster_id = getattr(resource, "cluster_id", None)
+
+    if (
+        ctx.current_org_id is not None
+        and org_id is not None
+        and org_id == ctx.current_org_id
+    ):
+        return
+    if cluster_id is not None and cluster_id in ctx.accessible_cluster_ids:
+        return
+    raise NotFoundException(message=not_found_message)
+
+
 def assert_cluster_visible(
     ctx: TenantContext,
     cluster: Any,
