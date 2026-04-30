@@ -58,6 +58,10 @@ class OrganizationCreate(OrganizationUpdate):
 
 class OrganizationBase(OrganizationCreate):
     is_platform: bool = Field(default=False, nullable=False)
+    # is_personal Orgs are auto-created one-per-user on signup. They
+    # serve as each user's private namespace (à la GitHub personal
+    # accounts) and are not surfaced in the admin Organizations list.
+    is_personal: bool = Field(default=False, nullable=False)
 
 
 class Organization(OrganizationBase, BaseModelMixin, table=True):

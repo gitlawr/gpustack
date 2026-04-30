@@ -190,6 +190,160 @@ def upgrade() -> None:
                 ondelete="SET NULL",
             )
 
+    # ---- Personal Orgs: every non-system user gets their own namespace
+    # Adds an is_personal flag, then for each existing user creates a
+    # Personal Org named "Personal" with slug "user-{id}", makes them
+    # OWNER, and points users.default_organization_id at it. Removes
+    # non-admin users from the Default Org (id=1) — they no longer get
+    # auto-enrolled there; admin must add them explicitly if desired.
+    if not column_exists("organizations", "is_personal"):
+        with op.batch_alter_table("organizations", schema=None) as batch_op:
+            batch_op.add_column(
+                sa.Column(
+                    "is_personal",
+                    sa.Boolean(),
+                    nullable=False,
+                    server_default="0" if bind.dialect.name != "postgresql" else sa.text("false"),
+                )
+            )
+
+    # Insert a Personal Org for every user that doesn't already have one.
+    # The "doesn't already have one" check uses the canonical slug pattern
+    # so re-running the migration is idempotent.
+    if bind.dialect.name == "postgresql":
+        op.execute(
+            sa.text(
+                """
+                INSERT INTO organizations
+                    (name, slug, description, is_platform, is_personal,
+                     created_at, updated_at, deleted_at)
+                SELECT 'Personal',
+                       'user-' || u.id,
+                       'Personal namespace',
+                       false,
+                       true,
+                       CURRENT_TIMESTAMP,
+                       CURRENT_TIMESTAMP,
+                       NULL
+                FROM users u
+                WHERE COALESCE(u.is_system, false) = false
+                  AND NOT EXISTS (
+                    SELECT 1 FROM organizations o
+                    WHERE o.slug = 'user-' || u.id
+                  )
+                """
+            )
+        )
+        op.execute(
+            sa.text(
+                """
+                INSERT INTO organization_memberships
+                    (user_id, organization_id, role, created_at)
+                SELECT u.id, o.id, 'OWNER'::orgrole, CURRENT_TIMESTAMP
+                FROM users u
+                JOIN organizations o
+                    ON o.slug = 'user-' || u.id AND o.is_personal = true
+                WHERE COALESCE(u.is_system, false) = false
+                ON CONFLICT (user_id, organization_id) DO NOTHING
+                """
+            )
+        )
+        op.execute(
+            sa.text(
+                """
+                UPDATE users u
+                SET default_organization_id = o.id
+                FROM organizations o
+                WHERE o.slug = 'user-' || u.id
+                  AND o.is_personal = true
+                  AND COALESCE(u.is_system, false) = false
+                """
+            )
+        )
+        # Drop non-admin users from the Default Org (id=1). Admin keeps
+        # OWNER role there.
+        op.execute(
+            sa.text(
+                """
+                DELETE FROM organization_memberships
+                WHERE organization_id = :org_id
+                  AND user_id IN (
+                      SELECT id FROM users
+                      WHERE COALESCE(is_admin, false) = false
+                        AND COALESCE(is_system, false) = false
+                  )
+                """
+            ).bindparams(org_id=PLATFORM_ORG_ID)
+        )
+    else:
+        op.execute(
+            sa.text(
+                """
+                INSERT INTO organizations
+                    (name, slug, description, is_platform, is_personal,
+                     created_at, updated_at, deleted_at)
+                SELECT 'Personal',
+                       'user-' || u.id,
+                       'Personal namespace',
+                       0,
+                       1,
+                       CURRENT_TIMESTAMP,
+                       CURRENT_TIMESTAMP,
+                       NULL
+                FROM users u
+                WHERE COALESCE(u.is_system, 0) = 0
+                  AND NOT EXISTS (
+                    SELECT 1 FROM organizations o
+                    WHERE o.slug = 'user-' || u.id
+                  )
+                """
+            )
+        )
+        op.execute(
+            sa.text(
+                """
+                INSERT OR IGNORE INTO organization_memberships
+                    (user_id, organization_id, role, created_at)
+                SELECT u.id, o.id, 'OWNER', CURRENT_TIMESTAMP
+                FROM users u
+                JOIN organizations o
+                    ON o.slug = 'user-' || u.id AND o.is_personal = 1
+                WHERE COALESCE(u.is_system, 0) = 0
+                """
+            )
+        )
+        op.execute(
+            sa.text(
+                """
+                UPDATE users
+                SET default_organization_id = (
+                    SELECT o.id FROM organizations o
+                    WHERE o.slug = 'user-' || users.id
+                      AND o.is_personal = 1
+                )
+                WHERE COALESCE(is_system, 0) = 0
+                  AND EXISTS (
+                    SELECT 1 FROM organizations o
+                    WHERE o.slug = 'user-' || users.id
+                      AND o.is_personal = 1
+                  )
+                """
+            )
+        )
+        op.execute(
+            sa.text(
+                """
+                DELETE FROM organization_memberships
+                WHERE organization_id = :org_id
+                  AND user_id IN (
+                      SELECT id FROM users
+                      WHERE COALESCE(is_admin, 0) = 0
+                        AND COALESCE(is_system, 0) = 0
+                  )
+                """
+            ).bindparams(org_id=PLATFORM_ORG_ID)
+        )
+
 
 def downgrade() -> None:
     bind = op.get_bind()

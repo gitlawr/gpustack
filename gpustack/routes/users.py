@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from sqlmodel import select
 
 from gpustack.api.exceptions import (
     AlreadyExistsException,
@@ -10,11 +12,16 @@ from gpustack.api.exceptions import (
     ConflictException,
 )
 from gpustack.security import get_secret_hash
+from gpustack.schemas.cluster_access import ClusterAccess
+from gpustack.schemas.clusters import Cluster
+from gpustack.schemas.links import ModelRoutePrincipalLink
+from gpustack.schemas.model_routes import ModelRoute
 from gpustack.schemas.organizations import (
+    Organization,
     OrganizationMembership,
     PLATFORM_ORGANIZATION_ID,
 )
-from gpustack.schemas.principals import OrgRole
+from gpustack.schemas.principals import OrgRole, PrincipalType
 from gpustack.server.db import async_session
 from gpustack.server.deps import CurrentUserDep, SessionDep
 from gpustack.schemas.users import (
@@ -81,27 +88,49 @@ async def create_user(session: SessionDep, user_in: UserCreate):
             full_name=user_in.full_name,
             is_admin=user_in.is_admin,
             is_active=user_in.is_active,
-            # Bind every newly-created user to the built-in platform Org so
-            # the org switcher has at least one entry to show. Admins can
-            # later move them into a different org by adding a membership
-            # there and updating default_organization_id.
-            default_organization_id=PLATFORM_ORGANIZATION_ID,
         )
         if user_in.password:
             to_create.hashed_password = get_secret_hash(user_in.password)
         user = await User.create(session, to_create)
 
-        # Mirror the membership created by _init_user / the foundation
-        # migration: admin → OWNER, otherwise → MEMBER.
+        # Build a Personal Org as the user's default namespace, à la
+        # GitHub's per-user account. Admin additionally joins the Default
+        # Org as OWNER (so they can manage the platform-shared workspace);
+        # regular users do NOT auto-join Default — admin can add them
+        # later if shared workspace access is needed.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        personal = Organization(
+            name="Personal",
+            slug=f"user-{user.id}",
+            description="Personal namespace",
+            is_personal=True,
+            is_platform=False,
+        )
+        session.add(personal)
+        await session.flush()
         session.add(
             OrganizationMembership(
                 user_id=user.id,
-                organization_id=PLATFORM_ORGANIZATION_ID,
-                role=OrgRole.OWNER if user.is_admin else OrgRole.MEMBER,
-                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                organization_id=personal.id,
+                role=OrgRole.OWNER,
+                created_at=now,
             )
         )
+        if user.is_admin:
+            session.add(
+                OrganizationMembership(
+                    user_id=user.id,
+                    organization_id=PLATFORM_ORGANIZATION_ID,
+                    role=OrgRole.OWNER,
+                    created_at=now,
+                )
+            )
+
+        user.default_organization_id = personal.id
+        session.add(user)
+
         await session.commit()
+        await session.refresh(user)
     except Exception as e:
         raise InternalServerErrorException(message=f"Failed to create user: {e}")
 
@@ -170,6 +199,59 @@ async def update_user_activation(
     return user
 
 
+async def _personal_org_has_shared_resources(
+    session, personal_org_id: int, user_id: int
+) -> Optional[str]:
+    """Return a human reason string if the Personal Org owns resources
+    that have been shared outside the user's own scope; None otherwise.
+
+    Two flavours of "shared" are checked:
+
+    1. ModelRoutes owned by the Personal Org with `model_route_principals`
+       rows pointing to a principal other than (USER, this user). Means
+       the user has published one of their routes to other orgs / groups
+       / users — deleting the user would yank those publications away.
+    2. Clusters owned by the Personal Org with `cluster_access` rows for
+       any principal other than (USER, this user) — i.e. they've sublet
+       a cluster to other tenants.
+    """
+    # Find route ids owned by this Personal Org that have any non-self
+    # principal_link.
+    route_stmt = (
+        select(ModelRoutePrincipalLink.route_id)
+        .join(ModelRoute, ModelRoute.id == ModelRoutePrincipalLink.route_id)
+        .where(
+            ModelRoute.organization_id == personal_org_id,
+            ~(
+                (ModelRoutePrincipalLink.principal_type == PrincipalType.USER)
+                & (ModelRoutePrincipalLink.principal_id == user_id)
+            ),
+        )
+        .limit(1)
+    )
+    if (await session.exec(route_stmt)).first() is not None:
+        return "User's Personal Org has model routes published to others"
+
+    # Find cluster_access grants on clusters owned by this Personal Org
+    # that point to a principal other than this user.
+    access_stmt = (
+        select(ClusterAccess.cluster_id)
+        .join(Cluster, Cluster.id == ClusterAccess.cluster_id)
+        .where(
+            Cluster.organization_id == personal_org_id,
+            ~(
+                (ClusterAccess.principal_type == PrincipalType.USER)
+                & (ClusterAccess.principal_id == user_id)
+            ),
+        )
+        .limit(1)
+    )
+    if (await session.exec(access_stmt)).first() is not None:
+        return "User's Personal Org has cluster access granted to others"
+
+    return None
+
+
 @router.delete("/{id}")
 async def delete_user(session: SessionDep, id: int):
     user_service = UserService(session)
@@ -180,8 +262,37 @@ async def delete_user(session: SessionDep, id: int):
     if await is_only_admin_user(session, user):
         raise ConflictException(message="Cannot delete the only admin user")
 
+    # Block delete if the user's Personal Org has things shared outside.
+    # default_organization_id points at the Personal Org for normal users;
+    # admins might have it pointing at the Default Org so we look up by
+    # slug as a fallback.
+    personal_stmt = select(Organization).where(
+        Organization.is_personal == True,  # noqa: E712
+        Organization.slug == f"user-{user.id}",
+    )
+    personal = (await session.exec(personal_stmt)).first()
+    if personal is not None:
+        reason = await _personal_org_has_shared_resources(session, personal.id, user.id)
+        if reason:
+            raise ConflictException(
+                message=(
+                    f"{reason}. Reassign or revoke the shared resources before "
+                    "deleting the user."
+                )
+            )
+
     try:
         await user_service.delete(user)
+        # Cascade: also delete the orphan Personal Org. FK on
+        # users.default_organization_id is SET NULL, so Org survives the
+        # user delete; without explicit cleanup it would linger as a
+        # zero-member shell. Note: model / model_route / api_key rows
+        # owned by the Org go with it (their FK is CASCADE); clusters
+        # owned by it would normally become NULL (platform-shared) but
+        # the shared-resource guard above already blocked that case.
+        if personal is not None:
+            await session.delete(personal)
+            await session.commit()
     except Exception as e:
         raise InternalServerErrorException(message=f"Failed to delete user: {e}")
 

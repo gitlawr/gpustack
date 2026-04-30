@@ -30,22 +30,29 @@ async def get_organizations(
     session: SessionDep,
     params: OrganizationListParams = Depends(),
     search: Optional[str] = None,
+    include_personal: bool = False,
 ):
     fuzzy_fields = {}
     if search:
         fuzzy_fields = {"name": search, "slug": search}
 
+    # Personal Orgs are auto-managed user namespaces; they shouldn't
+    # appear in the admin Organizations CRUD page or in any "pick an
+    # Org" picker by default. Callers that genuinely need them
+    # (e.g. an internal audit tool) can opt in with include_personal.
+    fields = {"deleted_at": None}
+    if not include_personal:
+        fields["is_personal"] = False
+
     if params.watch:
         return StreamingResponse(
-            Organization.streaming(
-                fields={"deleted_at": None}, fuzzy_fields=fuzzy_fields
-            ),
+            Organization.streaming(fields=fields, fuzzy_fields=fuzzy_fields),
             media_type="text/event-stream",
         )
 
     return await Organization.paginated_by_query(
         session=session,
-        fields={"deleted_at": None},
+        fields=fields,
         fuzzy_fields=fuzzy_fields,
         page=params.page,
         per_page=params.perPage,

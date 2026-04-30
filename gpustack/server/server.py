@@ -21,6 +21,7 @@ from gpustack.schemas.users import (
 )
 from gpustack.schemas.cluster_access import ClusterAccess
 from gpustack.schemas.organizations import (
+    Organization,
     OrganizationMembership,
     PLATFORM_ORGANIZATION_ID,
 )
@@ -452,12 +453,15 @@ class Server:
                 f"You can get it from {bootstrap_password_file}"
             )
 
-        # Bind the bootstrap admin to the platform organization. The
-        # foundation migration only backfills users that exist at migration
-        # time; the admin row is created here, *after* migrations run, so
-        # we attach the OWNER membership inline. Existing installs that
-        # missed the original backfill are caught by the top-up block at the
-        # end of migration 3a7e2c91d5b4 (my_models_view_principals).
+        # Two memberships at bootstrap:
+        # - Default Org as OWNER, which is the platform-wide shared
+        #   workspace where admin uploads public models etc.
+        # - A Personal Org for admin too, so the per-user namespace
+        #   model is symmetric (admin can experiment in private without
+        #   polluting Default).
+        # default_organization_id stays at the platform Org so admin's
+        # initial UI context is the shared workspace; the Org switcher
+        # exposes both anyway.
         user = User(
             username="admin",
             full_name="Default System Admin",
@@ -468,12 +472,30 @@ class Server:
         )
         await User.create(session, user)
 
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         session.add(
             OrganizationMembership(
                 user_id=user.id,
                 organization_id=PLATFORM_ORGANIZATION_ID,
                 role=OrgRole.OWNER,
-                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                created_at=now,
+            )
+        )
+        personal = Organization(
+            name="Personal",
+            slug=f"user-{user.id}",
+            description="Personal namespace",
+            is_personal=True,
+            is_platform=False,
+        )
+        session.add(personal)
+        await session.flush()
+        session.add(
+            OrganizationMembership(
+                user_id=user.id,
+                organization_id=personal.id,
+                role=OrgRole.OWNER,
+                created_at=now,
             )
         )
         await session.commit()
