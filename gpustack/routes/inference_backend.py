@@ -967,6 +967,59 @@ async def create_inference_backend(
     return backend
 
 
+async def _redirect_global_edit_to_org_row(
+    session,
+    ctx,
+    backend: InferenceBackend,
+    backend_in: InferenceBackendUpdate,
+) -> Optional[InferenceBackend]:
+    """If a non-admin Org caller is editing a Global row, route the write
+    to their Org's row instead — Platform stays read-only for them.
+
+    Returns:
+    - the existing Org row if found (caller continues the update on it), OR
+    - the freshly created Org row (early return; caller should propagate).
+    Returns ``None`` when no redirect is needed (admin, or row already
+    belongs to the caller's Org).
+    """
+    if (
+        backend.organization_id is not None
+        or ctx.is_platform_admin
+        or ctx.current_org_id is None
+    ):
+        return None
+
+    org_row = await InferenceBackend.one_by_fields(
+        session,
+        {
+            "backend_name": backend.backend_name,
+            "organization_id": ctx.current_org_id,
+        },
+    )
+    if org_row is not None:
+        return org_row
+
+    # No Org row yet — seed one from the submitted payload. Org rows are
+    # always CUSTOM-sourced (the Platform built-in metadata is preserved
+    # via the merge in /list), and `enabled` defaults true so the new
+    # versions are immediately selectable at deploy time.
+    new_row = InferenceBackend(
+        backend_name=backend_in.backend_name,
+        version_configs=backend_in.version_configs,
+        default_version=backend_in.default_version,
+        default_backend_param=backend_in.default_backend_param,
+        default_run_command=backend_in.default_run_command,
+        default_entrypoint=backend_in.default_entrypoint,
+        health_check_path=backend_in.health_check_path,
+        description=backend_in.description,
+        default_env=backend_in.default_env,
+        enabled=True,
+        backend_source=BackendSourceEnum.CUSTOM,
+        organization_id=ctx.current_org_id,
+    )
+    return await InferenceBackend.create(session, new_row)
+
+
 @router.put("/{id}", response_model=InferenceBackend)
 async def update_inference_backend(  # noqa: C901
     session: SessionDep,
@@ -980,6 +1033,18 @@ async def update_inference_backend(  # noqa: C901
     backend = await InferenceBackend.one_by_id(session, id)
     if not backend:
         raise NotFoundException(message=f"Inference backend {id} not found")
+
+    redirected = await _redirect_global_edit_to_org_row(
+        session, ctx, backend, backend_in
+    )
+    if redirected is not None:
+        # Continue the update flow against the Org row instead of the
+        # Global row the caller targeted. For a freshly created Org row
+        # the downstream update is effectively a no-op rewrite of the
+        # same payload — which is fine and keeps the response shape
+        # consistent for both branches.
+        backend = redirected
+
     assert_org_owned_writable(ctx, backend, resource_label="inference backend")
 
     # Check if updating to a name that already exists (excluding current backend)
