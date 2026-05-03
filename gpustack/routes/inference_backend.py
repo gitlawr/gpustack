@@ -353,8 +353,12 @@ async def list_backend_configs(  # noqa: C901
     try:
         all_rows = await InferenceBackend.all(session)
         # Hybrid filter: keep Platform rows (NULL) + the caller's own-Org
-        # rows. Platform admin sees everything.
-        if ctx is None or ctx.is_platform_admin:
+        # rows. Platform admin in "All" mode bypasses; in act-as mode
+        # they get scoped to that Org just like a regular member.
+        admin_all_mode = ctx is None or (
+            ctx.is_platform_admin and ctx.current_org_id is None
+        )
+        if admin_all_mode:
             visible_rows = all_rows
         else:
             visible_rows = [
@@ -478,11 +482,18 @@ async def list_backend_configs(  # noqa: C901
 def _hybrid_backend_conditions(ctx) -> List:
     """Hybrid visibility filter for inference_backends.
 
-    Platform rows (organization_id IS NULL) are visible to everyone; an
-    Org's own rows are visible to that Org's members. Platform admin
-    bypasses entirely (sees all rows across all Orgs).
+    Platform rows (organization_id IS NULL) are visible to everyone.
+    Org rows are visible to:
+    - their own Org's members (current_org_id matches)
+    - platform admin in "All" mode (no current_org_id) — full bypass
+    Platform admin in act-as mode (current_org_id is set) follows the
+    same scope as a non-admin caller in that Org: Platform NULL +
+    that Org's rows only. They DON'T see other Orgs' rows while
+    pretending to be in this one.
     """
-    if ctx is None or ctx.is_platform_admin:
+    if ctx is None:
+        return []
+    if ctx.is_platform_admin and ctx.current_org_id is None:
         return []
     from sqlalchemy import or_
 
@@ -587,7 +598,13 @@ async def merge_runner_versions_to_db(
     # naturally wins during the non-admin collapse.
     db_result_sorted = sorted(db_result, key=lambda x: x.id if x.id else 0)
 
-    is_admin_view = ctx is None or ctx.is_platform_admin
+    # Show uncollapsed rows for admin-style views (managing every row
+    # independently). Admin act-as mode behaves like the Org member —
+    # they're acting *inside* that Org and want the collapsed
+    # single-card UX too.
+    is_admin_view = ctx is None or (
+        ctx.is_platform_admin and ctx.current_org_id is None
+    )
     if is_admin_view:
         rows_to_render: List[InferenceBackend] = list(db_result_sorted)
     else:
@@ -716,7 +733,7 @@ async def get_inference_backends(  # noqa: C901
     if params.watch:
         # Filter the streamed events with the same Hybrid visibility check.
         def _visible(b: InferenceBackend) -> bool:
-            if ctx is None or ctx.is_platform_admin:
+            if ctx is None or (ctx.is_platform_admin and ctx.current_org_id is None):
                 return True
             org_id = getattr(b, "organization_id", None)
             if org_id is None:
@@ -861,10 +878,13 @@ async def get_all_inference_backends(
 
 
 def _assert_backend_visible(ctx, backend):
-    """Org member can see Platform (NULL) and own-Org rows; admin sees all."""
+    """Org member can see Platform (NULL) and own-Org rows. Admin sees
+    everything in "All" mode; in act-as mode they're scoped just like
+    a regular member of that Org (so a stale link to dev Org's row
+    while admin is acting-as Default surfaces a 404, not a leak)."""
     if backend is None:
         raise NotFoundException(message="Inference backend not found")
-    if ctx.is_platform_admin:
+    if ctx.is_platform_admin and ctx.current_org_id is None:
         return
     org_id = backend.organization_id
     if org_id is None:
