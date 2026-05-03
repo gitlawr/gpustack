@@ -20,7 +20,7 @@ GitHub Issue: TBD
 
 | 编号 | 需求 |
 |---|---|
-| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org。**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）强制归属单个 Org；**基础设施**（Cluster / Worker / CloudCredential / WorkerPool）有 nullable `organization_id`，平台 admin 可建平台共享或代某 Org 建，Org owner/manager 可在自家 Org 内 CRUD（BYO cluster） |
+| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org。**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）强制归属单个 Org；**基础设施**（Cluster / Worker / CloudCredential / WorkerPool / InferenceBackend）有 nullable `organization_id`，平台 admin 可建 Global 或代某 Org 建，Org owner/manager 可在自家 Org 内 CRUD（BYO cluster / Hybrid backend） |
 | F2 | 引入 UserGroup（Org 内子单元）以支持部门/团队级资源共享 |
 | F3 | 普通用户仅可见/管理在当前 Org 上下文中可见的资源；v1 中所有用户创建的资源都 owner=org，等价于"全 Org 可见"。schema 上保留 `owner_type/owner_id` 三档（org/group/user），为后续精细化预留 |
 | F4 | 管理员可将 Cluster 授权给 Org / Group / User |
@@ -114,6 +114,8 @@ stmt = stmt.where(
 - **系统用户 (`user.is_system=True`)**：worker / cluster service account 等服务端自己派生的内部账号——它们要跨 Org 读取资源（worker 取 instance 对应的 Model 详情、cluster 心跳等都不带 Org 上下文），不能被租户过滤拦下。
 
 平台 admin 带 Org 上下文（act-as 模式）会经过 `organization_id` 过滤但跳过 `owner` 过滤——admin 在 Org 内可见全部资源不论 owner 是 group / user。
+
+**写操作的 act-as 语义**：admin 在 Org 上下文里**不再被允许直接写 Global 行**——比如 admin 切到 Default 时点编辑 Platform vLLM，请求会被服务端的 redirect helper 转成"upsert Default Org 的 vLLM 行"，跟非 admin Org owner 一样的行为。要直接改 Platform 行需要切回"All"模式。这条规则用于 cluster / cloud_credential / worker_pool / inference_backend 等所有带 Hybrid 语义的资源。
 
 ### K8s GPU 实例多租户
 
@@ -642,3 +644,65 @@ v1 采用**统一计量**：所有 namespace 的 GPU/CPU/内存用量都计入 O
 - Cluster Management 菜单的 access flag 从 `canSeeAdmin` 改成 `canManageInfra`（admin 或在任一 Org 持有 owner/manager 角色的用户都看得到）
 - Cluster / CloudCredential 创建表单新增 **Owner** 下拉：admin 可选 "Global" 或任一 Org；Org owner/manager 默认锁定为自己当前 Org，没有第二个选择
 - 列表（cluster / credential / worker_pool）过滤已经在 server 端做了 visibility，前端不用变
+
+## Inference Backend Hybrid (v1 已落地)
+
+InferenceBackend 跟 cluster 类似走"Global + Org override"的 Hybrid 模型，但区别在于一个 backend (e.g. vLLM) 可以**同时存在 Platform 行（admin 维护的内置 / community catalog）和某 Org 自己的扩展行**——Org 行在内部表里跟 Platform 行共享 `backend_name`，区分键是 `(backend_name, organization_id)` 复合 unique。
+
+### 数据模型
+
+```sql
+ALTER TABLE inference_backends
+    ADD COLUMN organization_id INTEGER NULL
+    REFERENCES organizations(id) ON DELETE CASCADE;
+-- 复合唯一：同一 backend_name 在 Global (NULL) 和每个 Org 各最多一行
+ALTER TABLE inference_backends
+    ADD CONSTRAINT uix_inference_backends_name_org
+    UNIQUE (backend_name, organization_id);
+```
+
+### 视角合并规则
+
+非 admin / Org member 看到的列表是**单卡 collapse 视图**——同一 `backend_name` 的 Platform 行 + 自家 Org 行被合并成一张卡片：
+- metadata（`is_built_in` / `backend_source` / `description` / 等）：Org 行优先（Org 行 inherit Platform 的 `is_built_in=True`，所以"Org 扩展的内置 backend 仍然是 built-in"）
+- `version_configs`：union，Org 同 key 覆盖 Platform 同 key
+- `enabled`：`Platform.enabled OR Org.enabled`——避免 Org 行误存的 `enabled=False` 把 Platform-enabled 的 backend 隐藏（取舍：Org 没法显式 disable Platform 共享的 community backend）
+
+admin 看到的是**uncollapsed 视图**：Platform 行和各 Org 行作为独立卡片显示，便于直接管理。Owner tag 显示 "Global" 或 Org 名以区分。
+
+### 写操作的 redirect
+
+**任何调用方在 Org 上下文里写 Global 行**，服务端 `_redirect_global_edit_to_org_row` 会把请求转向 upsert 该 Org 的对应行：
+- 找不到 Org 行 → 用 payload 创建一行（继承 Platform 的 `is_built_in` / `backend_source`）
+- 找到了 → update 那一行
+- Platform 行不动；admin 想改 Platform 必须切到 "All" 上下文
+
+非 admin 在 Org 上下文也走同样路径——这就是"Org Manager 在 vLLM 卡上加版本，背后透明地落到 Org 自家行"的实现。
+
+### 部署候选（`/v2/inference-backends/list`）
+
+部署表单选 backend 时调用 `/list`，按 `backend_name` 分组合并返回；Org 行的 `version_configs` overlay 在 Platform 之上，所以 Org 加的自定义版本和 Platform 的内置版本一起出现在选择列表里。
+
+### 删除规则
+
+- Platform built-in 行：永远不可删（admin 维护的 catalog）
+- Platform community 行：UI 上点删走 soft-disable（PUT `enabled=false`），不真删行
+- Platform Custom 行：admin 在 "All" 模式可真删
+- 任何 Org 行（不论 source）：自家 Org owner/manager 或 admin 可真删——等同于"重置该 backend 在该 Org 的所有自定义"
+
+## Usage 视角（v1 已落地）
+
+Usage 页面为 Org owner/manager / admin 提供两种视角，由顶部 `Org usage` / `My usage` segmented 切换：
+
+| 视角 | 后端过滤 | 含义 |
+|---|---|---|
+| **Org usage** | `organization_id == current_org_id` | provider 视角：本 Org 的模型/infra 被消耗了多少 |
+| **My usage** | `user_id == self`（**drop org filter**）| 个人视角：我自己累计调用了多少（跨 org，覆盖 AUTHED 共享场景）|
+
+| 角色 / Context | toggle | 默认 scope |
+|---|---|---|
+| admin "All" | 隐藏 | `org`（无 org_id 即无 filter，等价"全平台"）|
+| admin act-as / Org owner / manager | 显示 | `org` |
+| Org member / Personal Org 用户 | 隐藏 | `mine` |
+
+`mine` 视角刻意 drop org filter 以解决 AUTHED 模型的跨 Org 共享场景：Personal Org 用户调 Default Org 的 AUTHED 模型，usage 行 `organization_id=Default`、`user_id=user`，他们在 Personal 上下文需要能看到自己的消耗记录。
