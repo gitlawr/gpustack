@@ -1017,20 +1017,18 @@ async def _redirect_global_edit_to_org_row(
     backend: InferenceBackend,
     backend_in: InferenceBackendUpdate,
 ) -> Optional[InferenceBackend]:
-    """If a non-admin Org caller is editing a Global row, route the write
-    to their Org's row instead — Platform stays read-only for them.
+    """If the caller is in an Org context and the target is a Global
+    row, route the write to that Org's row. Applies to admin acting-as
+    too — when admin has switched to Default Org, "enable community
+    backend" should land in Default's scope, not modify Platform.
 
     Returns:
     - the existing Org row if found (caller continues the update on it), OR
     - the freshly created Org row (early return; caller should propagate).
-    Returns ``None`` when no redirect is needed (admin, or row already
-    belongs to the caller's Org).
+    Returns ``None`` when no redirect is needed (target already
+    belongs to the caller's Org, or caller is in "All" mode).
     """
-    if (
-        backend.organization_id is not None
-        or ctx.is_platform_admin
-        or ctx.current_org_id is None
-    ):
+    if backend.organization_id is not None or ctx.current_org_id is None:
         return None
 
     org_row = await InferenceBackend.one_by_fields(

@@ -399,16 +399,21 @@ def assert_org_owned_writable(
 ) -> None:
     """403 if the caller can't mutate an org-owned infrastructure row.
 
-    Used for clusters / cloud_credentials / worker_pools — anything with
-    a nullable ``organization_id`` and these write rules:
+    Used for clusters / cloud_credentials / worker_pools / inference
+    backends — anything with a nullable ``organization_id`` and these
+    write rules:
 
-    - Platform admin / system user → allowed (bypass)
-    - **Org-owned** (org_id == current_org_id): only the Org's
-      owner / admin can write
-    - **Global** (org_id IS NULL): only platform admin (handled
-      by the bypass branch above) — Org owners cannot mutate platform
-      infra they don't own
-    - **Other Org's row**: never writable
+    - Platform admin / system user → allowed (bypass via
+      ``_bypass_tenant_filter`` for "All" mode admin and system users;
+      admin in act-as falls through to org-row check, where they're
+      treated like the Org's owner).
+    - **Org-owned** (org_id == current_org_id): the Org's owner /
+      manager can write; platform admin in act-as bypasses the role
+      check (admin is admin everywhere, even when scoped to one Org).
+    - **Global** (org_id IS NULL): only "All"-mode admin — Org owners
+      and admin-in-act-as cannot mutate Global rows directly. Resource
+      handlers redirect such writes to the caller's Org row instead.
+    - **Other Org's row**: never writable for non-admin.
     """
     if _bypass_tenant_filter(ctx):
         return
@@ -421,7 +426,12 @@ def assert_org_owned_writable(
         raise OrgRoleError(
             message=f"{resource_label.capitalize()} does not belong to current Org"
         )
-    if ctx.org_role not in (OrgRole.OWNER, OrgRole.MANAGER):
+    # Platform admin acting-as the Org passes the role check unconditionally;
+    # for non-admin we require explicit owner/manager.
+    if not ctx.is_platform_admin and ctx.org_role not in (
+        OrgRole.OWNER,
+        OrgRole.MANAGER,
+    ):
         raise OrgRoleError(
             message=f"Insufficient organization role to modify this {resource_label}"
         )
