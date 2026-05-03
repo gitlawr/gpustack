@@ -999,10 +999,11 @@ async def _redirect_global_edit_to_org_row(
     if org_row is not None:
         return org_row
 
-    # No Org row yet — seed one from the submitted payload. Org rows are
-    # always CUSTOM-sourced (the Platform built-in metadata is preserved
-    # via the merge in /list), and `enabled` defaults true so the new
-    # versions are immediately selectable at deploy time.
+    # No Org row yet — seed one from the submitted payload. The Org row
+    # inherits is_built_in / backend_source from the Platform row it
+    # extends: an Org-scoped vLLM is still vLLM (a BUILT_IN backend),
+    # not a freshly invented custom backend. That keeps suffix-validation
+    # and other built-in-aware code paths firing identically.
     new_row = InferenceBackend(
         backend_name=backend_in.backend_name,
         version_configs=backend_in.version_configs,
@@ -1014,7 +1015,8 @@ async def _redirect_global_edit_to_org_row(
         description=backend_in.description,
         default_env=backend_in.default_env,
         enabled=True,
-        backend_source=BackendSourceEnum.CUSTOM,
+        is_built_in=backend.is_built_in,
+        backend_source=backend.backend_source,
         organization_id=ctx.current_org_id,
     )
     return await InferenceBackend.create(session, new_row)
