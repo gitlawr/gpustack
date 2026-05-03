@@ -557,8 +557,20 @@ def _collapse_by_backend_name(
     db_result_sorted: List[InferenceBackend],
 ) -> Dict[str, InferenceBackend]:
     """Collapse Platform + Org rows that share a backend_name. Used for
-    the non-admin single-card view. Org row wins on metadata; versions
-    are unioned with Org keys overriding Platform keys."""
+    the non-admin single-card view.
+
+    - Org row wins on metadata + version_configs (Org keys override
+      Platform keys, missing Org keys fall back to Platform).
+    - **Exception: ``enabled``**. Use ``Platform.enabled OR Org.enabled``
+      so a stale or accidental Org row with ``enabled=False`` cannot
+      shadow a Platform-enabled backend. The tradeoff is that an Org
+      can no longer "disable" a Platform-shared community backend in
+      its own scope — disabling has to happen at the Platform level.
+      That's a deliberate choice: keeping the Hybrid view simple and
+      avoiding "I didn't disable it but it's gone" confusion is worth
+      more than per-Org opt-out, which can be re-introduced later via
+      an explicit ``override_enabled`` flag if needed.
+    """
     by_name: Dict[str, InferenceBackend] = {}
     for backend in db_result_sorted:
         existing = by_name.get(backend.backend_name)
@@ -572,6 +584,7 @@ def _collapse_by_backend_name(
             **(org_row.version_configs.root if org_row.version_configs else {}),
         }
         org_row.version_configs = VersionConfigDict(root=merged_versions)
+        org_row.enabled = bool(org_row.enabled) or bool(other.enabled)
         by_name[backend.backend_name] = org_row
     return by_name
 
