@@ -1201,8 +1201,15 @@ class InferenceBackendController:
             if built_in_backend.backend_name == BackendEnum.CUSTOM.value:
                 continue
 
-            backend = await InferenceBackend.one_by_field(
-                session, "backend_name", built_in_backend.backend_name
+            # Built-in backends always seed as Platform (organization_id IS NULL).
+            # Per-Org overrides live in additional rows created by Org owners /
+            # managers; those are managed via the inference_backend routes.
+            backend = await InferenceBackend.one_by_fields(
+                session,
+                {
+                    "backend_name": built_in_backend.backend_name,
+                    "organization_id": None,
+                },
             )
 
             if not backend:
@@ -1267,12 +1274,15 @@ class InferenceBackendController:
                     yaml_backend_names.add(backend_name)
                 await self._upsert_community_backend(session, backend_config)
 
-            # Query all community backends from database
+            # Query all community backends from database. Only Platform
+            # rows are owned by the catalog yaml; Org-private community
+            # additions stay untouched.
             all_backends = await InferenceBackend.all(session)
             db_community_backends = [
                 backend
                 for backend in all_backends
                 if backend.backend_source == BackendSourceEnum.COMMUNITY
+                and backend.organization_id is None
             ]
 
             # Delete community backends that are no longer in YAML
@@ -1384,9 +1394,11 @@ class InferenceBackendController:
                 root=version_config_dict
             )
 
-        # Upsert: update if exists, create if not
-        existing = await InferenceBackend.one_by_field(
-            session, "backend_name", backend_name
+        # Upsert: update if exists, create if not. Community backends seed
+        # at the Platform scope (organization_id IS NULL) — Org-private
+        # extensions live in additional rows owned by Orgs.
+        existing = await InferenceBackend.one_by_fields(
+            session, {"backend_name": backend_name, "organization_id": None}
         )
         if existing:
             # Smart merge logic to preserve user customizations

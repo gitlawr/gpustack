@@ -146,7 +146,7 @@ def upgrade() -> None:
         )
 
     # ---- BYO cluster: tag platform infrastructure with optional org ownership
-    # NULL  = platform-shared (admin-managed, today's behaviour)
+    # NULL  = global (admin-managed, today's behaviour)
     # NOT NULL = the Org that owns this cluster / credential / pool
     # ON DELETE SET NULL — deleting an Org orphans the row to platform
     # rather than cascade-deleting the cluster (admin then decides what
@@ -194,7 +194,7 @@ def upgrade() -> None:
     # Workers, GPU view (via workers col), model_files, benchmarks,
     # model_evaluations, model_provider, model_usages all need a
     # tenant pointer for per-row filtering. NULL = belongs to a
-    # platform-shared cluster (admin-managed). ON DELETE SET NULL keeps
+    # global cluster (admin-managed). ON DELETE SET NULL keeps
     # rows alive when an Org is deleted (but Org delete cascades clusters
     # which delete their workers anyway).
     # Note: ModelEvaluation is a synchronous request/response (no table),
@@ -225,6 +225,44 @@ def upgrade() -> None:
         with op.batch_alter_table("model_files", schema=None) as batch_op:
             batch_op.add_column(
                 sa.Column("cluster_id", sa.Integer(), nullable=True)
+            )
+
+    # ---- Inference backends: Hybrid model -------------------------------
+    # NULL organization_id = Platform-managed (admin curates built-ins);
+    # non-NULL = an Org's extension/override. backend_name is no longer
+    # globally unique — composite unique on (backend_name, organization_id)
+    # lets each Org carry their own row alongside the Platform row.
+    if not column_exists("inference_backends", "organization_id"):
+        with op.batch_alter_table("inference_backends", schema=None) as batch_op:
+            batch_op.add_column(
+                sa.Column("organization_id", sa.Integer(), nullable=True)
+            )
+            batch_op.create_foreign_key(
+                "fk_inference_backends_organization_id_organizations",
+                "organizations",
+                ["organization_id"],
+                ["id"],
+                ondelete="CASCADE",
+            )
+            # Drop the old single-column unique on backend_name (its name
+            # varies by dialect; let create_constraint figure that out by
+            # going through batch_alter_table's reflection).
+            try:
+                batch_op.drop_constraint(
+                    "inference_backends_backend_name_key", type_="unique"
+                )
+            except Exception:
+                pass
+            try:
+                batch_op.drop_index("ix_inference_backends_backend_name")
+            except Exception:
+                pass
+            batch_op.create_unique_constraint(
+                "uix_inference_backends_name_org",
+                ["backend_name", "organization_id"],
+            )
+            batch_op.create_index(
+                "ix_inference_backends_backend_name", ["backend_name"]
             )
 
     # Recreate gpu_devices_view so it picks up the new w.organization_id

@@ -48,7 +48,7 @@ class ModelUsage(SQLModel, ActiveRecordMixin, table=True):
     access_key: Optional[str] = Field(default=None)
     api_key_is_custom: Optional[bool] = Field(default=None)
     # Tenant scope. Denormalized from the api_key/model used for the request.
-    # NULL = platform-shared (admin acting in "All" mode).
+    # NULL = global (admin acting in "All" mode).
     organization_id: Optional[int] = Field(
         default=None,
         sa_column=Column(Integer, ForeignKey("organizations.id", ondelete="SET NULL")),

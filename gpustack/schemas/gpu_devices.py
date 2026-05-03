@@ -16,7 +16,7 @@ class GPUDeviceBase(GPUDeviceStatus, BaseModel):
     worker_ip: str
     worker_ifname: str
     cluster_id: int
-    # NULL = belongs to a worker on a platform-shared cluster.
+    # NULL = belongs to a worker on a global cluster.
     organization_id: Optional[int] = None
 
 

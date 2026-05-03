@@ -258,7 +258,7 @@ class CloudCredentialBase(SQLModel):
     provider: ClusterProvider = Field(default=ClusterProvider.DigitalOcean)
     key: Optional[str] = None
     options: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
-    # NULL = platform-shared; non-NULL = owned by this Org.
+    # NULL = global; non-NULL = owned by this Org.
     organization_id: Optional[int] = Field(
         default=None, foreign_key="organizations.id", nullable=True
     )
@@ -358,7 +358,7 @@ class ClusterCreateBase(ClusterUpdate):
         default=None, foreign_key="cloud_credentials.id"
     )
     region: Optional[str] = None
-    # NULL = platform-shared (admin-managed); non-NULL = owned by this Org.
+    # NULL = global (admin-managed); non-NULL = owned by this Org.
     # ON DELETE SET NULL is enforced at the DB level via the migration.
     organization_id: Optional[int] = Field(
         default=None, foreign_key="organizations.id", nullable=True

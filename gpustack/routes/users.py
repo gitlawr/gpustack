@@ -128,7 +128,7 @@ async def create_user(session: SessionDep, user_in: UserCreate):
 
         # Build a Personal Org as the user's default namespace, à la
         # GitHub's per-user account. Admin additionally joins the Default
-        # Org as OWNER (so they can manage the platform-shared workspace);
+        # Org as OWNER (so they can manage the global workspace);
         # regular users do NOT auto-join Default — admin can add them
         # later if shared workspace access is needed.
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -262,7 +262,7 @@ async def delete_user(session: SessionDep, id: int):
         # user delete; without explicit cleanup it would linger as a
         # zero-member shell. Note: model / model_route / api_key rows
         # owned by the Org go with it (their FK is CASCADE); clusters
-        # owned by it would normally become NULL (platform-shared) but
+        # owned by it would normally become NULL (global) but
         # the shared-resource guard above already blocked that case.
         if personal is not None:
             await session.delete(personal)

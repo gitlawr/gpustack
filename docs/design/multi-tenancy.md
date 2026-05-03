@@ -603,24 +603,24 @@ WorkerPool 的 `organization_id` 在创建时由其 cluster 同步过来（denor
 
 ### 权限语义
 
-| 主体 | platform-owned (org_id=NULL) | org-owned (org_id=自家 Org) | 别人家的 org-owned |
+| 主体 | global (org_id=NULL) | org-owned (org_id=自家 Org) | 别人家的 org-owned |
 |---|---|---|---|
 | 平台 admin | CRUD（含 set-default） | CRUD（强制回收 / 审计） | CRUD |
 | Org owner / manager | 列表里看见（如有 cluster_access）；不能改 | 在自家 Org 内 CRUD；可签 `cluster_access` 给别人 | 看不见（除非有 cluster_access） |
 | Org member | 按 `cluster_access` | 隐式可见（同 Org 即可见，无需 cluster_access 行） | 按 `cluster_access` |
 | System user (worker / cluster account) | 全部可见可读（bypass） | 同上 | 同上 |
 
-平台共享 cluster 的"读"权限仍由 `cluster_access` 表显式发；写权限只有平台 admin 有。Org 自管 cluster 的"读"权限对该 Org 成员是隐式的（同 Org 自动可见），写权限属于该 Org 的 owner / manager。
+global cluster 的"读"权限仍由 `cluster_access` 表显式发；写权限只有平台 admin 有。Org 自管 cluster 的"读"权限对该 Org 成员是隐式的（同 Org 自动可见），写权限属于该 Org 的 owner / manager。
 
 ### 创建路径校验
 
-- 平台 admin：可以建 platform-shared (`organization_id = NULL`) 或任意 Org-owned
-- Org owner / manager：只能建 `organization_id = 自己当前 Org`；不能建 platform-shared
+- 平台 admin：可以建 global (`organization_id = NULL`) 或任意 Org-owned
+- Org owner / manager：只能建 `organization_id = 自己当前 Org`；不能建 global
 - 其他 Org member / 普通用户：不能创建任何 cluster
 
 ### `cluster_access` 行为
 
-- **platform-owned**：访问权完全靠 `cluster_access` 显式授权
+- **global**：访问权完全靠 `cluster_access` 显式授权
 - **org-owned**：拥有方 Org **隐式**具备访问权；如果想分享给其他 Org / Group / User，写 `cluster_access` 行（"分租"）
 
 ### Quota / Namespace
@@ -640,5 +640,5 @@ v1 采用**统一计量**：所有 namespace 的 GPU/CPU/内存用量都计入 O
 ### UI 变化
 
 - Cluster Management 菜单的 access flag 从 `canSeeAdmin` 改成 `canManageInfra`（admin 或在任一 Org 持有 owner/manager 角色的用户都看得到）
-- Cluster / CloudCredential 创建表单新增 **Owner** 下拉：admin 可选 "Platform-shared" 或任一 Org；Org owner/manager 默认锁定为自己当前 Org，没有第二个选择
+- Cluster / CloudCredential 创建表单新增 **Owner** 下拉：admin 可选 "Global" 或任一 Org；Org owner/manager 默认锁定为自己当前 Org，没有第二个选择
 - 列表（cluster / credential / worker_pool）过滤已经在 server 端做了 visibility，前端不用变

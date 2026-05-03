@@ -160,7 +160,7 @@ async def create_model_provider(
         existing_tokens=existing_tokens, api_tokens=input.api_tokens
     )
     # Tenant scope: bind to caller's current Org. Platform admin in
-    # "All" mode (no current_org_id) creates platform-shared (NULL).
+    # "All" mode (no current_org_id) creates global (NULL).
     input_dict["organization_id"] = ctx.current_org_id
     try:
         created = await ModelProvider.create(session=session, source=input_dict)

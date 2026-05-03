@@ -326,7 +326,7 @@ class WorkerCreate(WorkerStatusStored, WorkerUpdate):
         default=None,
     )
     # Denormalized from cluster.organization_id for per-row tenant
-    # filtering. NULL = belongs to a platform-shared cluster (admin-managed).
+    # filtering. NULL = belongs to a global cluster (admin-managed).
     organization_id: Optional[int] = Field(
         default=None,
         sa_column=Column(Integer, ForeignKey("organizations.id"), nullable=True),

@@ -15,6 +15,10 @@ from gpustack.api.exceptions import (
     NotFoundException,
     BadRequestException,
 )
+from gpustack.api.tenant import (
+    assert_org_owned_writable,
+    validate_org_owned_owner,
+)
 from gpustack.schemas import Worker
 from gpustack.schemas.common import Pagination
 from gpustack.schemas.inference_backend import (
@@ -33,7 +37,7 @@ from gpustack.schemas.inference_backend import (
 )
 from gpustack.schemas.models import BackendEnum, Model, BackendSourceEnum
 from gpustack.server.db import async_session
-from gpustack.server.deps import ListParamsDep, SessionDep
+from gpustack.server.deps import ListParamsDep, SessionDep, TenantContextDep
 from gpustack_runner import list_service_runners
 from gpustack_runtime.detector.ascend import get_ascend_cann_variant
 from gpustack_runtime.detector import ManufacturerEnum
@@ -42,7 +46,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def filter_yaml_fields(yaml_data: Dict, filter_keys: List[str]) -> Dict:
+def filter_yaml_fields(yaml_data: Dict, filter_keys: List[str]) -> Dict:  # noqa: C901
     """
     Recursively remove specified keys from a nested YAML dict.
 
@@ -237,7 +241,7 @@ def get_runner_deprecate(runners: List[ServiceVersionedRunner]) -> bool:
     )
 
 
-def merge_list_runners(
+def merge_list_runners(  # noqa: C901
     backend_name: str, workers: List[Worker]
 ) -> Tuple[Dict[str, List[ServiceVersionedRunner]], VersionConfigDict, Optional[str]]:
     """
@@ -323,7 +327,9 @@ def merge_list_runners(
 
 @router.get("/list", response_model=InferenceBackendResponse)
 async def list_backend_configs(  # noqa: C901
-    session: SessionDep, cluster_id: Optional[int] = None
+    session: SessionDep,
+    ctx: TenantContextDep,
+    cluster_id: Optional[int] = None,
 ):
     """
     Get list of available backend configurations with version information.
@@ -331,6 +337,10 @@ async def list_backend_configs(  # noqa: C901
     Returns both built-in backends and custom backends from database.
     Built-in backends are identified and enhanced with runner versions.
     Each backend item includes available versions.
+
+    Hybrid: when an Org row and a Platform row share the same backend_name,
+    the Org row's metadata + version_configs win, then Platform versions
+    are merged in for any keys the Org didn't define.
     """
     items = []
 
@@ -341,7 +351,38 @@ async def list_backend_configs(  # noqa: C901
 
     # Process all backends from database (includes both built-in and custom backends)
     try:
-        inference_backends = await InferenceBackend.all(session)
+        all_rows = await InferenceBackend.all(session)
+        # Hybrid filter: keep Platform rows (NULL) + the caller's own-Org
+        # rows. Platform admin sees everything.
+        if ctx is None or ctx.is_platform_admin:
+            visible_rows = all_rows
+        else:
+            visible_rows = [
+                b
+                for b in all_rows
+                if b.organization_id is None or b.organization_id == ctx.current_org_id
+            ]
+        # Group by backend_name; collapse Platform + Org into one logical
+        # backend with merged versions (Org wins on key collisions).
+        grouped: Dict[str, InferenceBackend] = {}
+        for b in visible_rows:
+            name = b.backend_name
+            existing = grouped.get(name)
+            if existing is None:
+                grouped[name] = b
+                continue
+            # Pick the Org row as the canonical entry (preserves its
+            # default_version / default_env / etc.); merge Platform
+            # version_configs into it for any keys the Org didn't define.
+            org_row = b if (b.organization_id is not None) else existing
+            other = existing if org_row is b else b
+            merged_versions = {
+                **(other.version_configs.root if other.version_configs else {}),
+                **(org_row.version_configs.root if org_row.version_configs else {}),
+            }
+            org_row.version_configs = VersionConfigDict(root=merged_versions)
+            grouped[name] = org_row
+        inference_backends = list(grouped.values())
         for backend in inference_backends:
             # Get versions from version_config
             versions: List[VersionListItem] = []
@@ -434,11 +475,85 @@ async def list_backend_configs(  # noqa: C901
     return InferenceBackendResponse(items=items)
 
 
+def _hybrid_backend_conditions(ctx) -> List:
+    """Hybrid visibility filter for inference_backends.
+
+    Platform rows (organization_id IS NULL) are visible to everyone; an
+    Org's own rows are visible to that Org's members. Platform admin
+    bypasses entirely (sees all rows across all Orgs).
+    """
+    if ctx is None or ctx.is_platform_admin:
+        return []
+    from sqlalchemy import or_
+
+    or_clauses = [InferenceBackend.organization_id.is_(None)]
+    if ctx.current_org_id is not None:
+        or_clauses.append(InferenceBackend.organization_id == ctx.current_org_id)
+    return [or_(*or_clauses)]
+
+
+async def _fetch_visible_backend_rows(session, ctx) -> List[InferenceBackend]:
+    """Hybrid-aware DB read: Platform rows always; Org rows scoped to ctx."""
+    extra_conditions = _hybrid_backend_conditions(ctx)
+    if extra_conditions:
+        return await InferenceBackend.all_by_fields(
+            session, fields={}, extra_conditions=extra_conditions
+        )
+    return await InferenceBackend.all(session)
+
+
+def _enrich_built_in_with_runner_versions(
+    db_backend: InferenceBackendPublic,
+    backend_name: str,
+    with_deprecated: bool,
+) -> None:
+    """Layer runner-discovered versions on top of the DB row in place."""
+    _, runner_versions, default_version = get_runner_versions_and_configs(
+        backend_name,
+        backend_version=None,
+        with_deprecated=with_deprecated,
+    )
+    for runner_version, version_config in runner_versions.root.items():
+        db_backend.built_in_version_configs[runner_version] = version_config
+    if default_version and not db_backend.default_version:
+        db_backend.default_version = default_version
+
+
+def _migrate_community_built_in_versions(db_backend: InferenceBackendPublic) -> None:
+    """Move version_configs entries that carry built_in_frameworks into the
+    dedicated built_in_version_configs map (community backends only)."""
+    if (
+        db_backend.backend_source != BackendSourceEnum.COMMUNITY
+        or not db_backend.version_configs
+        or not db_backend.version_configs.root
+    ):
+        return
+    versions_to_move = {
+        version: config
+        for version, config in db_backend.version_configs.root.items()
+        if config.built_in_frameworks
+    }
+    if not versions_to_move:
+        return
+    if not db_backend.built_in_version_configs:
+        db_backend.built_in_version_configs = {}
+    db_backend.built_in_version_configs.update(versions_to_move)
+    for version in versions_to_move:
+        del db_backend.version_configs.root[version]
+
+
 async def merge_runner_versions_to_db(
-    session: SessionDep, with_deprecated: bool = True
+    session: SessionDep,
+    with_deprecated: bool = True,
+    *,
+    ctx=None,
 ) -> List[InferenceBackendPublic]:
-    # Get database backends first
-    db_result = await InferenceBackend.all(session)
+    """Build the merged list of (Platform + Org-visible) backends for the
+    caller. ``ctx`` filters Org rows to those belonging to the caller's
+    current Org; Platform rows (organization_id IS NULL) always pass
+    through. Pass ``ctx=None`` for legacy callers that don't need the
+    tenant filter applied (background services)."""
+    db_result = await _fetch_visible_backend_rows(session, ctx)
 
     # Sort by id ascending to ensure consistent ordering
     db_result_sorted = sorted(db_result, key=lambda x: x.id if x.id else 0)
@@ -449,68 +564,32 @@ async def merge_runner_versions_to_db(
         for backend in db_result_sorted
     }
 
-    # Ensure all BUILT_IN_BACKENDS are included
-    merged_backends = []
+    merged_backends: List[InferenceBackendPublic] = []
     built_in_backend_names = set()
-
     for built_in_backend in get_built_in_backend():
         if built_in_backend.backend_name == BackendEnum.CUSTOM.value:
             continue
-        built_in_backend_names.add(built_in_backend.backend_name)
-
-        # Get versions from list_service_runners using the common function
-        _, runner_versions, default_version = get_runner_versions_and_configs(
-            built_in_backend.backend_name,
-            backend_version=None,
-            with_deprecated=with_deprecated,
-        )
-
-        if default_version and not built_in_backend.default_version:
-            built_in_backend.default_version = default_version
-
-        db_backend = db_backends_map[built_in_backend.backend_name]
+        name = built_in_backend.backend_name
+        built_in_backend_names.add(name)
+        db_backend = db_backends_map.get(name)
         if not db_backend:
-            logger.warning(
-                f"No database backend found for {built_in_backend.backend_name}"
-            )
+            logger.warning(f"No database backend found for {name}")
             continue
-        # Merge versions from database backend.
-        for runner_version, version_config in runner_versions.root.items():
-            db_backend.built_in_version_configs[runner_version] = version_config
-
-        if default_version and not db_backend.default_version:
-            db_backend.default_version = default_version
-
+        _enrich_built_in_with_runner_versions(db_backend, name, with_deprecated)
         merged_backends.append(db_backend)
 
-    # Add remaining database backends that are not in BUILT_IN_BACKENDS
+    # Append remaining (non-built-in) DB backends, normalising community
+    # version layout on the way.
     for backend_name, db_backend in db_backends_map.items():
-        if backend_name not in built_in_backend_names:
-            # Migrate versions with built_in_frameworks to built_in_version_configs
-            if (
-                db_backend.backend_source == BackendSourceEnum.COMMUNITY
-                and db_backend.version_configs
-                and db_backend.version_configs.root
-            ):
-                versions_to_move = {}
-                for version, config in db_backend.version_configs.root.items():
-                    if config.built_in_frameworks:
-                        versions_to_move[version] = config
-
-                if versions_to_move:
-                    if not db_backend.built_in_version_configs:
-                        db_backend.built_in_version_configs = {}
-                    db_backend.built_in_version_configs.update(versions_to_move)
-
-                    for version in versions_to_move:
-                        del db_backend.version_configs.root[version]
-
-            merged_backends.append(db_backend)
+        if backend_name in built_in_backend_names:
+            continue
+        _migrate_community_built_in_versions(db_backend)
+        merged_backends.append(db_backend)
 
     return merged_backends
 
 
-def _generate_framework_index_map(
+def _generate_framework_index_map(  # noqa: C901
     version_config_dicts: List[Dict[str, VersionConfig]]
 ) -> Dict[str, List[str]]:
     """
@@ -587,6 +666,7 @@ def _filter_community_backends(
 @router.get("", response_model=InferenceBackendsPublic)
 async def get_inference_backends(  # noqa: C901
     session: SessionDep,
+    ctx: TenantContextDep,
     params: ListParamsDep,
     search: str = None,
     include_deprecated: bool = False,
@@ -610,14 +690,23 @@ async def get_inference_backends(  # noqa: C901
     fields = {}
 
     if params.watch:
+        # Filter the streamed events with the same Hybrid visibility check.
+        def _visible(b: InferenceBackend) -> bool:
+            if ctx is None or ctx.is_platform_admin:
+                return True
+            org_id = getattr(b, "organization_id", None)
+            if org_id is None:
+                return True
+            return ctx.current_org_id is not None and org_id == ctx.current_org_id
+
         return StreamingResponse(
-            InferenceBackend.streaming(fields=fields),
+            InferenceBackend.streaming(fields=fields, filter_func=_visible),
             media_type="text/event-stream",
         )
 
     async with async_session() as session:
         merged_backends = await merge_runner_versions_to_db(
-            session, with_deprecated=include_deprecated
+            session, with_deprecated=include_deprecated, ctx=ctx
         )
 
         # Get worker GPU information for framework sorting
@@ -729,8 +818,9 @@ async def get_inference_backends(  # noqa: C901
 @router.get("/all", response_model=List[InferenceBackend])
 async def get_all_inference_backends(
     session: SessionDep,
+    ctx: TenantContextDep,
 ):
-    backends = await merge_runner_versions_to_db(session)
+    backends = await merge_runner_versions_to_db(session, ctx=ctx)
     ret = []
     for backend in backends:
         if backend.backend_source == BackendSourceEnum.CUSTOM:
@@ -746,23 +836,54 @@ async def get_all_inference_backends(
     return ret
 
 
+def _assert_backend_visible(ctx, backend):
+    """Org member can see Platform (NULL) and own-Org rows; admin sees all."""
+    if backend is None:
+        raise NotFoundException(message="Inference backend not found")
+    if ctx.is_platform_admin:
+        return
+    org_id = backend.organization_id
+    if org_id is None:
+        return  # Platform row is visible to everyone
+    if ctx.current_org_id is not None and org_id == ctx.current_org_id:
+        return
+    raise NotFoundException(message="Inference backend not found")
+
+
 @router.get("/{id}", response_model=InferenceBackend)
-async def get_inference_backend(session: SessionDep, id: int):
+async def get_inference_backend(session: SessionDep, ctx: TenantContextDep, id: int):
     """
     Get a specific inference backend by ID.
     """
     backend = await InferenceBackend.one_by_id(session, id)
     if not backend:
         raise BadRequestException(message=f"Inference backend {id} not found")
+    _assert_backend_visible(ctx, backend)
     return backend
 
 
 @router.get("/backend_name/{backend_name}", response_model=InferenceBackend)
-async def get_inference_backend_by_name(session: SessionDep, backend_name: str):
+async def get_inference_backend_by_name(
+    session: SessionDep, ctx: TenantContextDep, backend_name: str
+):
     """
-    Get a specific inference backend by backend name.
+    Get a specific inference backend by backend name. Resolves to the
+    caller's Org row if one exists, else falls back to the Platform row.
     """
-    backend = await InferenceBackend.one_by_field(session, "backend_name", backend_name)
+    if ctx.current_org_id is not None and not ctx.is_platform_admin:
+        org_row = await InferenceBackend.one_by_fields(
+            session,
+            {
+                "backend_name": backend_name,
+                "organization_id": ctx.current_org_id,
+            },
+        )
+        if org_row is not None:
+            return org_row
+    backend = await InferenceBackend.one_by_fields(
+        session,
+        {"backend_name": backend_name, "organization_id": None},
+    )
     if not backend:
         raise BadRequestException(message=f"Inference backend {backend_name} not found")
     return backend
@@ -770,23 +891,46 @@ async def get_inference_backend_by_name(session: SessionDep, backend_name: str):
 
 @router.post("", response_model=InferenceBackend)
 async def create_inference_backend(
-    session: SessionDep, backend_in: InferenceBackendCreate
+    session: SessionDep,
+    ctx: TenantContextDep,
+    backend_in: InferenceBackendCreate,
 ):
     """
     Create a new inference backend.
+
+    Hybrid scope:
+    - Platform admin: organization_id NULL (Platform) or any Org id.
+    - Org owner / manager: organization_id locked to their current Org.
+      Same backend_name as a Platform built-in IS allowed for an Org row
+      (extension/override) — the case-insensitive duplicate check only
+      bites when creating a Platform row that conflicts with a built-in.
     """
-    # Duplicate names with built-in backends are prohibited (case-insensitive).
-    if is_built_in_backend(backend_in.backend_name):
+    target_org_id = validate_org_owned_owner(
+        ctx,
+        getattr(backend_in, "organization_id", None),
+        resource_label="inference backend",
+    )
+
+    # Platform-scoped rows can't shadow a built-in name (case-insensitive)
+    # — the seeding controller owns those. Org-scoped rows MAY use the same
+    # name to extend / override a built-in for that Org.
+    if target_org_id is None and is_built_in_backend(backend_in.backend_name):
         raise BadRequestException(
             message=(
                 f"Backend name {backend_in.backend_name} duplicates with built-in backends (case-insensitive). Please use another name."
             ),
         )
+
     backend_in.backend_source = BackendSourceEnum.CUSTOM
     backend_in.enabled = True
-    # Check if backend with same name already exists
-    existing = await InferenceBackend.one_by_field(
-        session, "backend_name", backend_in.backend_name
+    # Composite unique on (backend_name, organization_id) — uniqueness check
+    # is scoped to the same tenant.
+    existing = await InferenceBackend.one_by_fields(
+        session,
+        {
+            "backend_name": backend_in.backend_name,
+            "organization_id": target_org_id,
+        },
     )
     if existing:
         raise BadRequestException(
@@ -812,6 +956,7 @@ async def create_inference_backend(
             default_env=backend_in.default_env,
             enabled=backend_in.enabled,
             backend_source=backend_in.backend_source,
+            organization_id=target_org_id,
         )
         backend = await InferenceBackend.create(session, backend)
     except Exception as e:
@@ -823,8 +968,11 @@ async def create_inference_backend(
 
 
 @router.put("/{id}", response_model=InferenceBackend)
-async def update_inference_backend(
-    session: SessionDep, id: int, backend_in: InferenceBackendUpdate
+async def update_inference_backend(  # noqa: C901
+    session: SessionDep,
+    ctx: TenantContextDep,
+    id: int,
+    backend_in: InferenceBackendUpdate,
 ):
     """
     Update an existing inference backend.
@@ -832,6 +980,7 @@ async def update_inference_backend(
     backend = await InferenceBackend.one_by_id(session, id)
     if not backend:
         raise NotFoundException(message=f"Inference backend {id} not found")
+    assert_org_owned_writable(ctx, backend, resource_label="inference backend")
 
     # Check if updating to a name that already exists (excluding current backend)
     if backend_in.backend_name != backend.backend_name:
@@ -895,13 +1044,14 @@ async def update_inference_backend(
 
 
 @router.delete("/{id}")
-async def delete_inference_backend(session: SessionDep, id: int):
+async def delete_inference_backend(session: SessionDep, ctx: TenantContextDep, id: int):
     """
     Delete an inference backend.
     """
     backend = await InferenceBackend.one_by_id(session, id)
     if not backend:
         raise NotFoundException(message=f"Inference backend {id} not found")
+    assert_org_owned_writable(ctx, backend, resource_label="inference backend")
 
     if (
         backend.backend_source != BackendSourceEnum.CUSTOM
@@ -925,8 +1075,8 @@ async def delete_inference_backend(session: SessionDep, id: int):
 
 
 @router.post("/from-yaml", response_model=InferenceBackend)
-async def create_inference_backend_from_yaml(
-    session: SessionDep, payload: dict = Body(...)
+async def create_inference_backend_from_yaml(  # noqa: C901
+    session: SessionDep, ctx: TenantContextDep, payload: dict = Body(...)
 ):
     """
     Create an inference backend from YAML configuration.
@@ -962,8 +1112,14 @@ async def create_inference_backend_from_yaml(
         if not req_yaml_data.get("backend_name"):
             raise BadRequestException(message="backend_name is required in YAML")
 
-        # Check if backend name duplicates with built-in backends (case-insensitive)
-        if is_built_in_backend(req_yaml_data["backend_name"]):
+        target_org_id = validate_org_owned_owner(
+            ctx,
+            req_yaml_data.get("organization_id"),
+            resource_label="inference backend",
+        )
+
+        # Platform rows can't shadow built-in names; Org rows may extend them.
+        if target_org_id is None and is_built_in_backend(req_yaml_data["backend_name"]):
             raise BadRequestException(
                 message=(
                     f"Backend name {req_yaml_data['backend_name']} duplicates with built-in backends (case-insensitive). Please use another name."
@@ -972,9 +1128,13 @@ async def create_inference_backend_from_yaml(
         req_yaml_data["backend_source"] = BackendSourceEnum.CUSTOM
         req_yaml_data["enabled"] = True
 
-        # Check if backend with same name already exists
-        existing = await InferenceBackend.one_by_field(
-            session, "backend_name", req_yaml_data["backend_name"]
+        # Composite uniqueness — same backend_name allowed across tenants.
+        existing = await InferenceBackend.one_by_fields(
+            session,
+            {
+                "backend_name": req_yaml_data["backend_name"],
+                "organization_id": target_org_id,
+            },
         )
         if existing:
             raise BadRequestException(
@@ -1014,7 +1174,7 @@ async def create_inference_backend_from_yaml(
             raise BadRequestException(message=f"Invalid YAML data: {e}")
 
         # Create the backend
-        backend = InferenceBackend(**yaml_data)
+        backend = InferenceBackend(**yaml_data, organization_id=target_org_id)
         backend = await InferenceBackend.create(session, backend)
 
         return backend
@@ -1031,7 +1191,10 @@ async def create_inference_backend_from_yaml(
 
 @router.put("/{id}/from-yaml", response_model=InferenceBackend)
 async def update_inference_backend_from_yaml(  # noqa: C901
-    session: SessionDep, id: int, payload: dict = Body(...)
+    session: SessionDep,
+    ctx: TenantContextDep,
+    id: int,
+    payload: dict = Body(...),
 ):
     """
     Update an existing inference backend from YAML configuration.
@@ -1045,6 +1208,7 @@ async def update_inference_backend_from_yaml(  # noqa: C901
     backend = await InferenceBackend.one_by_id(session, id)
     if not backend:
         raise NotFoundException(message=f"Inference backend {id} not found")
+    assert_org_owned_writable(ctx, backend, resource_label="inference backend")
 
     try:
         # Extract YAML content from JSON payload

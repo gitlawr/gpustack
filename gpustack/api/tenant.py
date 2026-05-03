@@ -280,7 +280,7 @@ def cluster_visibility_conditions(
     - **Own-Org cluster** (``cluster.organization_id == current_org_id``):
       the org's BYO cluster.
     - **Granted via cluster_access** (``cluster.id`` ∈
-      ``ctx.accessible_cluster_ids``): platform-shared clusters the admin
+      ``ctx.accessible_cluster_ids``): global clusters the admin
       authorised, or another Org's cluster sublet to us via cluster_access.
 
     Either path makes the cluster visible. System users and platform
@@ -318,7 +318,7 @@ def cluster_resource_visibility_conditions(
     - its cluster is granted via ``cluster_access`` (``cluster_id`` ∈
       ``accessible_cluster_ids``).
 
-    NULL ``organization_id`` rows live on platform-shared clusters; they're
+    NULL ``organization_id`` rows live on global clusters; they're
     only visible through the second branch (cluster_access) for non-admin.
     """
     from sqlalchemy import or_
@@ -405,7 +405,7 @@ def assert_org_owned_writable(
     - Platform admin / system user → allowed (bypass)
     - **Org-owned** (org_id == current_org_id): only the Org's
       owner / admin can write
-    - **Platform-shared** (org_id IS NULL): only platform admin (handled
+    - **Global** (org_id IS NULL): only platform admin (handled
       by the bypass branch above) — Org owners cannot mutate platform
       infra they don't own
     - **Other Org's row**: never writable
@@ -415,7 +415,7 @@ def assert_org_owned_writable(
     res_org = getattr(resource, "organization_id", None)
     if res_org is None:
         raise PlatformAdminError(
-            message=f"Only platform admin can modify platform-shared {resource_label}"
+            message=f"Only platform admin can modify global {resource_label}"
         )
     if res_org != ctx.current_org_id:
         raise OrgRoleError(
@@ -442,14 +442,14 @@ def validate_org_owned_owner(
 ) -> None:
     """Decide whether the caller can create a row owned by ``input_org_id``.
 
-    - Platform admin: any value (including NULL = platform-shared)
-    - Org owner / admin: must equal current_org_id; can't create platform-shared
+    - Platform admin: any value (including NULL = global)
+    - Org owner / admin: must equal current_org_id; can't create global
     """
     if ctx.is_platform_admin:
         return
     if input_org_id is None:
         raise InvalidException(
-            message=f"Only platform admin can create platform-shared {resource_label}s"
+            message=f"Only platform admin can create global {resource_label}s"
         )
     if ctx.current_org_id is None or input_org_id != ctx.current_org_id:
         raise InvalidException(

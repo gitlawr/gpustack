@@ -551,7 +551,7 @@ class ModelProviderCreate(ModelProviderUpdate):
 class ModelProvider(ModelProviderBase, BaseModelMixin, table=True):
     __tablename__ = "model_providers"
     id: Optional[int] = Field(default=None, primary_key=True)
-    # Tenant scope. NULL = platform-shared (admin-managed). Org-owned
+    # Tenant scope. NULL = global (admin-managed). Org-owned
     # providers carry the owning Org id.
     organization_id: Optional[int] = Field(
         default=None,
