@@ -542,49 +542,73 @@ def _migrate_community_built_in_versions(db_backend: InferenceBackendPublic) -> 
         del db_backend.version_configs.root[version]
 
 
+def _collapse_by_backend_name(
+    db_result_sorted: List[InferenceBackend],
+) -> Dict[str, InferenceBackend]:
+    """Collapse Platform + Org rows that share a backend_name. Used for
+    the non-admin single-card view. Org row wins on metadata; versions
+    are unioned with Org keys overriding Platform keys."""
+    by_name: Dict[str, InferenceBackend] = {}
+    for backend in db_result_sorted:
+        existing = by_name.get(backend.backend_name)
+        if existing is None:
+            by_name[backend.backend_name] = backend
+            continue
+        org_row = backend if backend.organization_id is not None else existing
+        other = existing if org_row is backend else backend
+        merged_versions = {
+            **(other.version_configs.root if other.version_configs else {}),
+            **(org_row.version_configs.root if org_row.version_configs else {}),
+        }
+        org_row.version_configs = VersionConfigDict(root=merged_versions)
+        by_name[backend.backend_name] = org_row
+    return by_name
+
+
 async def merge_runner_versions_to_db(
     session: SessionDep,
     with_deprecated: bool = True,
     *,
     ctx=None,
 ) -> List[InferenceBackendPublic]:
-    """Build the merged list of (Platform + Org-visible) backends for the
-    caller. ``ctx`` filters Org rows to those belonging to the caller's
-    current Org; Platform rows (organization_id IS NULL) always pass
-    through. Pass ``ctx=None`` for legacy callers that don't need the
-    tenant filter applied (background services)."""
-    db_result = await _fetch_visible_backend_rows(session, ctx)
+    """Backends visible to the caller, with runner versions enriched in.
 
-    # Sort by id ascending to ensure consistent ordering
+    Hybrid display rules:
+    - **Platform admin**: one row per DB row (no collapse). Admin needs
+      to manage Platform rows and Org rows separately, so they show as
+      distinct cards (typically distinguished by an Owner tag in the UI).
+    - **Non-admin**: collapsed single-card view per backend_name —
+      Platform + Org rows fold into one entry, Org wins on metadata,
+      versions union (Org overrides Platform). Org owners don't need
+      to know about the underlying two-row Hybrid storage.
+    """
+    db_result = await _fetch_visible_backend_rows(session, ctx)
+    # Sort by id ascending so the Org row (created later, larger id)
+    # naturally wins during the non-admin collapse.
     db_result_sorted = sorted(db_result, key=lambda x: x.id if x.id else 0)
 
-    # Create a map of database backends by name for easy lookup
-    db_backends_map = {
-        backend.backend_name: InferenceBackendPublic(**backend.model_dump())
-        for backend in db_result_sorted
+    is_admin_view = ctx is None or ctx.is_platform_admin
+    if is_admin_view:
+        rows_to_render: List[InferenceBackend] = list(db_result_sorted)
+    else:
+        rows_to_render = list(_collapse_by_backend_name(db_result_sorted).values())
+
+    publics = [InferenceBackendPublic(**row.model_dump()) for row in rows_to_render]
+
+    built_in_names = {
+        b.backend_name
+        for b in get_built_in_backend()
+        if b.backend_name != BackendEnum.CUSTOM.value
     }
-
     merged_backends: List[InferenceBackendPublic] = []
-    built_in_backend_names = set()
-    for built_in_backend in get_built_in_backend():
-        if built_in_backend.backend_name == BackendEnum.CUSTOM.value:
-            continue
-        name = built_in_backend.backend_name
-        built_in_backend_names.add(name)
-        db_backend = db_backends_map.get(name)
-        if not db_backend:
-            logger.warning(f"No database backend found for {name}")
-            continue
-        _enrich_built_in_with_runner_versions(db_backend, name, with_deprecated)
-        merged_backends.append(db_backend)
-
-    # Append remaining (non-built-in) DB backends, normalising community
-    # version layout on the way.
-    for backend_name, db_backend in db_backends_map.items():
-        if backend_name in built_in_backend_names:
-            continue
-        _migrate_community_built_in_versions(db_backend)
-        merged_backends.append(db_backend)
+    for public in publics:
+        if public.backend_name in built_in_names:
+            _enrich_built_in_with_runner_versions(
+                public, public.backend_name, with_deprecated
+            )
+        else:
+            _migrate_community_built_in_versions(public)
+        merged_backends.append(public)
 
     return merged_backends
 
