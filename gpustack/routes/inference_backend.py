@@ -1120,8 +1120,13 @@ async def delete_inference_backend(session: SessionDep, ctx: TenantContextDep, i
         raise NotFoundException(message=f"Inference backend {id} not found")
     assert_org_owned_writable(ctx, backend, resource_label="inference backend")
 
+    # Protect Platform-curated rows (built-in / community at the global
+    # scope). Org-scoped rows are always deletable by their owner — even
+    # when they're a vLLM extension carrying source=BUILT_IN — because
+    # they're the Org's own data, not platform-curated.
     if (
-        backend.backend_source != BackendSourceEnum.CUSTOM
+        backend.organization_id is None
+        and backend.backend_source != BackendSourceEnum.CUSTOM
         and backend.backend_source is not None
     ):
         raise BadRequestException(message="Cannot delete built-in or community backend")
