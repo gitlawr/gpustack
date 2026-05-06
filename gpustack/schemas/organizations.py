@@ -32,6 +32,18 @@ PLATFORM_ORGANIZATION_ID = 1
 
 slug_pattern = r'^[a-z](?:[a-z0-9\-]*[a-z0-9])?$'
 
+# "Personal" is the auto-generated private Org each user gets on
+# signup; "Global" is the UI label for admin-curated Platform rows
+# (e.g. inference backends with organization_id IS NULL). Letting users
+# create regular Orgs with these names would put two same-name entries
+# in the Org switcher and confuse role/visibility semantics. Match
+# case-insensitively after trimming whitespace.
+RESERVED_ORG_NAMES = {"personal", "global"}
+RESERVED_ORG_SLUGS = {"personal", "global"}
+# Personal Org slug pattern — keep humans from grabbing the slot of a
+# user's auto-generated Personal Org.
+personal_slug_pattern = re.compile(r'^user-\d+$')
+
 
 class OrganizationUpdate(SQLModel):
     name: str = Field(nullable=False)
@@ -39,6 +51,16 @@ class OrganizationUpdate(SQLModel):
         default=None, sa_column=Column(Text, nullable=True)
     )
     billing_account_ref: Optional[str] = Field(default=None, nullable=True)
+
+    @field_validator("name", mode="before")
+    def validate_name(cls, v):
+        if not isinstance(v, str):
+            raise ValueError("name must be a string")
+        if v.strip().lower() in RESERVED_ORG_NAMES:
+            raise ValueError(
+                f"'{v}' is a reserved organization name; please choose another"
+            )
+        return v
 
 
 class OrganizationCreate(OrganizationUpdate):
@@ -53,6 +75,8 @@ class OrganizationCreate(OrganizationUpdate):
                 "slug must be lowercase, start with a letter, only contain "
                 "letters, numbers, and hyphens, and not end with a hyphen"
             )
+        if v.lower() in RESERVED_ORG_SLUGS or personal_slug_pattern.match(v):
+            raise ValueError(f"'{v}' is a reserved slug; please choose another")
         return v
 
 
