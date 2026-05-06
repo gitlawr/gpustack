@@ -165,8 +165,12 @@ stmt = stmt.where(
 4. **API Key**：归属 Org 隐式由当前切换器值决定（`X-Organization-Id`）；调用时该 key 仅能访问该 Org 的资源。平台 admin 在 "All" 模式下创建 key 时弹一个目标 Org 选择器以指定 key 应绑哪个 Org
 5. **推理调用**：行为不变。`/my-models` 返回的 ModelRoute 由 `non_admin_user_models` 视图决定，按 `access_policy` 过滤：
    - `PUBLIC` / `AUTHED` → 所有非 admin 用户都看见（admin 上架的公共服务默认就是这个语义）
+   - `ORG` → 仅 route 所属 Org 的成员（视图 join `organization_memberships` 按 `m.organization_id` 匹配）；非 platform Org 创建 route 的默认值
    - `ALLOWED_USERS` → 仅 `usermodelroutelink` 中显式列出的用户（旧路径，兼容期保留）
    - `ALLOWED_PRINCIPALS` → 视图内 join `model_route_principals` 按 user / org / group 任一匹配；这是跨 Org 精细化发布的入口
+6. **新建 Route 的默认可见范围**：
+   - 平台（Default）Org 内：默认 `AUTHED`，跟旧行为一致；admin 上架的公共服务对所有登录用户可见
+   - 其他 Org 内：默认 `ORG`——只有本 Org 成员看得到。Org admin 想跨 Org 共享时改成 `ALLOWED_PRINCIPALS` 显式选 principal，想全平台公开就改成 `AUTHED`
 
 #### 资源可见性 — Org 内默认共享，UI 不暴露 owner 选择器
 
