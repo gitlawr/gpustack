@@ -54,5 +54,10 @@ class ClusterAccessPublic(SQLModel):
     # only the server can join the right table per principal_type;
     # the client otherwise falls back to "#<id>" which is unfriendly.
     principal_name: Optional[str] = None
+    # Org the principal belongs to: same as principal_id for ORG,
+    # the group's owning Org for GROUP, NULL for USER (a user can
+    # span multiple Orgs so there's no single answer). Frontends use
+    # this to expand "groups granted access" into per-Org quota slots.
+    principal_organization_id: Optional[int] = None
     granted_by: Optional[int] = None
     created_at: datetime

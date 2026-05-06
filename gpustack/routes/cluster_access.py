@@ -81,11 +81,14 @@ async def _resolve_principal_names(
         org_names = {o.id: o.name for o in result.all()}
 
     group_names: dict[int, str] = {}
+    group_org_ids: dict[int, int] = {}
     if group_ids:
         result = await session.exec(
             select(UserGroup).where(UserGroup.id.in_(group_ids))
         )
-        group_names = {g.id: g.name for g in result.all()}
+        for g in result.all():
+            group_names[g.id] = g.name
+            group_org_ids[g.id] = g.organization_id
 
     user_names: dict[int, str] = {}
     if user_ids:
@@ -96,16 +99,22 @@ async def _resolve_principal_names(
     for r in rows:
         if r.principal_type == PrincipalType.ORG:
             name = org_names.get(r.principal_id)
+            principal_org_id = r.principal_id
         elif r.principal_type == PrincipalType.GROUP:
             name = group_names.get(r.principal_id)
+            principal_org_id = group_org_ids.get(r.principal_id)
         else:
             name = user_names.get(r.principal_id)
+            # Users span multiple Orgs — leave the Org id NULL and let
+            # callers decide how to attribute usage / quota for them.
+            principal_org_id = None
         out.append(
             ClusterAccessPublic(
                 cluster_id=r.cluster_id,
                 principal_type=r.principal_type,
                 principal_id=r.principal_id,
                 principal_name=name,
+                principal_organization_id=principal_org_id,
                 granted_by=r.granted_by,
                 created_at=r.created_at,
             )
