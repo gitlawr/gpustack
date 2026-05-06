@@ -259,9 +259,11 @@ class CloudCredentialBase(SQLModel):
     provider: ClusterProvider = Field(default=ClusterProvider.DigitalOcean)
     key: Optional[str] = None
     options: Optional[Dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
-    # NULL = global; non-NULL = owned by this Org.
+    # Every cloud credential belongs to one Org (mirrors cluster scope).
+    # The route fills this with ctx.current_org_id or PLATFORM_ORG when
+    # the caller omits it.
     organization_id: Optional[int] = Field(
-        default=None, foreign_key="organizations.id", nullable=True
+        default=None, foreign_key="organizations.id", nullable=False
     )
 
 

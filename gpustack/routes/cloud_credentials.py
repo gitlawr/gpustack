@@ -27,6 +27,7 @@ from gpustack.schemas.clusters import (
 )
 from gpustack.cloud_providers.common import factory
 from gpustack.routes.proxy import proxy_to
+from gpustack.schemas.organizations import PLATFORM_ORGANIZATION_ID
 
 router = APIRouter()
 
@@ -85,11 +86,14 @@ async def get(session: SessionDep, ctx: TenantContextDep, id: int):
 async def create(
     session: SessionDep, ctx: TenantContextDep, input: CloudCredentialCreate
 ):
+    # Mirror cluster-create: every credential has an owner Org. Fill in
+    # ctx.current_org_id, or PLATFORM_ORG for admin in "All" mode.
+    if input.organization_id is None:
+        input.organization_id = ctx.current_org_id or PLATFORM_ORGANIZATION_ID
     validate_org_owned_owner(
         input.organization_id, ctx, resource_label="cloud credential"
     )
-    # Cloud credential names are unique per Org. Admin's Global creds
-    # (organization_id=NULL) form their own namespace.
+    # Names are unique within their owning Org.
     existing = await CloudCredential.one_by_fields(
         session,
         {

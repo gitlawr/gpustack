@@ -145,13 +145,10 @@ def upgrade() -> None:
             ).bindparams(org_id=PLATFORM_ORG_ID)
         )
 
-    # ---- BYO cluster / pool: tag with owner Org -------------------------
-    # Clusters and worker_pools are always Org-owned (sharing across Orgs
-    # is via cluster_access). Cloud credentials remain optional Org-scoped
-    # so admin can keep platform-shared providers.
-    # ON DELETE CASCADE for clusters/pools — deleting an Org takes its
-    # clusters with it; cloud_credentials stays SET NULL since admin's
-    # platform-shared creds outlive any single Org.
+    # ---- BYO cluster / credential / pool: tag with owner Org ------------
+    # Clusters, cloud credentials and worker_pools are always Org-owned —
+    # cross-Org sharing is expressed via cluster_access, not NULL ownership.
+    # ON DELETE CASCADE: deleting an Org takes its infra rows with it.
     if not column_exists("clusters", "organization_id"):
         with op.batch_alter_table("clusters", schema=None) as batch_op:
             batch_op.add_column(
@@ -175,7 +172,7 @@ def upgrade() -> None:
                 "organizations",
                 ["organization_id"],
                 ["id"],
-                ondelete="SET NULL",
+                ondelete="CASCADE",
             )
 
     if not column_exists("worker_pools", "organization_id"):
@@ -192,11 +189,17 @@ def upgrade() -> None:
             )
 
     # Backfill any pre-existing rows with NULL org → platform Org so the
-    # NOT NULL constraint below holds, and so admin's existing clusters
-    # land in the Default Org as expected.
+    # NOT NULL constraint below holds (admin's existing infra lands in
+    # the Default Org as expected).
     op.execute(
         sa.text(
             "UPDATE clusters SET organization_id = :org_id "
+            "WHERE organization_id IS NULL"
+        ).bindparams(org_id=PLATFORM_ORG_ID)
+    )
+    op.execute(
+        sa.text(
+            "UPDATE cloud_credentials SET organization_id = :org_id "
             "WHERE organization_id IS NULL"
         ).bindparams(org_id=PLATFORM_ORG_ID)
     )
@@ -209,6 +212,10 @@ def upgrade() -> None:
 
     # Promote the columns to NOT NULL now that no NULLs remain.
     with op.batch_alter_table("clusters", schema=None) as batch_op:
+        batch_op.alter_column(
+            "organization_id", existing_type=sa.Integer(), nullable=False
+        )
+    with op.batch_alter_table("cloud_credentials", schema=None) as batch_op:
         batch_op.alter_column(
             "organization_id", existing_type=sa.Integer(), nullable=False
         )
