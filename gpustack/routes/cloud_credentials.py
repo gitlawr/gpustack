@@ -88,9 +88,15 @@ async def create(
     validate_org_owned_owner(
         input.organization_id, ctx, resource_label="cloud credential"
     )
+    # Cloud credential names are unique per Org. Admin's Global creds
+    # (organization_id=NULL) form their own namespace.
     existing = await CloudCredential.one_by_fields(
         session,
-        {"deleted_at": None, "name": input.name},
+        {
+            "deleted_at": None,
+            "name": input.name,
+            "organization_id": input.organization_id,
+        },
     )
     if existing:
         raise AlreadyExistsException(

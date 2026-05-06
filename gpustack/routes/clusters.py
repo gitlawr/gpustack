@@ -264,9 +264,15 @@ async def create_cluster(
         input.organization_id = ctx.current_org_id or PLATFORM_ORGANIZATION_ID
     validate_org_owned_owner(input.organization_id, ctx, resource_label="cluster")
 
+    # Cluster names are unique within their owning Org, not globally —
+    # two Orgs can each have a "c1".
     existing = await Cluster.one_by_fields(
         session,
-        {'deleted_at': None, "name": input.name},
+        {
+            'deleted_at': None,
+            "name": input.name,
+            "organization_id": input.organization_id,
+        },
     )
     if existing:
         raise AlreadyExistsException(message=f"cluster {input.name} already exists")

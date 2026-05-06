@@ -137,9 +137,15 @@ def parse_api_tokens(
 async def create_model_provider(
     session: SessionDep, ctx: TenantContextDep, input: ModelProviderCreate
 ):
+    # Provider names are unique per Org (admin's Global providers
+    # — organization_id=NULL — form their own namespace).
     existing = await ModelProvider.one_by_fields(
         session,
-        {'deleted_at': None, "name": input.name},
+        {
+            'deleted_at': None,
+            "name": input.name,
+            "organization_id": ctx.current_org_id,
+        },
     )
     if existing:
         raise AlreadyExistsException(message=f"provider {input.name} already exists")

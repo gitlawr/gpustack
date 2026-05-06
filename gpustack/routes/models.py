@@ -418,7 +418,13 @@ async def validate_distributed_vllm_limit_per_worker(
 async def create_model(
     session: SessionDep, ctx: TenantContextDep, model_in: ModelCreate
 ):
-    existing = await Model.one_by_field(session, "name", model_in.name)
+    # Model & ModelRoute names are unique within their Org. Two Orgs
+    # can each have a "llama3" without colliding.
+    org_scope = ctx.current_org_id
+    existing = await Model.one_by_fields(
+        session,
+        {"name": model_in.name, "organization_id": org_scope},
+    )
     if existing:
         raise AlreadyExistsException(
             message=f"Model '{model_in.name}' already exists. "
@@ -428,7 +434,10 @@ async def create_model(
         model_in.enable_model_route is not None and model_in.enable_model_route
     )
     if should_create_route:
-        existing_route = await ModelRoute.one_by_field(session, "name", model_in.name)
+        existing_route = await ModelRoute.one_by_fields(
+            session,
+            {"name": model_in.name, "organization_id": org_scope},
+        )
         if existing_route:
             raise AlreadyExistsException(
                 message=f"Model route '{model_in.name}' already exists. "
