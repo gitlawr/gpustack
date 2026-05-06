@@ -462,7 +462,8 @@ async def create_model(
             target_org_id = cluster.organization_id
     if target_org_id is not None:
         model_in_dict["organization_id"] = target_org_id
-        model_in_dict["owner_type"] = "ORG"
+        # PrincipalType uses lowercase values ("org" / "group" / "user").
+        model_in_dict["owner_type"] = "org"
         model_in_dict["owner_id"] = target_org_id
 
     try:
