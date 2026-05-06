@@ -593,41 +593,56 @@ P0 必须先完成；P1 是所有后续工作的前置；P2 / P3 / P4 可并行�
 
 ```sql
 ALTER TABLE clusters
-    ADD COLUMN organization_id INTEGER NULL
-    REFERENCES organizations(id) ON DELETE SET NULL;
+    ADD COLUMN organization_id INTEGER NOT NULL
+    REFERENCES organizations(id) ON DELETE CASCADE;
 ALTER TABLE cloud_credentials
     ADD COLUMN organization_id INTEGER NULL
     REFERENCES organizations(id) ON DELETE SET NULL;
 ALTER TABLE worker_pools
-    ADD COLUMN organization_id INTEGER NULL
-    REFERENCES organizations(id) ON DELETE SET NULL;
--- NULL = 平台共享（admin 管）；非 NULL = 该 Org 自管。
--- ON DELETE SET NULL：Org 被删时不级联删 cluster，留给 admin 决策处理。
+    ADD COLUMN organization_id INTEGER NOT NULL
+    REFERENCES organizations(id) ON DELETE CASCADE;
+
+-- 每个 cluster / worker_pool 都隶属于一个 Org（admin 共享的工作区落在
+-- Default Org，跨 Org 共享走 cluster_access）。Cloud credential 仍允许
+-- NULL 以保留"平台公共凭证"的 Hybrid 用法。
+
+-- 每个 Org 至多一个 default cluster：
+CREATE UNIQUE INDEX uix_clusters_default_per_org
+    ON clusters (organization_id)
+    WHERE is_default = TRUE AND deleted_at IS NULL;
 ```
 
 WorkerPool 的 `organization_id` 在创建时由其 cluster 同步过来（denormalized），列表过滤时不用 join。
 
 ### 权限语义
 
-| 主体 | global (org_id=NULL) | org-owned (org_id=自家 Org) | 别人家的 org-owned |
-|---|---|---|---|
-| 平台 admin | CRUD（含 set-default） | CRUD（强制回收 / 审计） | CRUD |
-| Org admin | 列表里看见（如有 cluster_access）；不能改 | 在自家 Org 内 CRUD；可签 `cluster_access` 给别人 | 看不见（除非有 cluster_access） |
-| Org user | 按 `cluster_access` | 隐式可见（同 Org 即可见，无需 cluster_access 行） | 按 `cluster_access` |
-| System user (worker / cluster account) | 全部可见可读（bypass） | 同上 | 同上 |
+| 主体 | 自家 Org 的 cluster | 别人家 Org 的 cluster |
+|---|---|---|
+| 平台 admin | CRUD（act-as 也可以；"All" 模式下能直接管理任意 Org 的 cluster） | CRUD |
+| Org admin（cluster owner Org） | CRUD（含 set-default、worker_pool、cluster_access） | 仅当有 `cluster_access` 行时可见，且只能"用"不能"管" |
+| Org user / cluster_access 受让人 | 同 Org 隐式可见可用；通过 cluster_access 可跨 Org 借用 | 借来的 cluster 只授 USER 权限（部署模型 / 起 GPU 实例），不能管基础设施 |
+| System user (worker / cluster account) | 全部可见可读（bypass） | 同上 |
 
-global cluster 的"读"权限仍由 `cluster_access` 表显式发；写权限只有平台 admin 有。Org 自管 cluster 的"读"权限对该 Org 成员是隐式的（同 Org 自动可见），写权限属于该 Org 的 admin。
+写权限永远属于 cluster owner Org 的 admin（外加平台 admin）；`cluster_access` 表达的是"借用权"，不会越权升格成管理权。
 
 ### 创建路径校验
 
-- 平台 admin：可以建 global (`organization_id = NULL`) 或任意 Org-owned
-- Org admin：只能建 `organization_id = 自己当前 Org`；不能建 global
+- 平台 admin：建任意 Org 的 cluster；"All" 模式下省略 `organization_id` 时默认落到平台 (Default) Org
+- Org admin：只能建 `organization_id = 自己当前 Org`
 - 其他 Org user / 普通用户：不能创建任何 cluster
+
+### Default cluster（per-Org）
+
+`clusters.is_default` 不再是平台单独一档，而是每个 Org 各有一个，由部分唯一索引（`UNIQUE(organization_id) WHERE is_default = TRUE AND deleted_at IS NULL`）保证。语义：
+
+- 每个 Org 在该 Org 上下文部署模型时的兜底 cluster；写权限沿用 `assert_cluster_writable`
+- **新建 cluster** 时若该 Org 还没有任何 cluster，路由层把这条自动标成 default（避免一个额外的"set-default"圆球）
+- **部署表单兜底链**：`当前 Org 的 default → 平台 (Default) Org 的 default → 任意 Ready cluster → list[0]`。admin "All" 视角没有 Org 上下文，跳过第一档直接看平台 Org 的 default
 
 ### `cluster_access` 行为
 
-- **global**：访问权完全靠 `cluster_access` 显式授权
-- **org-owned**：拥有方 Org **隐式**具备访问权；如果想分享给其他 Org / Group / User，写 `cluster_access` 行（"分租"）
+- 拥有方 Org 的成员**隐式**具备访问权；要把 cluster 借给其他 Org / Group / User，写 `cluster_access` 行
+- `cluster_access` 命中只授**USER 权限**（部署 / GPU 实例消费），管理权仍属于 owner Org 的 admin
 
 ### Quota / Namespace
 
