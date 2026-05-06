@@ -725,3 +725,23 @@ Usage 页面为 Org admin / 平台 admin 提供两种视角，由顶部 `Org usa
 | Org user / Personal Org 用户 | 隐藏 | `mine` |
 
 `mine` 视角刻意 drop org filter 以解决 AUTHED 模型的跨 Org 共享场景：Personal Org 用户调 Default Org 的 AUTHED 模型，usage 行 `organization_id=Default`、`user_id=user`，他们在 Personal 上下文需要能看到自己的消耗记录。
+
+## ModelRoute 名称的 Org 命名空间（v1 已落地）
+
+ModelRoute 名字在 Org 内唯一（`(name, organization_id)` 维度），跨 Org 可以重名。但客户端调用 `/v1/chat/completions` 时通过请求体 `model` 字段路由，如果两个 Org 都有名为 `qwen3-0.6b` 的 route，Higress AI proxy 会因为 model 名碰撞而无法分发——所以实际暴露给客户端的 **effective model name** 带上 Org slug 前缀：
+
+```text
+平台 Org (is_platform=true) :  qwen3-0.6b           （保持向后兼容）
+其他 Org (slug=org1)        :  org1/qwen3-0.6b      （OpenAI / HF 风格的 namespace）
+```
+
+实现：
+
+- `gpustack/schemas/model_routes.py` 提供 `effective_route_name(name, slug, is_platform)` 工具
+- `sync_gateway` 加载 route owner Org，把 effective name 透传给：
+  - `sync_model_route_mapper` — AI proxy `modelMapping` 的 key
+  - `ensure_model_ingress` — Higress ingress 的 `x-higress-llm-model` 头匹配
+  - `ensure_route_generic_transformer_config` — `/model/proxy/<id>/...` 路径反写出来的 header value
+- 客户端展示侧（`ApiAccessInfo` modal、ModelRoute 列表）走前端的 `effectiveRouteName(name, ownerOrg)` helper 计算同一个值
+
+`/model/proxy/<route_id>/...` 路径仍按 id 路由，不受名字影响——admin 想直接拼 URL 调试或绕过 model 名解析时仍可用。
