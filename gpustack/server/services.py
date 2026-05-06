@@ -18,7 +18,9 @@ from gpustack.schemas.model_routes import (
     ModelRouteTarget,
     TargetStateEnum,
     AccessPolicyEnum,
+    effective_route_name,
 )
+from gpustack.schemas.organizations import Organization
 from gpustack.schemas.users import User
 from gpustack.schemas.clusters import Cluster
 from gpustack.schemas.workers import Worker
@@ -100,19 +102,41 @@ class UserService:
 
     @locked_cached()
     async def get_user_accessible_model_names(self, user_id: int) -> Set[str]:
-        # Get all accessible model names for the user
+        # Get all accessible model names for the user. Set members are
+        # Org-effective names (slug-prefixed for non-platform Orgs) so
+        # they match what `/v1/models` advertises and what the gateway
+        # routes on. We also include the raw `route.name` for the
+        # platform Org so legacy clients calling `model: "qwen3-0.6b"`
+        # against an admin route keep working.
         user: User = await self.get_by_id(user_id)
         if user is None:
             return set()
         if user.is_admin or user.is_system:
-            all_models = await ModelRoute.all_by_field(self.session, "deleted_at", None)
-            model_names = {model.name for model in all_models}
+            routes = await ModelRoute.all_by_field(self.session, "deleted_at", None)
         else:
-            allowed_models = await MyModel.all_by_fields(
+            routes = await MyModel.all_by_fields(
                 self.session, {"user_id": user.id, "deleted_at": None}
             )
-            model_names = {model.name for model in allowed_models}
-        return model_names
+        org_ids = {r.organization_id for r in routes if r.organization_id is not None}
+        org_by_id = {}
+        if org_ids:
+            rows = (
+                await self.session.exec(
+                    select(Organization).where(Organization.id.in_(org_ids))
+                )
+            ).all()
+            org_by_id = {o.id: o for o in rows}
+        names: Set[str] = set()
+        for r in routes:
+            org = org_by_id.get(r.organization_id) if r.organization_id else None
+            names.add(
+                effective_route_name(
+                    r.name,
+                    getattr(org, "slug", None),
+                    bool(getattr(org, "is_platform", False)),
+                )
+            )
+        return names
 
 
 class APIKeyService:
@@ -274,16 +298,46 @@ class ModelRouteService:
 
     @locked_cached()
     async def get_model_ids_by_model_route_name(self, name: str) -> List[Model]:
-        route_targets = await ModelRouteTarget.all_by_fields(
+        # Clients send the Org-effective name (e.g. "org1/qwen3-0.6b").
+        # Targets are stored keyed by raw `route_name`, so split off the
+        # slug and constrain by the route's owning Org. Platform Org
+        # routes have no prefix — fall back to the legacy lookup.
+        org_id: Optional[int] = None
+        raw_name = name
+        if "/" in name:
+            slug, _, rest = name.partition("/")
+            if rest:
+                org = await Organization.one_by_field(self.session, "slug", slug)
+                if org is not None:
+                    org_id = org.id
+                    raw_name = rest
+                # If the slug didn't match an Org, fall through and try
+                # the literal name (handles edge cases like a route
+                # called "literal/with/slashes" before the prefix
+                # convention existed).
+        target_fields = {
+            "route_name": raw_name,
+            "state": TargetStateEnum.ACTIVE,
+            "deleted_at": None,
+        }
+        targets = await ModelRouteTarget.all_by_fields(
             self.session,
-            fields={
-                "route_name": name,
-                "state": TargetStateEnum.ACTIVE,
-                "deleted_at": None,
-            },
+            fields=target_fields,
             options=[selectinload(ModelRouteTarget.model)],
         )
-        models = [target.model for target in route_targets if target.model is not None]
+        # When an Org slug was parsed, narrow to that Org's route by
+        # joining through the parent ModelRoute's `organization_id`.
+        # This avoids an extra round-trip when the route name is
+        # globally unique (the typical single-Org case).
+        if org_id is not None and len(targets) > 0:
+            route_ids = {t.route_id for t in targets if t.route_id is not None}
+            org_routes = await ModelRoute.all_by_fields(
+                self.session,
+                fields={"organization_id": org_id, "deleted_at": None},
+            )
+            allowed_route_ids = {r.id for r in org_routes if r.id in route_ids}
+            targets = [t for t in targets if t.route_id in allowed_route_ids]
+        models = [target.model for target in targets if target.model is not None]
         for model in models:
             self.session.expunge(model)
         return models

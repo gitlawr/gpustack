@@ -29,6 +29,12 @@ if TYPE_CHECKING:
     from gpustack.schemas.model_provider import ModelProvider
 
 
+# Route names intentionally exclude `/` — the dispatch parser
+# (`UserService.get_model_ids_by_model_route_name`) splits the inbound
+# `model` string on the first `/` to separate Org slug from raw name.
+# Allowing `/` inside route names would create irresolvable ambiguity
+# (e.g. literal route "a/b" in platform Org vs. route "b" in Org with
+# slug "a"). Keep the two char sets disjoint.
 name_pattern = r'^[A-Za-z](?:[A-Za-z0-9_\-\.]*[A-Za-z0-9])?$'
 
 
@@ -46,8 +52,8 @@ def effective_route_name(
 
     Format follows the OpenAI / HuggingFace / OpenRouter convention
     (`namespace/model`); slug is already constrained to
-    `^[a-z](?:[a-z0-9\\-]*[a-z0-9])?$` so the joined name has no
-    surprising characters.
+    `^[a-z](?:[a-z0-9\\-]*[a-z0-9])?$` and route names exclude `/` (see
+    ``name_pattern``) so the joined string parses unambiguously.
     """
     if is_platform_org or not org_slug:
         return route_name
