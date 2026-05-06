@@ -145,12 +145,13 @@ def upgrade() -> None:
             ).bindparams(org_id=PLATFORM_ORG_ID)
         )
 
-    # ---- BYO cluster: tag platform infrastructure with optional org ownership
-    # NULL  = global (admin-managed, today's behaviour)
-    # NOT NULL = the Org that owns this cluster / credential / pool
-    # ON DELETE SET NULL — deleting an Org orphans the row to platform
-    # rather than cascade-deleting the cluster (admin then decides what
-    # to do with it).
+    # ---- BYO cluster / pool: tag with owner Org -------------------------
+    # Clusters and worker_pools are always Org-owned (sharing across Orgs
+    # is via cluster_access). Cloud credentials remain optional Org-scoped
+    # so admin can keep platform-shared providers.
+    # ON DELETE CASCADE for clusters/pools — deleting an Org takes its
+    # clusters with it; cloud_credentials stays SET NULL since admin's
+    # platform-shared creds outlive any single Org.
     if not column_exists("clusters", "organization_id"):
         with op.batch_alter_table("clusters", schema=None) as batch_op:
             batch_op.add_column(
@@ -161,7 +162,7 @@ def upgrade() -> None:
                 "organizations",
                 ["organization_id"],
                 ["id"],
-                ondelete="SET NULL",
+                ondelete="CASCADE",
             )
 
     if not column_exists("cloud_credentials", "organization_id"):
@@ -187,8 +188,50 @@ def upgrade() -> None:
                 "organizations",
                 ["organization_id"],
                 ["id"],
-                ondelete="SET NULL",
+                ondelete="CASCADE",
             )
+
+    # Backfill any pre-existing rows with NULL org → platform Org so the
+    # NOT NULL constraint below holds, and so admin's existing clusters
+    # land in the Default Org as expected.
+    op.execute(
+        sa.text(
+            "UPDATE clusters SET organization_id = :org_id "
+            "WHERE organization_id IS NULL"
+        ).bindparams(org_id=PLATFORM_ORG_ID)
+    )
+    op.execute(
+        sa.text(
+            "UPDATE worker_pools SET organization_id = :org_id "
+            "WHERE organization_id IS NULL"
+        ).bindparams(org_id=PLATFORM_ORG_ID)
+    )
+
+    # Promote the columns to NOT NULL now that no NULLs remain.
+    with op.batch_alter_table("clusters", schema=None) as batch_op:
+        batch_op.alter_column(
+            "organization_id", existing_type=sa.Integer(), nullable=False
+        )
+    with op.batch_alter_table("worker_pools", schema=None) as batch_op:
+        batch_op.alter_column(
+            "organization_id", existing_type=sa.Integer(), nullable=False
+        )
+
+    # At most one default cluster per Org. Partial unique covers active
+    # rows only (excluding soft-deleted), letting an Org "rotate" defaults
+    # by soft-deleting the old + flipping the new without conflict.
+    if bind.dialect.name == "postgresql":
+        op.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uix_clusters_default_per_org "
+            "ON clusters (organization_id) "
+            "WHERE is_default = true AND deleted_at IS NULL"
+        )
+    else:
+        op.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uix_clusters_default_per_org "
+            "ON clusters (organization_id) "
+            "WHERE is_default = 1 AND deleted_at IS NULL"
+        )
 
     # ---- Cluster-derived resources: denormalize organization_id ----------
     # Workers, GPU view (via workers col), model_files, benchmarks,

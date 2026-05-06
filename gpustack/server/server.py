@@ -771,6 +771,7 @@ class Server:
             hashed_suffix=hashed_suffix,
             registration_token="",
             is_default=set_default,
+            organization_id=PLATFORM_ORGANIZATION_ID,
         )
         default_cluster = await Cluster.create(
             session, default_cluster, auto_commit=False
@@ -807,8 +808,16 @@ class Server:
         logger.debug("Default cluster created.")
 
     async def user_defined_default_cluster(self, session: AsyncSession) -> Cluster:
-        cluster = await Cluster.first_by_field(
-            session=session, field="is_default", value=True
+        # Used during initial bootstrap to decide whether to create a
+        # platform-Org default — only need to check the platform Org slot
+        # since per-Org defaults are independent.
+        cluster = await Cluster.one_by_fields(
+            session=session,
+            fields={
+                "is_default": True,
+                "organization_id": PLATFORM_ORGANIZATION_ID,
+                "deleted_at": None,
+            },
         )
         return cluster
 

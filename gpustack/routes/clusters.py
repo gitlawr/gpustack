@@ -41,6 +41,7 @@ from gpustack.schemas.clusters import (
     WorkerPool,
     CloudOptions,
 )
+from gpustack.schemas.organizations import PLATFORM_ORGANIZATION_ID
 from gpustack.schemas.users import User, UserRole, system_name_prefix
 from gpustack.schemas.api_keys import ApiKey
 from gpustack.security import get_secret_hash, API_KEY_PREFIX
@@ -256,6 +257,11 @@ def enforce_data_dir_mounts(input: Union[ClusterCreate, ClusterUpdate]):
 async def create_cluster(
     session: SessionDep, ctx: TenantContextDep, input: ClusterCreate
 ):
+    # Every cluster has an owner Org. Fill in a sensible default when the
+    # caller omitted it: their current Org context, or the platform Org
+    # for admin in "All" mode (admin's home is Default).
+    if input.organization_id is None:
+        input.organization_id = ctx.current_org_id or PLATFORM_ORGANIZATION_ID
     validate_org_owned_owner(input.organization_id, ctx, resource_label="cluster")
 
     existing = await Cluster.one_by_fields(
@@ -268,6 +274,13 @@ async def create_cluster(
     create_update_check(input.provider, input)
     if input.provider == ClusterProvider.Kubernetes:
         enforce_data_dir_mounts(input)
+
+    # Auto-promote the first cluster in an Org to that Org's default so
+    # users don't have to flip a separate switch after onboarding.
+    has_existing_in_org = await Cluster.first_by_field(
+        session=session, field="organization_id", value=input.organization_id
+    )
+    auto_default = has_existing_in_org is None
 
     access_key = secrets.token_hex(8)
     secret_key = secrets.token_hex(16)
@@ -284,6 +297,7 @@ async def create_cluster(
             "state_message": state_message,
             "hashed_suffix": secrets.token_hex(6),
             "registration_token": f"{API_KEY_PREFIX}_{access_key}_{secret_key}",
+            "is_default": auto_default,
         }
     )
     to_create_user = User(
@@ -394,31 +408,34 @@ async def delete_cluster(session: SessionDep, ctx: TenantContextDep, id: int):
 
 @router.post("/{id}/set-default")
 async def set_default_cluster(session: SessionDep, ctx: TenantContextDep, id: int):
-    # "Default cluster" is a platform-level concept (the cluster used for
-    # new admin-deployed resources without an explicit cluster pick), so
-    # only platform admin can rotate it.
-    if not ctx.is_platform_admin:
-        raise InvalidException(
-            message="Only platform admin can set the default cluster"
-        )
+    # "Default cluster" is a per-Org concept now: each Org has at most
+    # one default, and that's what its members' deploy form falls back
+    # to. Writing it follows the standard cluster-write rule (admin
+    # always; Org admin only on their own Org's clusters).
     cluster = await Cluster.one_by_id(session, id)
     if not cluster:
         raise NotFoundException(message=f"cluster {id} not found")
+    assert_cluster_writable(ctx, cluster)
 
     try:
-        # unset other default clusters
-        default_clusters = await Cluster.all_by_fields(
+        # Unset any existing default in this cluster's Org. The partial
+        # unique index guarantees there's at most one to begin with.
+        existing_defaults = await Cluster.all_by_fields(
             session,
-            {'is_default': True, 'deleted_at': None},
+            {
+                'is_default': True,
+                'deleted_at': None,
+                'organization_id': cluster.organization_id,
+            },
         )
-        for dc in default_clusters:
+        for dc in existing_defaults:
             if dc.id != cluster.id:
                 await dc.update(
                     session=session,
                     source={"is_default": False},
                     auto_commit=False,
                 )
-        # set this cluster as default
+        # Set this cluster as the Org's default.
         await cluster.update(
             session=session,
             source={"is_default": True},
