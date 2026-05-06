@@ -446,15 +446,24 @@ async def create_model(
     await validate_model_in(session, model_in)
     model_in_dict = model_in.model_dump(exclude={"enable_model_route"})
 
-    # Stamp ownership from the caller's tenant context. ModelBase has
-    # organization_id / owner_id defaulted to PLATFORM_ORGANIZATION_ID
-    # so `model_dump()` always emits those keys — `setdefault` would
-    # silently leave them at 1 even when the caller is acting under a
-    # different Org. Override directly.
-    if ctx.current_org_id is not None:
-        model_in_dict["organization_id"] = ctx.current_org_id
+    # Stamp ownership. ModelBase has organization_id / owner_id defaulted
+    # to PLATFORM_ORGANIZATION_ID, so `model_dump()` always emits those
+    # keys — `setdefault` would silently leave them at 1 even when the
+    # caller is acting under a different Org. Override directly:
+    #   - Caller has a current Org context → that Org wins
+    #   - Caller is admin in "All" mode → fall back to the chosen
+    #     cluster's owner Org so the model lives where it actually runs
+    #     (otherwise it'd land in Platform/Default and the cluster's Org
+    #     couldn't see / manage it)
+    target_org_id = ctx.current_org_id
+    if target_org_id is None and model_in.cluster_id is not None:
+        cluster = await Cluster.one_by_id(session, model_in.cluster_id)
+        if cluster is not None:
+            target_org_id = cluster.organization_id
+    if target_org_id is not None:
+        model_in_dict["organization_id"] = target_org_id
         model_in_dict["owner_type"] = "ORG"
-        model_in_dict["owner_id"] = ctx.current_org_id
+        model_in_dict["owner_id"] = target_org_id
 
     try:
         model: Model = await Model.create(
