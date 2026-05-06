@@ -90,7 +90,35 @@ async def list_org_members(session: SessionDep, ctx: TenantContextDep, org_id: i
     # Either platform admin, or member of this org.
     if not ctx.is_platform_admin and ctx.current_org_id != org_id:
         raise ForbiddenException(message="Not a member of this organization")
-    return await _list_memberships(session, org_id)
+    rows = await _list_memberships(session, org_id)
+    return await _enrich_with_user_labels(session, rows)
+
+
+async def _enrich_with_user_labels(
+    session, rows: List[OrganizationMembership]
+) -> List[OrganizationMembershipPublic]:
+    """Bulk-resolve username / full_name for each membership in a single
+    query so the client can render the member list without a separate
+    `users?page=-1` round trip."""
+    user_ids = {r.user_id for r in rows}
+    user_by_id: dict[int, User] = {}
+    if user_ids:
+        result = await session.exec(select(User).where(User.id.in_(user_ids)))
+        user_by_id = {u.id: u for u in result.all()}
+    out: List[OrganizationMembershipPublic] = []
+    for r in rows:
+        u = user_by_id.get(r.user_id)
+        out.append(
+            OrganizationMembershipPublic(
+                user_id=r.user_id,
+                organization_id=r.organization_id,
+                role=r.role,
+                created_at=r.created_at,
+                username=getattr(u, "username", None),
+                full_name=getattr(u, "full_name", None),
+            )
+        )
+    return out
 
 
 @router.post(

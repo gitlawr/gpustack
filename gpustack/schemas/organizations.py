@@ -171,3 +171,7 @@ class OrganizationMembershipPublic(SQLModel):
     organization_id: int
     role: OrgRole
     created_at: datetime
+    # Server-resolved labels so the UI list doesn't need a separate
+    # `queryUsersList(page=-1)` round trip just to render names.
+    username: Optional[str] = None
+    full_name: Optional[str] = None

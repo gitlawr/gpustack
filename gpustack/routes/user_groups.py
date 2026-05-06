@@ -1,7 +1,7 @@
 """UserGroup management — Org admin+ or platform admin."""
 
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -65,14 +65,17 @@ async def list_groups(
     ctx: TenantContextDep,
     org_id: int,
     params: UserGroupListParams = Depends(),
+    search: Optional[str] = None,
 ):
     await _load_org(session, org_id)
     if not ctx.is_platform_admin and ctx.current_org_id != org_id:
         raise ForbiddenException(message="Not a member of this organization")
 
+    fuzzy_fields = {"name": search} if search else {}
     return await UserGroup.paginated_by_query(
         session=session,
         fields={"organization_id": org_id, "deleted_at": None},
+        fuzzy_fields=fuzzy_fields,
         page=params.page,
         per_page=params.perPage,
         order_by=params.order_by,
