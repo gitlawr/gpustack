@@ -20,7 +20,7 @@ GitHub Issue: TBD
 
 | 编号 | 需求 |
 |---|---|
-| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org。**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）强制归属单个 Org；**基础设施**（Cluster / Worker / CloudCredential / WorkerPool / InferenceBackend）有 nullable `organization_id`，平台 admin 可建 Global 或代某 Org 建，Org owner/manager 可在自家 Org 内 CRUD（BYO cluster / Hybrid backend） |
+| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org。**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）强制归属单个 Org；**基础设施**（Cluster / Worker / CloudCredential / WorkerPool / InferenceBackend）有 nullable `organization_id`，平台 admin 可建 Global 或代某 Org 建，Org admin 可在自家 Org 内 CRUD（BYO cluster / Hybrid backend） |
 | F2 | 引入 UserGroup（Org 内子单元）以支持部门/团队级资源共享 |
 | F3 | 普通用户仅可见/管理在当前 Org 上下文中可见的资源；v1 中所有用户创建的资源都 owner=org，等价于"全 Org 可见"。schema 上保留 `owner_type/owner_id` 三档（org/group/user），为后续精细化预留 |
 | F4 | 管理员可将 Cluster 授权给 Org / Group / User |
@@ -57,10 +57,10 @@ GitHub Issue: TBD
 
 ### Personal Org（每个 user 一个私有 namespace）
 
-参考 GitHub / OpenAI 的做法，每个 user 创建时自动获得一个 **Personal Org**（`is_personal=true`，`name='Personal'`，`slug='user-{id}'`），用户在其中是 OWNER。这是 user 的个人工作区，资源默认归这里。
+参考 GitHub / OpenAI 的做法，每个 user 创建时自动获得一个 **Personal Org**（`is_personal=true`，`name='Personal'`，`slug='user-{id}'`），用户在其中是 admin。这是 user 的个人工作区，资源默认归这里。
 
 - **非 admin 用户**：不再自动加入 Default Org（变更前是的）。要让 ta 进入团队工作区，admin 显式加成员
-- **admin 用户**：除了自己的 Personal Org 外，还自动是 Default Org 的 OWNER
+- **admin 用户**：除了自己的 Personal Org 外，还自动加入 Default Org 并担任 admin
 - **删除 user**：cascade 删除其 Personal Org（连带 Org 内的 model_routes / api_keys / org-owned clusters 等）。共享出去的资源（cluster_access / model_route_principals 命中的）也随 Org 删除而失效——前提是 maintainer 已离开
 - **Org 切换器**：Personal Org 永远在列表第一位
 
@@ -88,11 +88,13 @@ UI 表现：
 
 ```
 User                     — 全局身份；登录、SSH 公钥、API key 主体
-OrganizationMembership   — 用户在某 Org 内的角色（owner / manager / member）
+OrganizationMembership   — 用户在某 Org 内的角色（admin / user）
 TenantContext            — 单次请求解析后的执行上下文
 ```
 
-平台 `is_admin` 与 Org role **完全解耦**：是不是平台超管，与是不是某 Org 的 owner / manager 互不蕴含。Org role 选用 `manager` 而非 `admin`，是为了避免与 `users.is_admin`（平台超管标志）混淆。
+**Org 角色简化为两档（v1）**：`admin` 管理本 Org 的成员和基础设施，`user` 仅作消费者。原计划的三档（`owner` / `manager` / `member`）在 v1 收敛——GPUStack 自托管，没有计费或法律意义上的 Owner，`admin` 已涵盖原 `owner` + `manager` 的全部能力，只是**不能踢掉/降级最后一个 admin**（路由层 last-admin guard 校验）。未来若需要拆分"创建者 / 管理者"再加一档不晚。
+
+平台 `is_admin` 与 Org role **完全解耦**：是不是平台超管，与是不是某 Org 的 admin 互不蕴含。代码里始终用 `is_platform_admin` vs `org_role == OrgRole.ADMIN` 区分，不写裸 `is_admin`。
 
 ### 统一过滤
 
@@ -115,7 +117,7 @@ stmt = stmt.where(
 
 平台 admin 带 Org 上下文（act-as 模式）会经过 `organization_id` 过滤但跳过 `owner` 过滤——admin 在 Org 内可见全部资源不论 owner 是 group / user。
 
-**写操作的 act-as 语义**：admin 在 Org 上下文里**不再被允许直接写 Global 行**——比如 admin 切到 Default 时点编辑 Platform vLLM，请求会被服务端的 redirect helper 转成"upsert Default Org 的 vLLM 行"，跟非 admin Org owner 一样的行为。要直接改 Platform 行需要切回"All"模式。这条规则用于 cluster / cloud_credential / worker_pool / inference_backend 等所有带 Hybrid 语义的资源。
+**写操作的 act-as 语义**：admin 在 Org 上下文里**不再被允许直接写 Global 行**——比如 admin 切到 Default 时点编辑 Platform vLLM，请求会被服务端的 redirect helper 转成"upsert Default Org 的 vLLM 行"，跟非 admin Org admin 一样的行为。要直接改 Platform 行需要切回"All"模式。这条规则用于 cluster / cloud_credential / worker_pool / inference_backend 等所有带 Hybrid 语义的资源。
 
 ### K8s GPU 实例多租户
 
@@ -136,18 +138,20 @@ stmt = stmt.where(
 2. **用户管理**：现有用户列表保留；为每个用户管理其加入的 Org 列表，并为每个 (user, org) 设置 Org 内角色
 3. **集群授权**：Cluster 详情页新增"访问授权"标签，把 cluster 授权给 Org / Group / User
 4. **配额设置**：Cluster 详情页或 Org 详情页设置 (Org × Cluster) 配额
-5. **Group 管理**：可由 admin 代管，也可由 Org owner 在其 Org 内自治
+5. **Group 管理**：可由 admin 代管，也可由 Org admin 在其 Org 内自治
 
 保留现有：模型上架/管理、Worker 管理、推理监控等。Admin 上架的模型默认归属内置 **platform Org**，通过 ModelRoute 发布给其他 Org。
 
-### Org owner / Org manager
+### Org admin
 
 普通用户的子集，由平台 admin 在添加成员时指定角色。新增能力：
 
+- 管理本 Org 内成员（增删改角色，含其他 admin —— 但**不能踢/降级最后一个 admin**）
 - 管理本 Org 的 UserGroup（组织内的子分组）
 - 管理本 Org 内成员的 group 归属
 - 查看本 Org 在各 cluster 的配额使用情况
 - 管理本 Org 内的资源（v1 中所有资源都是 owner_type='org'，全 Org 可见）
+- 管理本 Org 自家的 cluster / cloud_credential / worker_pool / inference_backend 等基础设施
 
 ### 普通用户
 
@@ -197,7 +201,7 @@ stmt = stmt.where(
 | L5 | 平台 admin 的 `is_admin=true` 是全局旁路，没有更细粒度的"平台运维 vs 平台超管"分级 |
 | L6 | API Key 与 Org 是绑定关系，跨 Org 必须使用不同的 API key（不支持运行时切 Org） |
 | L7 | 一个 (Org × Cluster) 当前对应一个 namespace；如需进一步隔离 Group（独立 NetworkPolicy 等），需扩展 `tenant_namespaces` 增加 group 维度 |
-| L8 | 平台 admin 默认是 platform Org owner，权限来源冗余，需文档说明 |
+| L8 | 平台 admin 默认是 platform Org admin，权限来源冗余，需文档说明 |
 | L9 | BYO cluster 一期采用统一计量（不区分 cluster 归属对资源用量都计入 Org），不区别"自带硬件"和"平台共享" |
 | L10 | BYO cluster 的 `set-default` 仍仅限平台 admin（Org 自管 cluster 不影响"平台默认"概念） |
 | L11 | Grafana 监控入口（`/v1/config` 与 `/v1/grafana/*` 反代）在 v1 中保留 admin-only，普通用户看不到任何 Grafana 链接。原因：per-resource dashboard 的"过滤"仅依赖 URL 上的 template variables（`var-model_name` 等），用户进了 Grafana 可改变量看其它 Org 数据，缺乏租户级别的查询时隔离。等 P 阶段在 metrics 上加 `org_id` 标签 + 反代时 PromQL 注入再放开 |
@@ -285,7 +289,7 @@ CREATE TABLE organizations (
 CREATE TABLE organization_memberships (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    role TEXT NOT NULL CHECK (role IN ('owner', 'manager', 'member')),
+    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
     created_at TIMESTAMP,
     PRIMARY KEY (user_id, organization_id)
 );
@@ -385,8 +389,8 @@ platform_admin_router.include_router(organizations.router, prefix="/organization
 platform_admin_router.include_router(cluster_access.router, prefix="/clusters/{id}/access")
 # Worker / Cluster CRUD / 模型上架 仍在平台级
 
-# Org 级（require_org_role 校验当前 user 在 current_org 中的 role）
-org_router = APIRouter(dependencies=[Depends(get_tenant_context), Depends(require_org_manager)])
+# Org 级（require_org_role 校验当前 user 在 current_org 中是 admin）
+org_router = APIRouter(dependencies=[Depends(get_tenant_context), Depends(require_org_admin)])
 org_router.include_router(user_groups.router, prefix="/organizations/{org_id}/groups")
 org_router.include_router(memberships.router, prefix="/organizations/{org_id}/members")
 org_router.include_router(quotas.router, prefix="/organizations/{org_id}/quotas")
@@ -408,10 +412,10 @@ me_router.include_router(me.router, ...)                    # /me/organizations 
 |---|---|---|---|
 | `/v1/organizations` | GET, POST | 平台 admin | 列表 / 创建 Org |
 | `/v1/organizations/{id}` | GET, PUT, DELETE | 平台 admin | Org 详情 / 编辑 / 删除 |
-| `/v1/organizations/{id}/members` | GET, POST | 平台 admin / Org owner | 成员管理 |
-| `/v1/organizations/{id}/members/{user_id}` | PUT, DELETE | 平台 admin / Org owner | 角色变更 / 移除 |
-| `/v1/organizations/{id}/groups` | GET, POST | 平台 admin / Org manager+ | Group 管理 |
-| `/v1/organizations/{id}/groups/{gid}/members` | GET, POST, DELETE | 平台 admin / Org manager+ | Group 成员管理 |
+| `/v1/organizations/{id}/members` | GET, POST | 平台 admin / Org admin | 成员管理 |
+| `/v1/organizations/{id}/members/{user_id}` | PUT, DELETE | 平台 admin / Org admin | 角色变更 / 移除（last-admin guard） |
+| `/v1/organizations/{id}/groups` | GET, POST | 平台 admin / Org admin | Group 管理 |
+| `/v1/organizations/{id}/groups/{gid}/members` | GET, POST, DELETE | 平台 admin / Org admin | Group 成员管理 |
 | `/v1/clusters/{id}/access` | GET, POST, DELETE | 平台 admin | 集群访问授权 |
 | `/v1/organizations/{id}/quotas` | GET, PUT | 平台 admin | 配额管理（org × cluster） |
 | `/v1/me/organizations` | GET | 任意登录用户 | 我加入的 Org |
@@ -443,8 +447,8 @@ API Key 反查流程：`access_key` → `ApiKey` 行 → 取 `user_id` 与 `orga
 迁移在 alembic upgrade 中完成：
 
 1. 创建 `organizations` 表，插入 `id=1, name='Default', slug='default', is_platform=true` 作为内置 Org
-2. 创建 `organization_memberships`：仅 admin 用户加入 Default Org（role=OWNER）；非 admin 用户**不加入** Default Org
-3. 为每个非 system 用户创建 Personal Org（`is_personal=true`，`slug='user-{id}'`），并在 `organization_memberships` 中加为 OWNER
+2. 创建 `organization_memberships`：仅 admin 用户加入 Default Org（role=ADMIN）；非 admin 用户**不加入** Default Org
+3. 为每个非 system 用户创建 Personal Org（`is_personal=true`，`slug='user-{id}'`），并在 `organization_memberships` 中加为 ADMIN
 4. 创建 `user_groups`、`user_group_memberships`、`cluster_access`、`tenant_namespaces`、`tenant_quotas`（空表）
 5. `users.default_organization_id` = 该 user 的 Personal Org id
 6. `api_keys.organization_id` 全部回填 1（admin 旧 key 保留 Default Org 上下文；普通用户旧 key 同理）
@@ -459,10 +463,10 @@ API Key 反查流程：`access_key` → `ApiKey` 行 → 取 `user_id` 与 `orga
 
 - **平台 admin** = `users.is_admin=true`，全局旁路所有 Org 隔离（同 system user 一样进 `_bypass_tenant_filter`）
 - **内置 Org** = `organizations.is_platform=true` 的特殊 Org，name="Default" / slug="default"，id 永远是 `PLATFORM_ORGANIZATION_ID = 1`；承载平台公共资产（admin 上架的模型等）
-- 平台 admin 默认是内置 Org 的 OWNER，同时也是自己 Personal Org 的 OWNER，但三个身份职责不同：
+- 平台 admin 默认是内置 Org 的 ADMIN，同时也是自己 Personal Org 的 ADMIN，但三个身份职责不同：
   - **平台 admin**：管理跨 Org 资源（创建 Org、cluster_access、worker 等）
-  - **内置 Org OWNER**：管理 Default Org 内部资产（公共模型、Group 等）
-  - **Personal Org OWNER**：自己的私有工作区
+  - **内置 Org admin**：管理 Default Org 内部资产（公共模型、Group 等）
+  - **Personal Org admin**：自己的私有工作区
 - 实务上同一人持有这些角色，但权限来源不同，便于审计
 
 **为什么内置 Org 起名 "Default" 而不是 "Platform"**：每个普通用户登录时这就是他们看到的 Org（除非 admin 把他们加到别的 Org），slug 也作为 K8s namespace 模板的一部分（`gpustack-default`）。"Default" 更准确反映"兜底租户"的角色，避免和"平台基础设施"概念混淆。
@@ -608,17 +612,17 @@ WorkerPool 的 `organization_id` 在创建时由其 cluster 同步过来（denor
 | 主体 | global (org_id=NULL) | org-owned (org_id=自家 Org) | 别人家的 org-owned |
 |---|---|---|---|
 | 平台 admin | CRUD（含 set-default） | CRUD（强制回收 / 审计） | CRUD |
-| Org owner / manager | 列表里看见（如有 cluster_access）；不能改 | 在自家 Org 内 CRUD；可签 `cluster_access` 给别人 | 看不见（除非有 cluster_access） |
-| Org member | 按 `cluster_access` | 隐式可见（同 Org 即可见，无需 cluster_access 行） | 按 `cluster_access` |
+| Org admin | 列表里看见（如有 cluster_access）；不能改 | 在自家 Org 内 CRUD；可签 `cluster_access` 给别人 | 看不见（除非有 cluster_access） |
+| Org user | 按 `cluster_access` | 隐式可见（同 Org 即可见，无需 cluster_access 行） | 按 `cluster_access` |
 | System user (worker / cluster account) | 全部可见可读（bypass） | 同上 | 同上 |
 
-global cluster 的"读"权限仍由 `cluster_access` 表显式发；写权限只有平台 admin 有。Org 自管 cluster 的"读"权限对该 Org 成员是隐式的（同 Org 自动可见），写权限属于该 Org 的 owner / manager。
+global cluster 的"读"权限仍由 `cluster_access` 表显式发；写权限只有平台 admin 有。Org 自管 cluster 的"读"权限对该 Org 成员是隐式的（同 Org 自动可见），写权限属于该 Org 的 admin。
 
 ### 创建路径校验
 
 - 平台 admin：可以建 global (`organization_id = NULL`) 或任意 Org-owned
-- Org owner / manager：只能建 `organization_id = 自己当前 Org`；不能建 global
-- 其他 Org member / 普通用户：不能创建任何 cluster
+- Org admin：只能建 `organization_id = 自己当前 Org`；不能建 global
+- 其他 Org user / 普通用户：不能创建任何 cluster
 
 ### `cluster_access` 行为
 
@@ -641,8 +645,8 @@ v1 采用**统一计量**：所有 namespace 的 GPU/CPU/内存用量都计入 O
 
 ### UI 变化
 
-- Cluster Management 菜单的 access flag 从 `canSeeAdmin` 改成 `canManageInfra`（admin 或在任一 Org 持有 owner/manager 角色的用户都看得到）
-- Cluster / CloudCredential 创建表单新增 **Owner** 下拉：admin 可选 "Global" 或任一 Org；Org owner/manager 默认锁定为自己当前 Org，没有第二个选择
+- Cluster Management 菜单的 access flag 从 `canSeeAdmin` 改成 `canManageInfra`（admin 或在任一 Org 持有 admin 角色的用户都看得到）
+- Cluster / CloudCredential 创建表单新增 **Owner** 下拉：admin 可选 "Global" 或任一 Org；Org admin 默认锁定为自己当前 Org，没有第二个选择
 - 列表（cluster / credential / worker_pool）过滤已经在 server 端做了 visibility，前端不用变
 
 ## Inference Backend Hybrid (v1 已落地)
@@ -663,7 +667,7 @@ ALTER TABLE inference_backends
 
 ### 视角合并规则
 
-非 admin / Org member 看到的列表是**单卡 collapse 视图**——同一 `backend_name` 的 Platform 行 + 自家 Org 行被合并成一张卡片：
+非 admin / Org user 看到的列表是**单卡 collapse 视图**——同一 `backend_name` 的 Platform 行 + 自家 Org 行被合并成一张卡片：
 - metadata（`is_built_in` / `backend_source` / `description` / 等）：Org 行优先（Org 行 inherit Platform 的 `is_built_in=True`，所以"Org 扩展的内置 backend 仍然是 built-in"）
 - `version_configs`：union，Org 同 key 覆盖 Platform 同 key
 - `enabled`：`Platform.enabled OR Org.enabled`——避免 Org 行误存的 `enabled=False` 把 Platform-enabled 的 backend 隐藏（取舍：Org 没法显式 disable Platform 共享的 community backend）
@@ -677,7 +681,7 @@ admin 看到的是**uncollapsed 视图**：Platform 行和各 Org 行作为独�
 - 找到了 → update 那一行
 - Platform 行不动；admin 想改 Platform 必须切到 "All" 上下文
 
-非 admin 在 Org 上下文也走同样路径——这就是"Org Manager 在 vLLM 卡上加版本，背后透明地落到 Org 自家行"的实现。
+非 admin 在 Org 上下文也走同样路径——这就是"Org admin 在 vLLM 卡上加版本，背后透明地落到 Org 自家行"的实现。
 
 ### 部署候选（`/v2/inference-backends/list`）
 
@@ -688,11 +692,11 @@ admin 看到的是**uncollapsed 视图**：Platform 行和各 Org 行作为独�
 - Platform built-in 行：永远不可删（admin 维护的 catalog）
 - Platform community 行：UI 上点删走 soft-disable（PUT `enabled=false`），不真删行
 - Platform Custom 行：admin 在 "All" 模式可真删
-- 任何 Org 行（不论 source）：自家 Org owner/manager 或 admin 可真删——等同于"重置该 backend 在该 Org 的所有自定义"
+- 任何 Org 行（不论 source）：自家 Org admin 或 平台 admin 可真删——等同于"重置该 backend 在该 Org 的所有自定义"
 
 ## Usage 视角（v1 已落地）
 
-Usage 页面为 Org owner/manager / admin 提供两种视角，由顶部 `Org usage` / `My usage` segmented 切换：
+Usage 页面为 Org admin / 平台 admin 提供两种视角，由顶部 `Org usage` / `My usage` segmented 切换：
 
 | 视角 | 后端过滤 | 含义 |
 |---|---|---|
@@ -702,7 +706,7 @@ Usage 页面为 Org owner/manager / admin 提供两种视角，由顶部 `Org us
 | 角色 / Context | toggle | 默认 scope |
 |---|---|---|
 | admin "All" | 隐藏 | `org`（无 org_id 即无 filter，等价"全平台"）|
-| admin act-as / Org owner / manager | 显示 | `org` |
-| Org member / Personal Org 用户 | 隐藏 | `mine` |
+| admin act-as / Org admin | 显示 | `org` |
+| Org user / Personal Org 用户 | 隐藏 | `mine` |
 
 `mine` 视角刻意 drop org filter 以解决 AUTHED 模型的跨 Org 共享场景：Personal Org 用户调 Default Org 的 AUTHED 模型，usage 行 `organization_id=Default`、`user_id=user`，他们在 Personal 上下文需要能看到自己的消耗记录。
