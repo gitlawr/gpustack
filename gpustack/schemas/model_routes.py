@@ -63,6 +63,10 @@ def effective_route_name(
 class AccessPolicyEnum(str, Enum):
     PUBLIC = "public"
     AUTHED = "authed"
+    # ORG = scoped to members of the route's owning Organization. The
+    # default for new routes in non-platform Orgs — semantically the
+    # "team-private" scope, no principal table involvement.
+    ORG = "org"
     ALLOWED_USERS = "allowed_users"
     ALLOWED_PRINCIPALS = "allowed_principals"
 

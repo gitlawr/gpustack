@@ -2,7 +2,6 @@ import re
 from datetime import datetime
 from typing import ClassVar, List, Optional, TYPE_CHECKING
 
-from pydantic import field_validator
 from sqlalchemy import Enum as SQLEnum
 from sqlmodel import (
     Column,
@@ -45,6 +44,43 @@ RESERVED_ORG_SLUGS = {"personal", "global"}
 personal_slug_pattern = re.compile(r'^user-\d+$')
 
 
+def _check_reserved_name(name: str) -> None:
+    """Raise ValueError if name is reserved for the system."""
+    if not isinstance(name, str):
+        raise ValueError("name must be a string")
+    if name.strip().lower() in RESERVED_ORG_NAMES:
+        raise ValueError(
+            f"'{name}' is a reserved organization name; please choose another"
+        )
+
+
+def _check_slug_format(slug: str) -> None:
+    """Raise ValueError if slug fails the formatting / reserved checks."""
+    if not isinstance(slug, str):
+        raise ValueError("slug must be a string")
+    if not re.match(slug_pattern, slug):
+        raise ValueError(
+            "slug must be lowercase, start with a letter, only contain "
+            "letters, numbers, and hyphens, and not end with a hyphen"
+        )
+    if slug.lower() in RESERVED_ORG_SLUGS or personal_slug_pattern.match(slug):
+        raise ValueError(f"'{slug}' is a reserved slug; please choose another")
+
+
+def validate_org_input(*, name: Optional[str], slug: Optional[str] = None) -> None:
+    """Validate user-supplied Org create/update payloads.
+
+    Called from the route layer rather than from a Pydantic
+    field_validator, because the latter would also fire when Pydantic
+    serializes existing ORM rows (e.g. the auto-generated "Personal" /
+    "user-N" rows are valid as data but reserved as user input).
+    """
+    if name is not None:
+        _check_reserved_name(name)
+    if slug is not None:
+        _check_slug_format(slug)
+
+
 class OrganizationUpdate(SQLModel):
     name: str = Field(nullable=False)
     description: Optional[str] = Field(
@@ -52,32 +88,9 @@ class OrganizationUpdate(SQLModel):
     )
     billing_account_ref: Optional[str] = Field(default=None, nullable=True)
 
-    @field_validator("name", mode="before")
-    def validate_name(cls, v):
-        if not isinstance(v, str):
-            raise ValueError("name must be a string")
-        if v.strip().lower() in RESERVED_ORG_NAMES:
-            raise ValueError(
-                f"'{v}' is a reserved organization name; please choose another"
-            )
-        return v
-
 
 class OrganizationCreate(OrganizationUpdate):
     slug: str = Field(nullable=False)
-
-    @field_validator("slug", mode="before")
-    def validate_slug(cls, v):
-        if not isinstance(v, str):
-            raise ValueError("slug must be a string")
-        if not re.match(slug_pattern, v):
-            raise ValueError(
-                "slug must be lowercase, start with a letter, only contain "
-                "letters, numbers, and hyphens, and not end with a hyphen"
-            )
-        if v.lower() in RESERVED_ORG_SLUGS or personal_slug_pattern.match(v):
-            raise ValueError(f"'{v}' is a reserved slug; please choose another")
-        return v
 
 
 class OrganizationBase(OrganizationCreate):

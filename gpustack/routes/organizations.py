@@ -10,6 +10,7 @@ from gpustack.api.exceptions import (
     AlreadyExistsException,
     ConflictException,
     InternalServerErrorException,
+    InvalidException,
     NotFoundException,
 )
 from gpustack.schemas.organizations import (
@@ -19,6 +20,7 @@ from gpustack.schemas.organizations import (
     OrganizationPublic,
     OrganizationUpdate,
     OrganizationsPublic,
+    validate_org_input,
 )
 from gpustack.server.deps import SessionDep
 
@@ -70,6 +72,15 @@ async def get_organization(session: SessionDep, id: int):
 
 @router.post("", response_model=OrganizationPublic)
 async def create_organization(session: SessionDep, org_in: OrganizationCreate):
+    # Block reserved names ("Personal" / "Global") and slug patterns
+    # ("user-N") on the input side. Validation lives in the route, not
+    # the schema, so the same model can serialize already-existing
+    # auto-created Personal Orgs without rejecting them.
+    try:
+        validate_org_input(name=org_in.name, slug=org_in.slug)
+    except ValueError as e:
+        raise InvalidException(message=str(e))
+
     existing = await Organization.one_by_fields(
         session, {"slug": org_in.slug, "deleted_at": None}
     )
@@ -98,6 +109,11 @@ async def update_organization(session: SessionDep, id: int, org_in: Organization
     org = await Organization.one_by_id(session, id)
     if not org or org.deleted_at is not None:
         raise NotFoundException(message="Organization not found")
+
+    try:
+        validate_org_input(name=org_in.name)
+    except ValueError as e:
+        raise InvalidException(message=str(e))
 
     try:
         await org.update(session, org_in.model_dump(exclude_unset=True))

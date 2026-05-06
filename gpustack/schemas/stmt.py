@@ -167,6 +167,14 @@ FROM
 INNER JOIN model_routes as m
     ON m.access_policy in ('PUBLIC', 'AUTHED')
     OR (
+        m.access_policy = 'ORG'
+        AND EXISTS (
+            SELECT 1 FROM organization_memberships om
+            WHERE om.organization_id = m.organization_id
+              AND om.user_id = u.id
+        )
+    )
+    OR (
         m.access_policy = 'ALLOWED_USERS'
         AND EXISTS (
             SELECT 1 FROM usermodelroutelink uml

@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple, Union, Dict
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from gpustack.schemas.model_routes import (
+    AccessPolicyEnum,
     ModelRoute,
     ModelRouteCreate,
     ModelRouteUpdate,
@@ -26,6 +27,7 @@ from gpustack.schemas.model_routes import (
     MyModel,
     TargetStateEnum,
 )
+from gpustack.schemas.organizations import PLATFORM_ORGANIZATION_ID
 from gpustack.schemas.model_provider import ModelProvider
 from gpustack.schemas.models import Model
 from gpustack.server.db import async_session
@@ -207,6 +209,23 @@ async def create_model_route(
     # Stamp the route's owning org from the caller's tenant context.
     if ctx.current_org_id is not None:
         source.setdefault("organization_id", ctx.current_org_id)
+
+    # Multi-tenant default: a non-platform Org's new route is scoped to
+    # that Org (ORG policy — `non_admin_user_models` matches by the
+    # route's `organization_id`). The Default (platform) Org keeps
+    # AUTHED — admin's shared catalog stays visible to every
+    # authenticated user, and existing routes migrated to the platform
+    # Org must keep working. Caller's explicit `access_policy` always
+    # wins.
+    owner_org_id = source.get("organization_id")
+    is_platform_org = owner_org_id == PLATFORM_ORGANIZATION_ID
+    if (
+        not is_platform_org
+        and owner_org_id is not None
+        and "access_policy" not in input.model_fields_set
+    ):
+        source["access_policy"] = AccessPolicyEnum.ORG
+
     try:
         route: ModelRoute = await ModelRoute.create(
             session=session, source=source, auto_commit=False
