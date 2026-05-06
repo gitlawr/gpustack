@@ -31,7 +31,10 @@ from gpustack.schemas.stmt import (
 access_policy_enum = sa.Enum(
     'PUBLIC', 'AUTHED', 'ALLOWED_USERS', name='accesspolicyenum'
 )
-access_policy_to_add = ['ALLOWED_PRINCIPALS']
+# ORG = scoped to members of the route's owning Organization (default
+# for non-platform Org routes). ALLOWED_PRINCIPALS = explicit per-user/
+# group/org grants via model_route_principals.
+access_policy_to_add = ['ALLOWED_PRINCIPALS', 'ORG']
 
 PLATFORM_ORG_ID = 1
 
@@ -72,13 +75,14 @@ WHERE
 
 def upgrade() -> None:
     bind = op.get_bind()
-    # Add ALLOWED_PRINCIPALS to the access_policy enum on dialects with native
-    # enum types (postgres, mysql); sqlite stores it as plain text.
+    # Add new access_policy enum values on dialects with native enum
+    # types (postgres, mysql); sqlite stores it as plain text.
     if bind.dialect.name == 'postgresql':
         # Idempotent: only add if not already present.
-        op.execute(
-            "ALTER TYPE accesspolicyenum ADD VALUE IF NOT EXISTS 'ALLOWED_PRINCIPALS'"
-        )
+        for value in access_policy_to_add:
+            op.execute(
+                f"ALTER TYPE accesspolicyenum ADD VALUE IF NOT EXISTS '{value}'"
+            )
     else:
         sql_enum.add_enum_values(
             {'model_routes': 'access_policy'},
