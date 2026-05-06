@@ -446,13 +446,15 @@ async def create_model(
     await validate_model_in(session, model_in)
     model_in_dict = model_in.model_dump(exclude={"enable_model_route"})
 
-    # Stamp ownership from the caller's tenant context. Default visibility
-    # is org-wide; the UI can later expose owner_type=group/user via an
-    # advanced "Visibility" picker.
+    # Stamp ownership from the caller's tenant context. ModelBase has
+    # organization_id / owner_id defaulted to PLATFORM_ORGANIZATION_ID
+    # so `model_dump()` always emits those keys — `setdefault` would
+    # silently leave them at 1 even when the caller is acting under a
+    # different Org. Override directly.
     if ctx.current_org_id is not None:
-        model_in_dict.setdefault("organization_id", ctx.current_org_id)
-        model_in_dict.setdefault("owner_type", "ORG")
-        model_in_dict.setdefault("owner_id", ctx.current_org_id)
+        model_in_dict["organization_id"] = ctx.current_org_id
+        model_in_dict["owner_type"] = "ORG"
+        model_in_dict["owner_id"] = ctx.current_org_id
 
     try:
         model: Model = await Model.create(

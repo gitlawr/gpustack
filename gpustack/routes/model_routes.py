@@ -207,8 +207,11 @@ async def create_model_route(
     await validate_targets(session, targets)
     source["targets"] = len(targets)
     # Stamp the route's owning org from the caller's tenant context.
+    # ModelRouteBase defaults `organization_id` to PLATFORM_ORGANIZATION_ID
+    # so `model_dump()` always emits the key — `setdefault` would silently
+    # keep it at 1 for non-platform admins. Override directly.
     if ctx.current_org_id is not None:
-        source.setdefault("organization_id", ctx.current_org_id)
+        source["organization_id"] = ctx.current_org_id
 
     # Multi-tenant default: a non-platform Org's new route is scoped to
     # that Org (ORG policy — `non_admin_user_models` matches by the

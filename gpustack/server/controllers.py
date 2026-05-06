@@ -275,6 +275,10 @@ async def sync_replicas(session: AsyncSession, model: Model):
                 local_path=model.local_path,
                 state=ModelInstanceStateEnum.PENDING,
                 cluster_id=model.cluster_id,
+                # Inherit the parent Model's tenant binding — the schema
+                # default of PLATFORM_ORGANIZATION_ID would otherwise
+                # land instances of a non-Default-Org Model in Default.
+                organization_id=model.organization_id,
                 draft_model_source=get_draft_model_source(model),
                 backend=get_backend(model),
                 backend_version=model.backend_version,

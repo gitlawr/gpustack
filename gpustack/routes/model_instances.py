@@ -26,6 +26,7 @@ from gpustack.server.db import async_session
 from gpustack.server.deps import ListParamsDep, SessionDep, TenantContextDep
 from gpustack.schemas.models import (
     BackendEnum,
+    Model,
     ModelInstance,
     ModelInstanceCreate,
     ModelInstanceLogOptions,
@@ -424,6 +425,14 @@ async def get_model_instance_log_options(
 async def create_model_instance(
     session: SessionDep, model_instance_in: ModelInstanceCreate
 ):
+    # Inherit the parent Model's tenant binding. The schema default of
+    # PLATFORM_ORGANIZATION_ID would otherwise persist `organization_id=1`
+    # for instances of a non-platform Model whenever the caller (worker /
+    # API client) doesn't echo the field back.
+    if model_instance_in.model_id is not None:
+        parent = await Model.one_by_id(session, model_instance_in.model_id)
+        if parent is not None:
+            model_instance_in.organization_id = parent.organization_id
     try:
         model_instance = await ModelInstance.create(session, model_instance_in)
     except Exception as e:
