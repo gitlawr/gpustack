@@ -428,33 +428,10 @@ def upgrade() -> None:
             ondelete='CASCADE',
         )
 
-    # ---- Backfill cluster_access (platform Org keeps existing access) ---
-
-    if bind.dialect.name == 'postgresql':
-        op.execute(
-            sa.text(
-                """
-                INSERT INTO cluster_access
-                    (cluster_id, principal_type, principal_id, granted_by, created_at)
-                SELECT c.id, 'ORG'::principaltype, :org_id, NULL, CURRENT_TIMESTAMP
-                FROM clusters c
-                WHERE c.deleted_at IS NULL
-                ON CONFLICT (cluster_id, principal_type, principal_id) DO NOTHING
-                """
-            ).bindparams(org_id=PLATFORM_ORG_ID)
-        )
-    else:
-        op.execute(
-            sa.text(
-                """
-                INSERT OR IGNORE INTO cluster_access
-                    (cluster_id, principal_type, principal_id, granted_by, created_at)
-                SELECT c.id, 'ORG', :org_id, NULL, CURRENT_TIMESTAMP
-                FROM clusters c
-                WHERE c.deleted_at IS NULL
-                """
-            ).bindparams(org_id=PLATFORM_ORG_ID)
-        )
+    # No cluster_access backfill: every cluster is now Org-owned (the
+    # follow-up migration backfills any NULL `organization_id` to the
+    # platform Org), and owner-Org members are implicit USER-level
+    # consumers. cluster_access only carries explicit cross-Org grants.
 
     # ---- Backfill model_route_principals from UserModelRouteLink --------
 

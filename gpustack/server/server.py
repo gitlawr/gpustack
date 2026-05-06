@@ -19,13 +19,12 @@ from gpustack.schemas.users import (
     get_default_cluster_user,
     default_cluster_user_name,
 )
-from gpustack.schemas.cluster_access import ClusterAccess
 from gpustack.schemas.organizations import (
     Organization,
     OrganizationMembership,
     PLATFORM_ORGANIZATION_ID,
 )
-from gpustack.schemas.principals import OrgRole, PrincipalType
+from gpustack.schemas.principals import OrgRole
 from gpustack.schemas.models import ModelInstance
 from gpustack.schemas.api_keys import ApiKey
 from gpustack.schemas.workers import Worker
@@ -788,21 +787,10 @@ class Server:
         )
         await User.create(session, default_cluster_user, auto_commit=False)
 
-        # Grant the built-in Default Org access to the default cluster.
-        # The foundation migration backfills cluster_access for any
-        # cluster that exists at migration time, but on a fresh install
-        # this cluster is created *after* migrations finish — admin
-        # acting-as the Default Org would otherwise not see it through
-        # the per-row visibility filter.
-        session.add(
-            ClusterAccess(
-                cluster_id=default_cluster.id,
-                principal_type=PrincipalType.ORG,
-                principal_id=PLATFORM_ORGANIZATION_ID,
-                granted_by=None,
-                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            )
-        )
+        # No cluster_access grant needed: the cluster's `organization_id`
+        # already binds it to the platform Org, whose members are
+        # implicit USER-level consumers. cluster_access rows are only
+        # for cross-Org / group / user borrowing.
 
         await session.commit()
         logger.debug("Default cluster created.")
