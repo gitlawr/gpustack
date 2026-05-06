@@ -26,6 +26,7 @@ from gpustack.schemas.models import (
 from gpustack.schemas.clusters import Cluster
 from gpustack.schemas.workers import GPUDeviceStatus, Worker
 from gpustack.api.tenant import (
+    _bypass_tenant_filter,
     assert_resource_visible,
     tenant_list_conditions,
 )
@@ -98,8 +99,10 @@ async def get_models(
     # full accessible_principals tuple. Non-admin will see all owners within
     # their org via the live stream — which is wider than the list endpoint
     # but never crosses Org boundaries. Admin without an explicit org context
-    # keeps the unfiltered cross-org stream.
-    if ctx.current_org_id is not None:
+    # keeps the unfiltered cross-org stream. System users (workers / cluster
+    # accounts) bypass — they need the cross-org view to handle instances
+    # scheduled to them on clusters outside their default Org.
+    if ctx.current_org_id is not None and not _bypass_tenant_filter(ctx):
         fields["organization_id"] = ctx.current_org_id
 
     if params.watch:

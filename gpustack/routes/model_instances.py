@@ -19,6 +19,7 @@ from gpustack.api.exceptions import (
 from gpustack.schemas.workers import Worker
 from gpustack.schemas.clusters import Cluster
 from gpustack.api.tenant import (
+    _bypass_tenant_filter,
     assert_resource_visible,
     tenant_list_conditions,
 )
@@ -100,7 +101,12 @@ async def get_model_instances(
     if state:
         fields["state"] = state
 
-    if ctx.current_org_id is not None:
+    # System users (workers, cluster service accounts) and admin in
+    # "All" mode must see every Org's instances regardless of their
+    # `default_organization_id` — otherwise a worker's awatch stream
+    # would silently filter out instances scheduled to it on clusters
+    # outside its default Org.
+    if ctx.current_org_id is not None and not _bypass_tenant_filter(ctx):
         fields["organization_id"] = ctx.current_org_id
 
     if params.watch:
