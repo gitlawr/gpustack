@@ -8,7 +8,7 @@ GPUStack 当前只区分管理员（admin）和普通用户两类身份，普通
 
 - 用户可加入多个 Organization（跨组织成员）
 - **租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）归属单个 Organization，跨 Org 默认硬隔离
-- **基础设施**（Cluster / Worker / CloudCredential / WorkerPool）支持双形态：NULL `organization_id` = 平台共享（admin 管，原行为），非 NULL = 该 Org 自管（BYO cluster）；任意一种形态都通过 `cluster_access` 进一步授权给其他 Org / Group / User
+- **基础设施**（Cluster / CloudCredential / WorkerPool / Worker）始终归属一个 Org：admin 在 "All" 模式下创建时默认落到 Default Org，`organization_id NOT NULL`。跨 Org 共享通过 `cluster_access` 表达，不靠 NULL 表示 Global。InferenceBackend 仍是 Hybrid（admin 维护的 Platform catalog 行 + 各 Org 的扩展行共享 `backend_name`）
 - GPU 实例配额通过 K8s `ResourceQuota` 落地
 - 平台公共资源通过 ModelRoute 显式发布到其他 Org
 
@@ -20,7 +20,7 @@ GitHub Issue: TBD
 
 | 编号 | 需求 |
 |---|---|
-| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org。**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）强制归属单个 Org；**基础设施**（Cluster / Worker / CloudCredential / WorkerPool / InferenceBackend）有 nullable `organization_id`，平台 admin 可建 Global 或代某 Org 建，Org admin 可在自家 Org 内 CRUD（BYO cluster / Hybrid backend） |
+| F1 | 引入 Organization 作为硬隔离与计费单元；用户可加入多个 Org。**租户资源**（Model / ModelRoute / ModelInstance / ApiKey 等）强制归属单个 Org；**基础设施**（Cluster / CloudCredential / WorkerPool / Worker）也强制归属（admin 在 "All" 模式默认落到 Default Org），跨 Org 共享通过 `cluster_access` 表达；InferenceBackend 是 Hybrid（Platform catalog + Org override 共享 `backend_name`），由平台 admin 维护内置目录 |
 | F2 | 引入 UserGroup（Org 内子单元）以支持部门/团队级资源共享 |
 | F3 | 普通用户仅可见/管理在当前 Org 上下文中可见的资源；v1 中所有用户创建的资源都 owner=org，等价于"全 Org 可见"。schema 上保留 `owner_type/owner_id` 三档（org/group/user），为后续精细化预留 |
 | F4 | 管理员可将 Cluster 授权给 Org / Group / User |
@@ -589,22 +589,22 @@ P0 必须先完成；P1 是所有后续工作的前置；P2 / P3 / P4 可并行�
 
 ## Bring-Your-Own Cluster（v1 已落地）
 
-`Cluster` / `CloudCredential` / `WorkerPool` 三张表都加了 nullable `organization_id`：
+`Cluster` / `CloudCredential` / `WorkerPool` 一律 NOT NULL `organization_id`：
 
 ```sql
 ALTER TABLE clusters
     ADD COLUMN organization_id INTEGER NOT NULL
     REFERENCES organizations(id) ON DELETE CASCADE;
 ALTER TABLE cloud_credentials
-    ADD COLUMN organization_id INTEGER NULL
-    REFERENCES organizations(id) ON DELETE SET NULL;
+    ADD COLUMN organization_id INTEGER NOT NULL
+    REFERENCES organizations(id) ON DELETE CASCADE;
 ALTER TABLE worker_pools
     ADD COLUMN organization_id INTEGER NOT NULL
     REFERENCES organizations(id) ON DELETE CASCADE;
 
--- 每个 cluster / worker_pool 都隶属于一个 Org（admin 共享的工作区落在
--- Default Org，跨 Org 共享走 cluster_access）。Cloud credential 仍允许
--- NULL 以保留"平台公共凭证"的 Hybrid 用法。
+-- 每个 cluster / cloud_credential / worker_pool 都隶属于一个 Org。
+-- admin 在 "All" 模式下创建时由路由层默认落到平台 (Default) Org；
+-- 跨 Org 共享走 cluster_access，不再用 NULL `organization_id` 表示。
 
 -- 每个 Org 至多一个 default cluster：
 CREATE UNIQUE INDEX uix_clusters_default_per_org
@@ -661,7 +661,7 @@ v1 采用**统一计量**：所有 namespace 的 GPU/CPU/内存用量都计入 O
 ### UI 变化
 
 - Cluster Management 菜单的 access flag 从 `canSeeAdmin` 改成 `canManageInfra`（admin 或在任一 Org 持有 admin 角色的用户都看得到）
-- Cluster / CloudCredential 创建表单新增 **Owner** 下拉：admin 可选 "Global" 或任一 Org；Org admin 默认锁定为自己当前 Org，没有第二个选择
+- Cluster / CloudCredential 创建表单：**只有平台 admin 在 "All" 模式才显示 "Organization" 下拉**（默认 Default Org）；其他场景（Org admin / admin act-as）当前 Org 是隐式 owner，不展示选择器。这条规则两边表单一致
 - 列表（cluster / credential / worker_pool）过滤已经在 server 端做了 visibility，前端不用变
 
 ## Inference Backend Hybrid (v1 已落地)
