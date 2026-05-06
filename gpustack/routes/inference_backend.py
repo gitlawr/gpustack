@@ -355,10 +355,15 @@ async def list_backend_configs(  # noqa: C901
         # Hybrid filter: keep Platform rows (NULL) + the caller's own-Org
         # rows. Platform admin in "All" mode bypasses; in act-as mode
         # they get scoped to that Org just like a regular member.
-        admin_all_mode = ctx is None or (
-            ctx.is_platform_admin and ctx.current_org_id is None
+        # System users (workers) need every Org's overrides because they
+        # actually run deploys whose backend_version was customised at
+        # the Org level.
+        bypass_filter = (
+            ctx is None
+            or (ctx.is_platform_admin and ctx.current_org_id is None)
+            or getattr(getattr(ctx, "user", None), "is_system", False)
         )
-        if admin_all_mode:
+        if bypass_filter:
             visible_rows = all_rows
         else:
             visible_rows = [
@@ -486,12 +491,17 @@ def _hybrid_backend_conditions(ctx) -> List:
     Org rows are visible to:
     - their own Org's members (current_org_id matches)
     - platform admin in "All" mode (no current_org_id) — full bypass
+    - system users (worker / cluster service accounts) — full bypass,
+      since they need every Org's overrides to actually run a deploy
+      whose backend version was customised at the Org level
     Platform admin in act-as mode (current_org_id is set) follows the
     same scope as a non-admin caller in that Org: Platform NULL +
     that Org's rows only. They DON'T see other Orgs' rows while
     pretending to be in this one.
     """
     if ctx is None:
+        return []
+    if getattr(ctx.user, "is_system", False):
         return []
     if ctx.is_platform_admin and ctx.current_org_id is None:
         return []
@@ -747,6 +757,10 @@ async def get_inference_backends(  # noqa: C901
         # Filter the streamed events with the same Hybrid visibility check.
         def _visible(b: InferenceBackend) -> bool:
             if ctx is None or (ctx.is_platform_admin and ctx.current_org_id is None):
+                return True
+            # System users (worker / cluster) need every Org's overrides
+            # because they actually run the deploys.
+            if getattr(getattr(ctx, "user", None), "is_system", False):
                 return True
             org_id = getattr(b, "organization_id", None)
             if org_id is None:
