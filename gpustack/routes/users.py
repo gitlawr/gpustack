@@ -128,7 +128,7 @@ async def create_user(session: SessionDep, user_in: UserCreate):
 
         # Build a Personal Org as the user's default namespace, à la
         # GitHub's per-user account. Admin additionally joins the Default
-        # Org as OWNER (so they can manage the global workspace);
+        # Org as ADMIN (so they can manage the global workspace);
         # regular users do NOT auto-join Default — admin can add them
         # later if shared workspace access is needed.
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -145,7 +145,7 @@ async def create_user(session: SessionDep, user_in: UserCreate):
             OrganizationMembership(
                 user_id=user.id,
                 organization_id=personal.id,
-                role=OrgRole.OWNER,
+                role=OrgRole.ADMIN,
                 created_at=now,
             )
         )
@@ -154,7 +154,7 @@ async def create_user(session: SessionDep, user_in: UserCreate):
                 OrganizationMembership(
                     user_id=user.id,
                     organization_id=PLATFORM_ORGANIZATION_ID,
-                    role=OrgRole.OWNER,
+                    role=OrgRole.ADMIN,
                     created_at=now,
                 )
             )

@@ -27,7 +27,7 @@ PLATFORM_ORG_NAME = 'Default'
 
 
 def _enums():
-    org_role = sa.Enum('OWNER', 'MANAGER', 'MEMBER', name='orgrole')
+    org_role = sa.Enum('ADMIN', 'USER', name='orgrole')
     principal_type = sa.Enum('ORG', 'GROUP', 'USER', name='principaltype')
     tenant_ns_state = sa.Enum(
         'PENDING', 'PROVISIONING', 'READY', 'ERROR', 'DELETING',
@@ -227,7 +227,7 @@ def upgrade() -> None:
 
     # ---- Backfill organization_memberships -------------------------------
 
-    # admin -> owner, otherwise -> member. Skip system/internal users.
+    # platform admin -> Org ADMIN, otherwise -> USER. Skip system/internal users.
     if bind.dialect.name == 'postgresql':
         op.execute(
             sa.text(
@@ -235,8 +235,8 @@ def upgrade() -> None:
                 INSERT INTO organization_memberships
                     (user_id, organization_id, role, created_at)
                 SELECT id, :org_id,
-                       CASE WHEN is_admin THEN 'OWNER'::orgrole
-                            ELSE 'MEMBER'::orgrole END,
+                       CASE WHEN is_admin THEN 'ADMIN'::orgrole
+                            ELSE 'USER'::orgrole END,
                        CURRENT_TIMESTAMP
                 FROM users
                 WHERE COALESCE(is_system, false) = false
@@ -251,7 +251,7 @@ def upgrade() -> None:
                 INSERT OR IGNORE INTO organization_memberships
                     (user_id, organization_id, role, created_at)
                 SELECT id, :org_id,
-                       CASE WHEN is_admin THEN 'OWNER' ELSE 'MEMBER' END,
+                       CASE WHEN is_admin THEN 'ADMIN' ELSE 'USER' END,
                        CURRENT_TIMESTAMP
                 FROM users
                 WHERE COALESCE(is_system, 0) = 0

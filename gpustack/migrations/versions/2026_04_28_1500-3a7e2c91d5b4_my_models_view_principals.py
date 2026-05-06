@@ -101,8 +101,8 @@ def upgrade() -> None:
                 INSERT INTO organization_memberships
                     (user_id, organization_id, role, created_at)
                 SELECT id, :org_id,
-                       CASE WHEN is_admin THEN 'OWNER'::orgrole
-                            ELSE 'MEMBER'::orgrole END,
+                       CASE WHEN is_admin THEN 'ADMIN'::orgrole
+                            ELSE 'USER'::orgrole END,
                        CURRENT_TIMESTAMP
                 FROM users
                 WHERE COALESCE(is_system, false) = false
@@ -127,7 +127,7 @@ def upgrade() -> None:
                 INSERT OR IGNORE INTO organization_memberships
                     (user_id, organization_id, role, created_at)
                 SELECT id, :org_id,
-                       CASE WHEN is_admin THEN 'OWNER' ELSE 'MEMBER' END,
+                       CASE WHEN is_admin THEN 'ADMIN' ELSE 'USER' END,
                        CURRENT_TIMESTAMP
                 FROM users
                 WHERE COALESCE(is_system, 0) = 0
@@ -289,7 +289,7 @@ def upgrade() -> None:
     # ---- Personal Orgs: every non-system user gets their own namespace
     # Adds an is_personal flag, then for each existing user creates a
     # Personal Org named "Personal" with slug "user-{id}", makes them
-    # OWNER, and points users.default_organization_id at it. Removes
+    # ADMIN, and points users.default_organization_id at it. Removes
     # non-admin users from the Default Org (id=1) — they no longer get
     # auto-enrolled there; admin must add them explicitly if desired.
     if not column_exists("organizations", "is_personal"):
@@ -335,7 +335,7 @@ def upgrade() -> None:
                 """
                 INSERT INTO organization_memberships
                     (user_id, organization_id, role, created_at)
-                SELECT u.id, o.id, 'OWNER'::orgrole, CURRENT_TIMESTAMP
+                SELECT u.id, o.id, 'ADMIN'::orgrole, CURRENT_TIMESTAMP
                 FROM users u
                 JOIN organizations o
                     ON o.slug = 'user-' || u.id AND o.is_personal = true
@@ -357,7 +357,7 @@ def upgrade() -> None:
             )
         )
         # Drop non-admin users from the Default Org (id=1). Admin keeps
-        # OWNER role there.
+        # ADMIN role there.
         op.execute(
             sa.text(
                 """
@@ -400,7 +400,7 @@ def upgrade() -> None:
                 """
                 INSERT OR IGNORE INTO organization_memberships
                     (user_id, organization_id, role, created_at)
-                SELECT u.id, o.id, 'OWNER', CURRENT_TIMESTAMP
+                SELECT u.id, o.id, 'ADMIN', CURRENT_TIMESTAMP
                 FROM users u
                 JOIN organizations o
                     ON o.slug = 'user-' || u.id AND o.is_personal = 1

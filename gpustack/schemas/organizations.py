@@ -94,7 +94,7 @@ class OrganizationMembership(SQLModel, table=True):
         ),
     )
     role: OrgRole = Field(
-        default=OrgRole.MEMBER,
+        default=OrgRole.USER,
         sa_column=Column(SQLEnum(OrgRole), nullable=False),
     )
     created_at: Optional[datetime] = Field(

@@ -403,12 +403,12 @@ def _filter_condition(group_by: str, item: UsageFilterItem):
 
 def _can_use_org_scope(user: User, ctx) -> bool:
     """Org-scope (provider view) is meaningful for platform admin and
-    Org owner / manager only. Others fall back to ``mine``."""
+    Org admin only. Others fall back to ``mine``."""
     if user.is_admin:
         return True
     if ctx is None:
         return False
-    return ctx.org_role in (OrgRole.OWNER, OrgRole.MANAGER)
+    return ctx.org_role == OrgRole.ADMIN
 
 
 def _resolve_effective_scope(user: User, ctx, requested_scope: str) -> str:

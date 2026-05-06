@@ -4,7 +4,7 @@ Each authenticated request resolves to a TenantContext that captures:
 - the user identity
 - whether they are a platform-level super-admin
 - which Organization they are operating in for this request (current_org_id)
-- which Org-level role they hold there (owner / manager / member)
+- which Org-level role they hold there (admin / user)
 - which clusters are accessible in that org context
 - which principals (org / groups / user) the request can claim ownership for
 
@@ -406,11 +406,11 @@ def assert_org_owned_writable(
     - Platform admin / system user → allowed (bypass via
       ``_bypass_tenant_filter`` for "All" mode admin and system users;
       admin in act-as falls through to org-row check, where they're
-      treated like the Org's owner).
-    - **Org-owned** (org_id == current_org_id): the Org's owner /
-      manager can write; platform admin in act-as bypasses the role
-      check (admin is admin everywhere, even when scoped to one Org).
-    - **Global** (org_id IS NULL): only "All"-mode admin — Org owners
+      treated like an Org admin).
+    - **Org-owned** (org_id == current_org_id): an Org admin can write;
+      platform admin in act-as bypasses the role check (admin is admin
+      everywhere, even when scoped to one Org).
+    - **Global** (org_id IS NULL): only "All"-mode admin — Org admins
       and admin-in-act-as cannot mutate Global rows directly. Resource
       handlers redirect such writes to the caller's Org row instead.
     - **Other Org's row**: never writable for non-admin.
@@ -427,11 +427,8 @@ def assert_org_owned_writable(
             message=f"{resource_label.capitalize()} does not belong to current Org"
         )
     # Platform admin acting-as the Org passes the role check unconditionally;
-    # for non-admin we require explicit owner/manager.
-    if not ctx.is_platform_admin and ctx.org_role not in (
-        OrgRole.OWNER,
-        OrgRole.MANAGER,
-    ):
+    # for non-admin we require Org admin.
+    if not ctx.is_platform_admin and ctx.org_role != OrgRole.ADMIN:
         raise OrgRoleError(
             message=f"Insufficient organization role to modify this {resource_label}"
         )
@@ -453,7 +450,7 @@ def validate_org_owned_owner(
     """Decide whether the caller can create a row owned by ``input_org_id``.
 
     - Platform admin: any value (including NULL = global)
-    - Org owner / admin: must equal current_org_id; can't create global
+    - Org admin: must equal current_org_id; can't create global
     """
     if ctx.is_platform_admin:
         return
@@ -465,7 +462,7 @@ def validate_org_owned_owner(
         raise InvalidException(
             message="organization_id must match the current organization"
         )
-    if ctx.org_role not in (OrgRole.OWNER, OrgRole.MANAGER):
+    if ctx.org_role != OrgRole.ADMIN:
         raise InvalidException(
             message=f"Insufficient organization role to create a {resource_label}"
         )

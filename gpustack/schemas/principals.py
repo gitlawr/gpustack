@@ -8,9 +8,10 @@ class PrincipalType(str, Enum):
 
 
 class OrgRole(str, Enum):
-    OWNER = "owner"
-    # Renamed from ADMIN to disambiguate from `users.is_admin` (the
-    # platform-level superuser). Functionally same as the old ADMIN —
-    # the day-to-day manager of an Org, distinct from owner.
-    MANAGER = "manager"
-    MEMBER = "member"
+    # Two-tier Org membership model: ADMIN can manage the Org's infra
+    # (resources, members, settings); USER is a plain consumer. The
+    # platform-wide superuser lives on `users.is_admin` and is distinct
+    # from `OrgRole.ADMIN` — always disambiguate with `is_platform_admin`
+    # vs `org_role == OrgRole.ADMIN` in code.
+    ADMIN = "admin"
+    USER = "user"

@@ -454,7 +454,7 @@ class Server:
             )
 
         # Two memberships at bootstrap:
-        # - Default Org as OWNER, which is the platform-wide shared
+        # - Default Org as ADMIN, which is the platform-wide shared
         #   workspace where admin uploads public models etc.
         # - A Personal Org for admin too, so the per-user namespace
         #   model is symmetric (admin can experiment in private without
@@ -477,7 +477,7 @@ class Server:
             OrganizationMembership(
                 user_id=user.id,
                 organization_id=PLATFORM_ORGANIZATION_ID,
-                role=OrgRole.OWNER,
+                role=OrgRole.ADMIN,
                 created_at=now,
             )
         )
@@ -494,7 +494,7 @@ class Server:
             OrganizationMembership(
                 user_id=user.id,
                 organization_id=personal.id,
-                role=OrgRole.OWNER,
+                role=OrgRole.ADMIN,
                 created_at=now,
             )
         )

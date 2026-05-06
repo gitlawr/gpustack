@@ -1,8 +1,9 @@
 """Organization membership management.
 
 These routes are nested under /organizations/{org_id}/members. Both the
-platform admin and the Org owner can manage memberships. Org admins (one rung
-below owner) cannot grant ownership but can otherwise add/remove members.
+platform admin and any Org admin can manage memberships. The last admin
+of an Org cannot be demoted or removed — that would leave the Org
+without anyone able to manage members or infra.
 """
 
 from datetime import datetime, timezone
@@ -33,22 +34,18 @@ router = APIRouter()
 
 class MembershipCreate(BaseModel):
     user_id: int
-    role: OrgRole = OrgRole.MEMBER
+    role: OrgRole = OrgRole.USER
 
 
 class MembershipUpdate(BaseModel):
     role: OrgRole
 
 
-def _can_manage(ctx, target_role: OrgRole | None) -> bool:
-    """Platform admin: yes. Org owner: yes. Org admin: only non-owner roles."""
+def _can_manage(ctx) -> bool:
+    """Platform admin or any Org admin can manage memberships."""
     if ctx.is_platform_admin:
         return True
-    if ctx.org_role == OrgRole.OWNER:
-        return True
-    if ctx.org_role == OrgRole.MANAGER and target_role != OrgRole.OWNER:
-        return True
-    return False
+    return ctx.org_role == OrgRole.ADMIN
 
 
 async def _load_org(session, org_id: int) -> Organization:
@@ -75,10 +72,10 @@ async def _find_membership(
     return (await session.exec(stmt)).first()
 
 
-async def _has_other_owner(session, org_id: int, exclude_user_id: int) -> bool:
+async def _has_other_admin(session, org_id: int, exclude_user_id: int) -> bool:
     stmt = select(OrganizationMembership.user_id).where(
         OrganizationMembership.organization_id == org_id,
-        OrganizationMembership.role == OrgRole.OWNER,
+        OrganizationMembership.role == OrgRole.ADMIN,
         OrganizationMembership.user_id != exclude_user_id,
     )
     return (await session.exec(stmt)).first() is not None
@@ -108,7 +105,7 @@ async def add_org_member(
 ):
     org = await _load_org(session, org_id)
 
-    if not _can_manage(ctx, body.role):
+    if not _can_manage(ctx):
         raise ForbiddenException(message="Insufficient permission to add member")
 
     user = await User.one_by_id(session, body.user_id)
@@ -157,15 +154,15 @@ async def update_org_member(
     if not membership:
         raise NotFoundException(message="Membership not found")
 
-    # Need permission to manage both the current and the new role.
-    if not _can_manage(ctx, membership.role) or not _can_manage(ctx, body.role):
+    if not _can_manage(ctx):
         raise ForbiddenException(message="Insufficient permission to change role")
 
-    # If demoting an owner, ensure at least one owner remains.
-    if membership.role == OrgRole.OWNER and body.role != OrgRole.OWNER:
-        if not await _has_other_owner(session, org_id, exclude_user_id=user_id):
+    # If demoting the last admin, refuse — leaves the Org with nobody
+    # able to manage members or Org-scoped infra.
+    if membership.role == OrgRole.ADMIN and body.role != OrgRole.ADMIN:
+        if not await _has_other_admin(session, org_id, exclude_user_id=user_id):
             raise ConflictException(
-                message="Cannot demote the only owner of this organization"
+                message="Cannot demote the only admin of this organization"
             )
 
     try:
@@ -191,13 +188,13 @@ async def remove_org_member(
     if not membership:
         raise NotFoundException(message="Membership not found")
 
-    if not _can_manage(ctx, membership.role):
+    if not _can_manage(ctx):
         raise ForbiddenException(message="Insufficient permission to remove member")
 
-    if membership.role == OrgRole.OWNER:
-        if not await _has_other_owner(session, org_id, exclude_user_id=user_id):
+    if membership.role == OrgRole.ADMIN:
+        if not await _has_other_admin(session, org_id, exclude_user_id=user_id):
             raise ConflictException(
-                message="Cannot remove the only owner of this organization"
+                message="Cannot remove the only admin of this organization"
             )
 
     try:
