@@ -184,9 +184,17 @@ async def _get_model_route(
 async def create_model_route(
     session: SessionDep, ctx: TenantContextDep, input: ModelRouteCreate
 ):
+    # Names are unique within their owning Org. The gateway emits an
+    # Org-slug prefix as the effective model name for non-platform Orgs,
+    # so two Orgs can each have a route called "qwen3-0.6b" without
+    # colliding in the AI proxy match rules.
     existing = await ModelRoute.one_by_fields(
         session,
-        {'deleted_at': None, "name": input.name},
+        {
+            'deleted_at': None,
+            "name": input.name,
+            "organization_id": ctx.current_org_id,
+        },
     )
     if existing:
         raise AlreadyExistsException(
@@ -240,9 +248,15 @@ async def update_model_route(
         use_owner=False,
         not_found_message=f"ModelRoute with id '{id}' not found.",
     )
+    # Names are unique within their owning Org (effective name on the
+    # gateway side carries the Org slug prefix for non-platform Orgs).
     duplicated_name = await ModelRoute.one_by_fields(
         session,
-        {'deleted_at': None, "name": input.name},
+        {
+            'deleted_at': None,
+            "name": input.name,
+            "organization_id": existing.organization_id,
+        },
     )
     if duplicated_name and duplicated_name.id != id:
         raise AlreadyExistsException(

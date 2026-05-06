@@ -32,6 +32,28 @@ if TYPE_CHECKING:
 name_pattern = r'^[A-Za-z](?:[A-Za-z0-9_\-\.]*[A-Za-z0-9])?$'
 
 
+def effective_route_name(
+    route_name: str,
+    org_slug: Optional[str],
+    is_platform_org: bool,
+) -> str:
+    """The model name clients see and gateways route on.
+
+    The platform Org keeps unprefixed names (backward compat — existing
+    clients calling `model: "qwen3-0.6b"` keep working). Other Orgs get
+    a slug prefix (`org1/qwen3-0.6b`) so two Orgs can use the same route
+    name without colliding in Higress's AI proxy match rules.
+
+    Format follows the OpenAI / HuggingFace / OpenRouter convention
+    (`namespace/model`); slug is already constrained to
+    `^[a-z](?:[a-z0-9\\-]*[a-z0-9])?$` so the joined name has no
+    surprising characters.
+    """
+    if is_platform_org or not org_slug:
+        return route_name
+    return f"{org_slug}/{route_name}"
+
+
 class AccessPolicyEnum(str, Enum):
     PUBLIC = "public"
     AUTHED = "authed"
@@ -272,7 +294,12 @@ class ModelRoute(ModelRouteBase, BaseModelMixin, table=True):
 
 
 class ModelRoutePublic(ModelRouteBase, PublicFields):
-    pass
+    # The model name clients should send in their request body. Equals
+    # `name` for the platform Org (backward compat); for other Orgs it
+    # is `<org-slug>/<name>`. The route's serializer (in routes/model_routes)
+    # populates this after joining the Organization row — Pydantic just
+    # carries the value through.
+    effective_name: Optional[str] = None
 
 
 ModelRoutesPublic = PaginatedList[ModelRoutePublic]
