@@ -1,15 +1,28 @@
+from datetime import datetime, timezone
+from typing import List
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlmodel import select
 
 from gpustack.api.exceptions import (
     AlreadyExistsException,
+    ForbiddenException,
     InternalServerErrorException,
     NotFoundException,
     ConflictException,
 )
 from gpustack.security import get_secret_hash
+from gpustack.schemas.organizations import (
+    Organization,
+    OrganizationMembership,
+    OrganizationPublic,
+    PLATFORM_ORGANIZATION_ID,
+)
+from gpustack.schemas.principals import OrgRole
 from gpustack.server.db import async_session
-from gpustack.server.deps import CurrentUserDep, SessionDep
+from gpustack.server.deps import CurrentUserDep, SessionDep, TenantContextDep
 from gpustack.schemas.users import (
     User,
     UserActivationUpdate,
@@ -20,9 +33,16 @@ from gpustack.schemas.users import (
     UsersPublic,
     UserSelfUpdate,
 )
-from gpustack.server.services import UserService
+from gpustack.server.services import UserService, provision_personal_org
 
 router = APIRouter()
+
+
+class UserMembership(BaseModel):
+    organization: OrganizationPublic
+    role: OrgRole
+
+    model_config = {"from_attributes": True}
 
 
 @router.get("", response_model=UsersPublic)
@@ -62,6 +82,34 @@ async def get_user(session: SessionDep, id: int):
     return user
 
 
+@router.get("/{id}/memberships", response_model=List[UserMembership])
+async def list_user_memberships(session: SessionDep, id: int):
+    """Admin-only: list the team Orgs a user belongs to. Personal Orgs are
+    excluded — they are intrinsic to the user, not something an admin
+    grants/revokes."""
+    user = await User.one_by_id(session, id)
+    if not user:
+        raise NotFoundException(message="User not found")
+
+    stmt = (
+        select(OrganizationMembership, Organization)
+        .join(
+            Organization,
+            Organization.id == OrganizationMembership.organization_id,
+        )
+        .where(
+            OrganizationMembership.user_id == id,
+            Organization.is_personal == False,  # noqa: E712
+            Organization.deleted_at.is_(None),
+        )
+    )
+    rows = (await session.exec(stmt)).all()
+    return [
+        UserMembership(organization=org, role=membership.role)
+        for membership, org in rows
+    ]
+
+
 @router.post("", response_model=UserPublic)
 async def create_user(session: SessionDep, user_in: UserCreate):
     existing = await User.one_by_field(session, "username", user_in.username)
@@ -78,6 +126,25 @@ async def create_user(session: SessionDep, user_in: UserCreate):
         if user_in.password:
             to_create.hashed_password = get_secret_hash(user_in.password)
         user = await User.create(session, to_create)
+
+        # Provision the user's Personal Org. Admin additionally joins
+        # the Default Org as ADMIN (so they can manage the global
+        # workspace); regular users do NOT auto-join Default — admin
+        # can add them later if shared workspace access is needed.
+        await provision_personal_org(session, user)
+        if user.is_admin:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            session.add(
+                OrganizationMembership(
+                    user_id=user.id,
+                    organization_id=PLATFORM_ORGANIZATION_ID,
+                    role=OrgRole.ADMIN,
+                    created_at=now,
+                )
+            )
+
+        await session.commit()
+        await session.refresh(user)
     except Exception as e:
         raise InternalServerErrorException(message=f"Failed to create user: {e}")
 
@@ -156,8 +223,32 @@ async def delete_user(session: SessionDep, id: int):
     if await is_only_admin_user(session, user):
         raise ConflictException(message="Cannot delete the only admin user")
 
+    # The user's Personal Org gets cascade-deleted alongside the user
+    # (see below). Anything that was published / sublet from that Personal
+    # Org goes with it: model_routes / model_route_principals / clusters
+    # owned by the Personal Org, plus all cluster_access rows attached to
+    # those clusters, are removed via FK cascades. Recipients of those
+    # shared resources lose access — which is the correct behaviour, since
+    # the resources were inherently coupled to a now-departed maintainer.
+    personal_stmt = select(Organization).where(
+        Organization.is_personal == True,  # noqa: E712
+        Organization.slug == f"user-{user.id}",
+    )
+    personal = (await session.exec(personal_stmt)).first()
+
     try:
         await user_service.delete(user)
+        # Cascade: also delete the orphan Personal Org. FK on
+        # users.default_organization_id is SET NULL, so Org survives the
+        # user delete; without explicit cleanup it would linger as a
+        # zero-member shell. Note: model / model_route / api_key rows
+        # owned by the Org go with it (their FK is CASCADE); clusters
+        # owned by it would normally become NULL (global) but
+        # the shared-resource guard above already blocked that case.
+        if personal is not None:
+            # Use the model's `delete` so soft-delete behavior is honored
+            # consistently with other Org deletion paths.
+            await personal.delete(session)
     except Exception as e:
         raise InternalServerErrorException(message=f"Failed to delete user: {e}")
 
@@ -194,3 +285,34 @@ async def update_user_me(
         raise InternalServerErrorException(message=f"Failed to update user: {e}")
 
     return user
+
+
+# User-search endpoint accessible to org admins (any) and platform
+# admins, so the Add Member picker works without the admin-gated full
+# /users endpoint. Returns the standard UsersPublic page.
+directory_router = APIRouter()
+
+
+@directory_router.get("/user-directory", response_model=UsersPublic)
+async def list_user_directory(
+    ctx: TenantContextDep,
+    page: int = 1,
+    perPage: int = 30,
+    search: str = None,
+):
+    if not ctx.is_platform_admin and ctx.org_role != OrgRole.ADMIN:
+        raise ForbiddenException(message="Insufficient permission")
+    fuzzy_fields = {}
+    if search:
+        fuzzy_fields = {"username": search, "full_name": search}
+    async with async_session() as session:
+        return await User.paginated_by_query(
+            session=session,
+            fuzzy_fields=fuzzy_fields,
+            page=page,
+            per_page=perPage,
+            fields={
+                "deleted_at": None,
+                "is_system": False,
+            },
+        )
