@@ -25,6 +25,7 @@ from gpustack.schemas.user_groups import (
     UserGroupUpdate,
     UserGroupsPublic,
 )
+from gpustack.schemas.users import User
 from gpustack.server.deps import SessionDep, TenantContextDep
 
 router = APIRouter()
@@ -164,7 +165,25 @@ async def list_group_members(
         raise ForbiddenException(message="Not a member of this organization")
 
     stmt = select(UserGroupMembership).where(UserGroupMembership.group_id == group_id)
-    return list((await session.exec(stmt)).all())
+    rows = list((await session.exec(stmt)).all())
+    user_ids = {r.user_id for r in rows}
+    user_by_id: dict[int, User] = {}
+    if user_ids:
+        result = await session.exec(select(User).where(User.id.in_(user_ids)))
+        user_by_id = {u.id: u for u in result.all()}
+    out: List[UserGroupMembershipPublic] = []
+    for r in rows:
+        u = user_by_id.get(r.user_id)
+        out.append(
+            UserGroupMembershipPublic(
+                user_id=r.user_id,
+                group_id=r.group_id,
+                created_at=r.created_at,
+                username=getattr(u, "username", None),
+                full_name=getattr(u, "full_name", None),
+            )
+        )
+    return out
 
 
 @router.post(

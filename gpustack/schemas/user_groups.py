@@ -111,3 +111,5 @@ class UserGroupMembershipPublic(SQLModel):
     user_id: int
     group_id: int
     created_at: datetime
+    username: Optional[str] = None
+    full_name: Optional[str] = None
