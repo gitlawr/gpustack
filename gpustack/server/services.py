@@ -1,9 +1,11 @@
+import logging
 from typing import List, Optional, Union, Set, Tuple
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from gpustack.api.exceptions import InternalServerErrorException
+
 from gpustack.schemas.api_keys import ApiKey
 from gpustack.schemas.model_files import ModelFile
 from gpustack.schemas.model_usage import ModelUsage
@@ -31,6 +33,9 @@ from gpustack.server.cache import (
     set_cache_by_key,
     locked_cached,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class UserService:
@@ -96,9 +101,18 @@ class UserService:
         accessible_model_names: Set[str] = await self.get_user_accessible_model_names(
             user_id
         )
-        return model_name in intersection_nullable_set(
+        allowed = model_name in intersection_nullable_set(
             accessible_model_names, limited_model_names
         )
+        if not allowed:
+            logger.info(
+                "Access denied: model_name=%r user_id=%d " "accessible=%s limited=%s",
+                model_name,
+                user_id,
+                sorted(accessible_model_names),
+                sorted(limited_model_names) if limited_model_names else None,
+            )
+        return allowed
 
     @locked_cached()
     async def get_user_accessible_model_names(self, user_id: int) -> Set[str]:
