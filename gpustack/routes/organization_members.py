@@ -41,10 +41,17 @@ class MembershipUpdate(BaseModel):
     role: OrgRole
 
 
-def _can_manage(ctx) -> bool:
-    """Platform admin or any Org admin can manage memberships."""
+def _can_manage(ctx, org_id: int) -> bool:
+    """Platform admin can manage any Org's memberships; an Org admin
+    can only manage their own Org. The role check is bound to the
+    target Org from the URL path — `ctx.org_role` reflects the caller's
+    *current* Org context, which may not match the path when a savvy
+    client crafts the URL directly. Anchoring on `org_id` closes that
+    cross-Org escalation."""
     if ctx.is_platform_admin:
         return True
+    if ctx.current_org_id != org_id:
+        return False
     return ctx.org_role == OrgRole.ADMIN
 
 
@@ -133,7 +140,7 @@ async def add_org_member(
 ):
     org = await _load_org(session, org_id)
 
-    if not _can_manage(ctx):
+    if not _can_manage(ctx, org_id):
         raise ForbiddenException(message="Insufficient permission to add member")
 
     user = await User.one_by_id(session, body.user_id)
@@ -182,7 +189,7 @@ async def update_org_member(
     if not membership:
         raise NotFoundException(message="Membership not found")
 
-    if not _can_manage(ctx):
+    if not _can_manage(ctx, org_id):
         raise ForbiddenException(message="Insufficient permission to change role")
 
     # If demoting the last admin, refuse — leaves the Org with nobody
@@ -216,7 +223,7 @@ async def remove_org_member(
     if not membership:
         raise NotFoundException(message="Membership not found")
 
-    if not _can_manage(ctx):
+    if not _can_manage(ctx, org_id):
         raise ForbiddenException(message="Insufficient permission to remove member")
 
     if membership.role == OrgRole.ADMIN:
