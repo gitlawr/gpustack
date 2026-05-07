@@ -475,12 +475,13 @@ API Key 反查流程：`access_key` → `ApiKey` 行 → 取 `user_id` 与 `orga
 
 **为什么内置 Org 起名 "Default" 而不是 "Platform"**：每个普通用户登录时这就是他们看到的 Org（除非 admin 把他们加到别的 Org），slug 也作为 K8s namespace 模板的一部分（`gpustack-default`）。"Default" 更准确反映"兜底租户"的角色，避免和"平台基础设施"概念混淆。
 
-#### ModelRoute 兼容期
+#### ModelRoute `ALLOWED_USERS` / `ALLOWED_PRINCIPALS` 共存
 
-新增 `model_route_principals` 表后：
-- 旧 `UserModelRouteLink` 表保留 30 天兼容期，读取时 union 两表
-- `access_policy` 加 `ALLOWED_PRINCIPALS`，旧的 `ALLOWED_USERS` 视为只看 principal_type='user' 的子集
-- 兼容期结束后由独立迁移移除旧表
+`ALLOWED_USERS` **不** deprecate：OSS 版保留它作为细粒度授权选项，企业版引入 `ALLOWED_PRINCIPALS` 提供 user / org / group 的多类型授权。两者并存：
+
+- `ALLOWED_USERS` → 读 `usermodelroutelink`（OSS 路径）
+- `ALLOWED_PRINCIPALS` → 读 `model_route_principals`（企业路径）
+- foundation migration 把 `usermodelroutelink` 行镜像进 `model_route_principals`（principal_type='user'），所以 OSS 路径下创建的 route 在企业版 UI 里仍可见、可编辑；不存在"兼容期后移除旧表"的步骤
 
 #### 反向代理对接（仅说明接口契约）
 
@@ -749,3 +750,77 @@ ModelRoute 名字在 Org 内唯一（`(name, organization_id)` 维度），跨 O
 - 客户端展示侧（`ApiAccessInfo` modal、ModelRoute 列表）走前端的 `effectiveRouteName(name, ownerOrg)` helper 计算同一个值
 
 `/model/proxy/<route_id>/...` 路径仍按 id 路由，不受名字影响——admin 想直接拼 URL 调试或绕过 model 名解析时仍可用。
+
+## v1 增量实现笔记
+
+主体设计落地后做的若干补充与修正，集中在这里，避免散在主章节里干扰主线阅读。
+
+### SSO ↔ 多租户接入（第一档）
+
+OIDC / SAML 登录与本地建账走相同的 Personal Org 供给路径：
+
+- `gpustack/server/services.py:provision_personal_org(session, user)` 单一职责——建 Personal Org（`is_personal=True`、`slug=user-{id}`）+ ADMIN membership + `users.default_organization_id`，不 commit（让上层把它合进事务）
+- `routes/users.py` 本地 POST、`routes/auth.py` SAML callback、`routes/auth.py` OIDC callback 都调这个 helper
+- SSO callback 还有一个 **登录时 backfill**：`elif user.default_organization_id is None` 时给历史 SSO 用户补 Personal Org（幂等）
+
+身份层职责到此为止：IdP 只管"是谁"，租户语义全部在 gpustack 内部由 Org admin 在 UI 加成员。基于 IdP claims 的 group/role 自动映射是后续档位（"进阶档"），未做。
+
+### Higress 回调侧的 model 名双形式
+
+`get_user_accessible_model_names` 现在每个 route 同时塞两种 key：
+
+- **effective name**（`<slug>/<route>` for 非 platform，raw for platform）：匹配 `/v1/models` 输出 + 客户端发请求时 body.model 的形式 + Higress ingress 的 `x-higress-llm-model` header 匹配器
+- **raw `route.name`**：匹配 Higress AI proxy 在 `modelMapping` 之后回调到 `/token-auth` 时 `x-higress-llm-model` 头的形式——modelMapping 把 `org1/qwen3-0.6b` → `qwen3-0.6b` 之后再触发 auth callback，老逻辑只比对 effective name 会把这条 chat 流量误判成"无权限"
+
+`get_model_auth_info_by_name` 也做了对称改造：name 含 `/` 时按 `slug/route` 拆分 + `(name, organization_id)` 复合查找；否则走 legacy 字面查找。两条路径都能查到 route，跨 Org 同名（不同 owner Org 都叫 `qwen3-0.6b`）也能正确路由——Higress 的 ingress matcher 已经在前面用 effective name 把流量拍到对应 ingress 了，auth callback 只需确认调用者在该 user 的 access set 里即可。
+
+跨 Org 重名的 raw name 共享 access set 不会越权：每个 user 的 set 是 per-user 算的，不持有的 Org 的 route 根本不会进集合。
+
+### Org admin 自管成员
+
+新页面 `/access-control/members`（`pages/org-members/index.tsx`）让 Org admin 用全局右上角 Org switcher 切换 scope 管理本 Org 成员，不再要求平台 admin 介入：
+
+- access flag 是 `canManageOrgMembers = canManageInfra && !inAllMode`——平台 admin 在 "All" 模式下菜单隐藏，因为 Members 是 per-Org 概念，"All" 模式下没有 current org 上下文
+- 复用 `pages/organizations/components/members-panel.tsx`，drawer（admin 路径）和 page（org admin 路径）共享同一份 add / role-change / remove 逻辑
+- 后端 `_can_manage(ctx, org_id)` 用 URL path 上的 `org_id` 做角色判定，避免 `ctx.org_role`（基于 `ctx.current_org_id`）让 Org A admin 通过构造 URL 写到 Org B 的成员表
+- `OrganizationMembershipPublic` schema 加了 `username` / `full_name`，列表端点 server-side bulk join 一次返回，前端不用再单独拉 user list
+
+User Group 的 Members drawer 也按这个 panel 的样式重做了：count tag + 内联 add form + 表格删除（替代原来的 Edit / Save Transfer），候选用户从 `queryOrganizationMembers` 来（org admin 也调得到，候选范围 = "已是本 Org 成员"——本来 add_group_member 的硬约束就是这个），不再走 admin-only 的 `queryUsersList`。
+
+### `/user-directory` 与 `PrincipalSelect`
+
+为了让"加成员 / 加 Allowed Principal"这类 picker 在 org admin 视角也能用：
+
+- 新加 `GET /user-directory`（`routes/users.py:directory_router`），挂在 `v1_base_router` 下，handler 内部用 `is_platform_admin || org_role == ADMIN` 校验。返回标准 `UsersPublic` page，支持 `search` 模糊匹配 username / full_name。这个端点专门为成员添加流程留口子，不替代 admin-only 的 `/users`
+- `PrincipalSelect`（`src/components/principal-select/index.tsx`）：服务端搜索的 user / group / org 选择器，单选 / 多选切换，带 label 缓存避免选中项落出搜索分页时显示丢失。`kind="user"` 走 `/user-directory`；`kind="group"` 必带 `orgId`；`kind="org"` 走 `/organizations`
+- 替换原来到处 `queryUsersList({page: -1})` 全量拉的反模式——admin only + 不可搜索 + 量大就崩，统一收敛到这个组件
+
+### Per-Org 名字唯一性 + 预留 slug
+
+ModelRoute 一节先写了，实际同样规则在以下表都已落地：
+
+- `clusters` / `cloud_credentials` / `model_providers` / `models` / `model_routes`：unique 都是 `(name, organization_id)`，跨 Org 可以重名
+- 创建 / 更新路由都按 `(name, ctx.target_org_id)` 查 dup，错误信息带 Org 区分
+
+`Organization.slug` 和 `Organization.name` 的预留词在 **input 层**（`validate_org_input(name, slug)`）拒绝：`personal`、`global`、`user-N`（N 为数字）。Schema 上不加约束，避免历史 `Personal` 名字的 Org 行被读路径上的 Pydantic 校验器误杀（实测被坑过）。
+
+### AccessPolicy 默认值（落地结果）
+
+新建 ModelRoute 的默认 `access_policy`：
+
+| Org 类型 | 默认 |
+|---|---|
+| 平台 (Default) Org | `AUTHED`（admin 上架的公共服务对所有登录用户可见，与旧行为一致） |
+| 其他 Org | `ORG`（仅本 Org 成员可见，是"团队私有"的合理默认）|
+
+`ORG` 是新加的枚举值（migration `c1f2a4b67d0e_add_org_access_policy.py`，单独跑了 `ALTER TYPE ... ADD VALUE IF NOT EXISTS 'ORG'`，因为已经升级过的开发库不会重跑历史 migration 里的 enum 添加），`non_admin_user_models` 视图加了 `ORG` 分支，按 `organization_memberships` 过滤。
+
+### 部署归属与 streaming 旁路修正
+
+部署模型时 `target_org_id` 现在按"先 ctx.current_org_id，None 时 fallback 到 cluster.organization_id"解析——admin 在 "All" 模式选 org1 的 cluster1 部署模型，model.organization_id 自动落到 org1，而不是被默认值兜底到 platform Org。同样的解析在 ModelInstance / ApiKey / ModelRoute create 路径都做了，所有 `setdefault(organization_id, ...)` 改成显式赋值——Pydantic v2 `model_dump()` 对 `default=PLATFORM_ORGANIZATION_ID` 的字段会主动 emit，setdefault 实际是 no-op，这个坑前后踩过几次。
+
+`get_models` / `get_model_instances` 的 streaming 端点 filter 加了 `not _bypass_tenant_filter(ctx)` 的守卫——之前 streaming 路径只看 `ctx.current_org_id is not None` 来决定要不要套 organization_id 过滤，导致 worker / cluster system user（`is_system=True`，bypass 候选）在订阅 instance 事件时被错误地按 `current_org_id=None` 过滤拦截。Worker 拿不到事件 → instance 卡在 SCHEDULED。修正后 system user 完全旁路。
+
+### Default cluster per Org 的自动 promote
+
+新建 cluster 时如果该 Org 还没有任何 cluster，路由层自动把这条标成 default。前端不再需要专门跑 `set-default` 调用——之前 Org admin 创建 cluster 后 UI 还在尝试调 `set-default`，但那个动作是平台 admin only，结果就是 403 弹窗。现在服务端搞定，前端的 post-create check 也撤掉了。
