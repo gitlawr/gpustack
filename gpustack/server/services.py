@@ -291,7 +291,21 @@ class ModelRouteService:
     async def get_model_auth_info_by_name(
         self, name: str
     ) -> Optional[Tuple[AccessPolicyEnum, str]]:
-        route = await ModelRoute.one_by_field(self.session, "name", name)
+        # Higress's auth callback may hand us either the Org-effective
+        # name (`<slug>/<route>`) or the raw `route.name` depending on
+        # whether `modelMapping` has fired yet. Resolve both forms.
+        route: Optional[ModelRoute] = None
+        if "/" in name:
+            slug, _, rest = name.partition("/")
+            if rest:
+                org = await Organization.one_by_field(self.session, "slug", slug)
+                if org is not None:
+                    route = await ModelRoute.one_by_fields(
+                        self.session,
+                        {"name": rest, "organization_id": org.id},
+                    )
+        if route is None:
+            route = await ModelRoute.one_by_field(self.session, "name", name)
         if route is None:
             return None
         route_targets = await ModelRouteTarget.all_by_fields(
