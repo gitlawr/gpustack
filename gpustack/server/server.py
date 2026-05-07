@@ -18,6 +18,7 @@ from gpustack.schemas.users import (
     get_default_cluster_user,
     default_cluster_user_name,
 )
+from gpustack.schemas.organizations import PLATFORM_ORGANIZATION_ID
 from gpustack.schemas.models import ModelInstance
 from gpustack.schemas.api_keys import ApiKey
 from gpustack.schemas.workers import Worker
@@ -31,6 +32,7 @@ from gpustack.security import (
 )
 from gpustack.routes.auth import remove_initial_password_file_if_exists
 from gpustack.server.app import create_app
+from gpustack.server.services import provision_bootstrap_admin_orgs
 from gpustack.config.config import Config
 from gpustack.schemas.config import GatewayModeEnum
 from gpustack.config import registration
@@ -479,7 +481,9 @@ class Server:
             is_admin=True,
             require_password_change=require_password_change,
         )
-        await User.create(session, user)
+        user = await User.create(session, user)
+        await provision_bootstrap_admin_orgs(session, user)
+        await session.commit()
 
     async def _migrate_legacy_token(self, session: AsyncSession):
         if not self._config.token:
@@ -752,6 +756,7 @@ class Server:
             hashed_suffix=hashed_suffix,
             registration_token="",
             is_default=set_default,
+            organization_id=PLATFORM_ORGANIZATION_ID,
         )
         default_cluster = await Cluster.create(
             session, default_cluster, auto_commit=False
@@ -768,12 +773,25 @@ class Server:
         )
         await User.create(session, default_cluster_user, auto_commit=False)
 
+        # No cluster_access grant needed: the cluster's `organization_id`
+        # already binds it to the platform Org, whose members are
+        # implicit USER-level consumers. cluster_access rows are only
+        # for cross-Org / group / user borrowing.
+
         await session.commit()
         logger.debug("Default cluster created.")
 
     async def user_defined_default_cluster(self, session: AsyncSession) -> Cluster:
-        cluster = await Cluster.first_by_field(
-            session=session, field="is_default", value=True
+        # Used during initial bootstrap to decide whether to create a
+        # platform-Org default — only need to check the platform Org slot
+        # since per-Org defaults are independent.
+        cluster = await Cluster.one_by_fields(
+            session=session,
+            fields={
+                "is_default": True,
+                "organization_id": PLATFORM_ORGANIZATION_ID,
+                "deleted_at": None,
+            },
         )
         return cluster
 

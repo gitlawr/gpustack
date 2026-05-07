@@ -34,6 +34,10 @@ from gpustack.schemas.model_routes import (
     ModelRouteTarget,
     MyModel,
     TargetStateEnum,
+    effective_route_name,
+)
+from gpustack.schemas.organizations import (
+    Organization,
 )
 from gpustack.schemas.models import (
     BackendEnum,
@@ -271,6 +275,10 @@ async def sync_replicas(session: AsyncSession, model: Model):
                 local_path=model.local_path,
                 state=ModelInstanceStateEnum.PENDING,
                 cluster_id=model.cluster_id,
+                # Inherit the parent Model's tenant binding — the schema
+                # default of PLATFORM_ORGANIZATION_ID would otherwise
+                # land instances of a non-Default-Org Model in Default.
+                organization_id=model.organization_id,
                 draft_model_source=get_draft_model_source(model),
                 backend=get_backend(model),
                 backend_version=model.backend_version,
@@ -641,6 +649,7 @@ async def sync_model_route_mapper(
 async def ensure_route_generic_transformer_config(
     cfg: Config,
     model_route: ModelRoute,
+    effective_name: str,
     extensions_api: ExtensionsHigressIoV1Api,
     generic_proxy_enabled: bool,
 ):
@@ -648,6 +657,10 @@ async def ensure_route_generic_transformer_config(
     Reconcile the single HeaderRule that maps /model/proxy/<route_id>/... to this
     route's x-higress-llm-model. When generic_proxy_enabled is False (generic proxy
     disabled or route deleted), the rule is removed and other routes are untouched.
+
+    ``effective_name`` is the fully-qualified model name including the
+    Org slug prefix (e.g. ``org1/qwen3-0.6b``) for non-platform Orgs;
+    platform Org keeps the unprefixed ``model_route.name``.
     """
     operating_path_pattern = mcp_handler.build_generic_route_path_pattern(
         model_route.id
@@ -655,9 +668,7 @@ async def ensure_route_generic_transformer_config(
     expected_header_rules: List[Dict[str, Any]] = []
     if generic_proxy_enabled:
         expected_header_rules.append(
-            mcp_handler.build_generic_route_header_rule(
-                model_route.id, model_route.name
-            )
+            mcp_handler.build_generic_route_header_rule(model_route.id, effective_name)
         )
     await mcp_handler.ensure_wasm_plugin(
         api=extensions_api,
@@ -771,12 +782,22 @@ async def sync_gateway(
         destinations, fallback_destinations = await calculate_destinations(
             session, model_route
         )
+    # Effective model name = `<org-slug>/<route.name>` for non-platform
+    # Orgs (so two Orgs can use the same `route.name` without colliding
+    # in Higress's AI proxy match rules), unprefixed for the platform Org
+    # (backward compatible for existing clients).
+    route_org = await Organization.one_by_id(session, model_route.organization_id)
+    effective_name = effective_route_name(
+        model_route.name,
+        getattr(route_org, "slug", None),
+        bool(getattr(route_org, "is_platform", False)),
+    )
     ingress_name = mcp_handler.model_route_ingress_name(model_route.id)
     await sync_model_route_mapper(
         cfg=cfg,
         extensions_api=extensions_api,
         ingress_name=ingress_name,
-        route_name=model_route.name,
+        route_name=effective_name,
         destinations=destinations,
         fallback_destinations=fallback_destinations,
     )
@@ -788,7 +809,7 @@ async def sync_gateway(
         ingress_class_name=cfg.gateway_ingress_class,
         event_type=event_type,
         ingress_name=ingress_name,
-        route_name=model_route.name,
+        route_name=effective_name,
         namespace=cfg.get_namespace(),
         destinations=destinations if len(destinations) > 0 else fallback_destinations,
         networking_api=networking_api,
@@ -803,7 +824,7 @@ async def sync_gateway(
         ingress_class_name=cfg.gateway_ingress_class,
         event_type=fallback_event_type,
         ingress_name=mcp_handler.fallback_ingress_name(ingress_name),
-        route_name=model_route.name,
+        route_name=effective_name,
         namespace=cfg.get_namespace(),
         destinations=fallback_destinations,
         networking_api=networking_api,
@@ -825,6 +846,7 @@ async def sync_gateway(
     await ensure_route_generic_transformer_config(
         cfg=cfg,
         model_route=model_route,
+        effective_name=effective_name,
         extensions_api=extensions_api,
         generic_proxy_enabled=(
             event_type != EventType.DELETED and bool(model_route.generic_proxy)
@@ -1201,8 +1223,15 @@ class InferenceBackendController:
             if built_in_backend.backend_name == BackendEnum.CUSTOM.value:
                 continue
 
-            backend = await InferenceBackend.one_by_field(
-                session, "backend_name", built_in_backend.backend_name
+            # Built-in backends always seed as Platform (organization_id IS NULL).
+            # Per-Org overrides live in additional rows created by Org owners /
+            # managers; those are managed via the inference_backend routes.
+            backend = await InferenceBackend.one_by_fields(
+                session,
+                {
+                    "backend_name": built_in_backend.backend_name,
+                    "organization_id": None,
+                },
             )
 
             if not backend:
@@ -1267,12 +1296,15 @@ class InferenceBackendController:
                     yaml_backend_names.add(backend_name)
                 await self._upsert_community_backend(session, backend_config)
 
-            # Query all community backends from database
+            # Query all community backends from database. Only Platform
+            # rows are owned by the catalog yaml; Org-private community
+            # additions stay untouched.
             all_backends = await InferenceBackend.all(session)
             db_community_backends = [
                 backend
                 for backend in all_backends
                 if backend.backend_source == BackendSourceEnum.COMMUNITY
+                and backend.organization_id is None
             ]
 
             # Delete community backends that are no longer in YAML
@@ -1384,9 +1416,11 @@ class InferenceBackendController:
                 root=version_config_dict
             )
 
-        # Upsert: update if exists, create if not
-        existing = await InferenceBackend.one_by_field(
-            session, "backend_name", backend_name
+        # Upsert: update if exists, create if not. Community backends seed
+        # at the Platform scope (organization_id IS NULL) — Org-private
+        # extensions live in additional rows owned by Orgs.
+        existing = await InferenceBackend.one_by_fields(
+            session, {"backend_name": backend_name, "organization_id": None}
         )
         if existing:
             # Smart merge logic to preserve user customizations

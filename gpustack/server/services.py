@@ -1,9 +1,12 @@
+import logging
+from datetime import datetime, timezone
 from typing import List, Optional, Union, Set, Tuple
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from gpustack.api.exceptions import InternalServerErrorException
+
 from gpustack.schemas.api_keys import ApiKey
 from gpustack.schemas.model_files import ModelFile
 from gpustack.schemas.models import (
@@ -17,7 +20,14 @@ from gpustack.schemas.model_routes import (
     ModelRouteTarget,
     TargetStateEnum,
     AccessPolicyEnum,
+    effective_route_name,
 )
+from gpustack.schemas.organizations import (
+    Organization,
+    OrganizationMembership,
+    PLATFORM_ORGANIZATION_ID,
+)
+from gpustack.schemas.principals import OrgRole
 from gpustack.schemas.users import User
 from gpustack.schemas.clusters import Cluster
 from gpustack.schemas.workers import Worker
@@ -25,6 +35,9 @@ from gpustack.server.cache import (
     delete_cache_by_key,
     locked_cached,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class UserService:
@@ -90,25 +103,123 @@ class UserService:
         accessible_model_names: Set[str] = await self.get_user_accessible_model_names(
             user_id
         )
-        return model_name in intersection_nullable_set(
+        allowed = model_name in intersection_nullable_set(
             accessible_model_names, limited_model_names
         )
+        if not allowed:
+            logger.info(
+                "Access denied: model_name=%r user_id=%d " "accessible=%s limited=%s",
+                model_name,
+                user_id,
+                sorted(accessible_model_names),
+                sorted(limited_model_names) if limited_model_names else None,
+            )
+        return allowed
 
     @locked_cached()
     async def get_user_accessible_model_names(self, user_id: int) -> Set[str]:
-        # Get all accessible model names for the user
+        # Get all accessible model names for the user. The set holds two
+        # forms per route:
+        #   1. Org-effective name (`<slug>/<route>` for non-platform
+        #      Orgs, raw for platform) — matches `/v1/models` output and
+        #      the gateway's ingress header matcher.
+        #   2. Raw `route.name` — matches the post-`modelMapping` value
+        #      that Higress's AI proxy hands back via
+        #      `x-higress-llm-model` on the auth callback. Without this
+        #      the callback would deny chat traffic for non-platform
+        #      Orgs even though the gateway already routed it to the
+        #      correct ingress.
+        # Cross-Org collisions on raw names are fine: each user's set is
+        # isolated, and Higress's per-Org ingress already disambiguates
+        # which underlying instance receives the request.
         user: User = await self.get_by_id(user_id)
         if user is None:
             return set()
         if user.is_admin or user.is_system:
-            all_models = await ModelRoute.all_by_field(self.session, "deleted_at", None)
-            model_names = {model.name for model in all_models}
+            routes = await ModelRoute.all_by_field(self.session, "deleted_at", None)
         else:
-            allowed_models = await MyModel.all_by_fields(
+            routes = await MyModel.all_by_fields(
                 self.session, {"user_id": user.id, "deleted_at": None}
             )
-            model_names = {model.name for model in allowed_models}
-        return model_names
+        org_ids = {r.organization_id for r in routes if r.organization_id is not None}
+        org_by_id = {}
+        if org_ids:
+            rows = (
+                await self.session.exec(
+                    select(Organization).where(Organization.id.in_(org_ids))
+                )
+            ).all()
+            org_by_id = {o.id: o for o in rows}
+        names: Set[str] = set()
+        for r in routes:
+            org = org_by_id.get(r.organization_id) if r.organization_id else None
+            names.add(
+                effective_route_name(
+                    r.name,
+                    getattr(org, "slug", None),
+                    bool(getattr(org, "is_platform", False)),
+                )
+            )
+            names.add(r.name)
+        return names
+
+
+async def provision_personal_org(session: AsyncSession, user: User) -> Organization:
+    """Create the user's Personal Org and ADMIN membership, à la GitHub's
+    per-user account.
+
+    Used by every User-creation site (local POST /users and the SSO
+    callbacks for SAML / OIDC) so the new account always lands in a
+    namespace it owns. The caller is responsible for `commit()` — this
+    helper only adds + flushes so the caller can bundle it into a
+    larger transaction.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    personal = Organization(
+        name="Personal",
+        slug=f"user-{user.id}",
+        description="Personal namespace",
+        is_personal=True,
+        is_platform=False,
+    )
+    session.add(personal)
+    await session.flush()
+    session.add(
+        OrganizationMembership(
+            user_id=user.id,
+            organization_id=personal.id,
+            role=OrgRole.ADMIN,
+            created_at=now,
+        )
+    )
+    user.default_organization_id = personal.id
+    session.add(user)
+    await session.flush()
+    return personal
+
+
+async def provision_bootstrap_admin_orgs(session: AsyncSession, user: User) -> None:
+    """Wire the bootstrap admin user into both the platform Org (as the
+    canonical workspace) and a Personal Org (for symmetry with regular
+    users), then point ``default_organization_id`` back at the platform
+    Org so admin's initial UI context is the shared workspace.
+
+    Used by ``Server._init_user`` on first start. Caller commits.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    session.add(
+        OrganizationMembership(
+            user_id=user.id,
+            organization_id=PLATFORM_ORGANIZATION_ID,
+            role=OrgRole.ADMIN,
+            created_at=now,
+        )
+    )
+    await provision_personal_org(session, user)
+    # `provision_personal_org` defaulted the user to their Personal Org;
+    # admin's UX expects the shared workspace by default, so flip back.
+    user.default_organization_id = PLATFORM_ORGANIZATION_ID
+    session.add(user)
 
 
 class APIKeyService:
@@ -240,7 +351,21 @@ class ModelRouteService:
     async def get_model_auth_info_by_name(
         self, name: str
     ) -> Optional[Tuple[AccessPolicyEnum, str]]:
-        route = await ModelRoute.one_by_field(self.session, "name", name)
+        # Higress's auth callback may hand us either the Org-effective
+        # name (`<slug>/<route>`) or the raw `route.name` depending on
+        # whether `modelMapping` has fired yet. Resolve both forms.
+        route: Optional[ModelRoute] = None
+        if "/" in name:
+            slug, _, rest = name.partition("/")
+            if rest:
+                org = await Organization.one_by_field(self.session, "slug", slug)
+                if org is not None:
+                    route = await ModelRoute.one_by_fields(
+                        self.session,
+                        {"name": rest, "organization_id": org.id},
+                    )
+        if route is None:
+            route = await ModelRoute.one_by_field(self.session, "name", name)
         if route is None:
             return None
         route_targets = await ModelRouteTarget.all_by_fields(
@@ -270,16 +395,46 @@ class ModelRouteService:
 
     @locked_cached()
     async def get_model_ids_by_model_route_name(self, name: str) -> List[Model]:
-        route_targets = await ModelRouteTarget.all_by_fields(
+        # Clients send the Org-effective name (e.g. "org1/qwen3-0.6b").
+        # Targets are stored keyed by raw `route_name`, so split off the
+        # slug and constrain by the route's owning Org. Platform Org
+        # routes have no prefix — fall back to the legacy lookup.
+        org_id: Optional[int] = None
+        raw_name = name
+        if "/" in name:
+            slug, _, rest = name.partition("/")
+            if rest:
+                org = await Organization.one_by_field(self.session, "slug", slug)
+                if org is not None:
+                    org_id = org.id
+                    raw_name = rest
+                # If the slug didn't match an Org, fall through and try
+                # the literal name (handles edge cases like a route
+                # called "literal/with/slashes" before the prefix
+                # convention existed).
+        target_fields = {
+            "route_name": raw_name,
+            "state": TargetStateEnum.ACTIVE,
+            "deleted_at": None,
+        }
+        targets = await ModelRouteTarget.all_by_fields(
             self.session,
-            fields={
-                "route_name": name,
-                "state": TargetStateEnum.ACTIVE,
-                "deleted_at": None,
-            },
+            fields=target_fields,
             options=[selectinload(ModelRouteTarget.model)],
         )
-        models = [target.model for target in route_targets if target.model is not None]
+        # When an Org slug was parsed, narrow to that Org's route by
+        # joining through the parent ModelRoute's `organization_id`.
+        # This avoids an extra round-trip when the route name is
+        # globally unique (the typical single-Org case).
+        if org_id is not None and len(targets) > 0:
+            route_ids = {t.route_id for t in targets if t.route_id is not None}
+            org_routes = await ModelRoute.all_by_fields(
+                self.session,
+                fields={"organization_id": org_id, "deleted_at": None},
+            )
+            allowed_route_ids = {r.id for r in org_routes if r.id in route_ids}
+            targets = [t for t in targets if t.route_id in allowed_route_ids]
+        models = [target.model for target in targets if target.model is not None]
         for model in models:
             self.session.expunge(model)
         return models
