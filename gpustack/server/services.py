@@ -116,12 +116,20 @@ class UserService:
 
     @locked_cached()
     async def get_user_accessible_model_names(self, user_id: int) -> Set[str]:
-        # Get all accessible model names for the user. Set members are
-        # Org-effective names (slug-prefixed for non-platform Orgs) so
-        # they match what `/v1/models` advertises and what the gateway
-        # routes on. We also include the raw `route.name` for the
-        # platform Org so legacy clients calling `model: "qwen3-0.6b"`
-        # against an admin route keep working.
+        # Get all accessible model names for the user. The set holds two
+        # forms per route:
+        #   1. Org-effective name (`<slug>/<route>` for non-platform
+        #      Orgs, raw for platform) — matches `/v1/models` output and
+        #      the gateway's ingress header matcher.
+        #   2. Raw `route.name` — matches the post-`modelMapping` value
+        #      that Higress's AI proxy hands back via
+        #      `x-higress-llm-model` on the auth callback. Without this
+        #      the callback would deny chat traffic for non-platform
+        #      Orgs even though the gateway already routed it to the
+        #      correct ingress.
+        # Cross-Org collisions on raw names are fine: each user's set is
+        # isolated, and Higress's per-Org ingress already disambiguates
+        # which underlying instance receives the request.
         user: User = await self.get_by_id(user_id)
         if user is None:
             return set()
@@ -150,6 +158,7 @@ class UserService:
                     bool(getattr(org, "is_platform", False)),
                 )
             )
+            names.add(r.name)
         return names
 
 
