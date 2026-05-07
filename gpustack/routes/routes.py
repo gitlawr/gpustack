@@ -77,6 +77,7 @@ management_router.include_router(
 
 v1_base_router = APIRouter(dependencies=[Depends(get_current_user)])
 v1_base_router.include_router(users.me_router, prefix="/users", tags=["Users"])
+v1_base_router.include_router(users.directory_router, tags=["Users"])
 v1_base_router.include_router(api_keys.router, prefix="/api-keys", tags=["API Keys"])
 v1_base_router.include_router(usage.router, prefix="/usage", tags=["Usage"])
 v1_base_router.include_router(

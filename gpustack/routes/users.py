@@ -8,6 +8,7 @@ from sqlmodel import select
 
 from gpustack.api.exceptions import (
     AlreadyExistsException,
+    ForbiddenException,
     InternalServerErrorException,
     NotFoundException,
     ConflictException,
@@ -21,7 +22,7 @@ from gpustack.schemas.organizations import (
 )
 from gpustack.schemas.principals import OrgRole
 from gpustack.server.db import async_session
-from gpustack.server.deps import CurrentUserDep, SessionDep
+from gpustack.server.deps import CurrentUserDep, SessionDep, TenantContextDep
 from gpustack.schemas.users import (
     User,
     UserActivationUpdate,
@@ -303,3 +304,34 @@ async def update_user_me(
         raise InternalServerErrorException(message=f"Failed to update user: {e}")
 
     return user
+
+
+# User-search endpoint accessible to org admins (any) and platform
+# admins, so the Add Member picker works without the admin-gated full
+# /users endpoint. Returns the standard UsersPublic page.
+directory_router = APIRouter()
+
+
+@directory_router.get("/user-directory", response_model=UsersPublic)
+async def list_user_directory(
+    ctx: TenantContextDep,
+    page: int = 1,
+    perPage: int = 30,
+    search: str = None,
+):
+    if not ctx.is_platform_admin and ctx.org_role != OrgRole.ADMIN:
+        raise ForbiddenException(message="Insufficient permission")
+    fuzzy_fields = {}
+    if search:
+        fuzzy_fields = {"username": search, "full_name": search}
+    async with async_session() as session:
+        return await User.paginated_by_query(
+            session=session,
+            fuzzy_fields=fuzzy_fields,
+            page=page,
+            per_page=perPage,
+            fields={
+                "deleted_at": None,
+                "is_system": False,
+            },
+        )
