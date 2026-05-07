@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional, Union, Set, Tuple
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -22,7 +23,8 @@ from gpustack.schemas.model_routes import (
     AccessPolicyEnum,
     effective_route_name,
 )
-from gpustack.schemas.organizations import Organization
+from gpustack.schemas.organizations import Organization, OrganizationMembership
+from gpustack.schemas.principals import OrgRole
 from gpustack.schemas.users import User
 from gpustack.schemas.clusters import Cluster
 from gpustack.schemas.workers import Worker
@@ -87,6 +89,40 @@ class UserService:
                 APIKeyService.get_by_access_key, apikey.access_key
             )
         return result
+
+
+async def provision_personal_org(session: AsyncSession, user: User) -> Organization:
+    """Create the user's Personal Org and ADMIN membership, à la GitHub's
+    per-user account.
+
+    Used by every User-creation site (local POST /users and the SSO
+    callbacks for SAML / OIDC) so the new account always lands in a
+    namespace it owns. The caller is responsible for `commit()` — this
+    helper only adds + flushes so the caller can bundle it into a
+    larger transaction.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    personal = Organization(
+        name="Personal",
+        slug=f"user-{user.id}",
+        description="Personal namespace",
+        is_personal=True,
+        is_platform=False,
+    )
+    session.add(personal)
+    await session.flush()
+    session.add(
+        OrganizationMembership(
+            user_id=user.id,
+            organization_id=personal.id,
+            role=OrgRole.ADMIN,
+            created_at=now,
+        )
+    )
+    user.default_organization_id = personal.id
+    session.add(user)
+    await session.flush()
+    return personal
 
     async def model_allowed_for_user(
         self, model_name: str, user_id: int, api_key: Optional[ApiKey]

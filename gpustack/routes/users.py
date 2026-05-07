@@ -33,7 +33,7 @@ from gpustack.schemas.users import (
     UsersPublic,
     UserSelfUpdate,
 )
-from gpustack.server.services import UserService
+from gpustack.server.services import UserService, provision_personal_org
 
 router = APIRouter()
 
@@ -127,30 +127,13 @@ async def create_user(session: SessionDep, user_in: UserCreate):
             to_create.hashed_password = get_secret_hash(user_in.password)
         user = await User.create(session, to_create)
 
-        # Build a Personal Org as the user's default namespace, à la
-        # GitHub's per-user account. Admin additionally joins the Default
-        # Org as ADMIN (so they can manage the global workspace);
-        # regular users do NOT auto-join Default — admin can add them
-        # later if shared workspace access is needed.
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        personal = Organization(
-            name="Personal",
-            slug=f"user-{user.id}",
-            description="Personal namespace",
-            is_personal=True,
-            is_platform=False,
-        )
-        session.add(personal)
-        await session.flush()
-        session.add(
-            OrganizationMembership(
-                user_id=user.id,
-                organization_id=personal.id,
-                role=OrgRole.ADMIN,
-                created_at=now,
-            )
-        )
+        # Provision the user's Personal Org. Admin additionally joins
+        # the Default Org as ADMIN (so they can manage the global
+        # workspace); regular users do NOT auto-join Default — admin
+        # can add them later if shared workspace access is needed.
+        await provision_personal_org(session, user)
         if user.is_admin:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             session.add(
                 OrganizationMembership(
                     user_id=user.id,
@@ -159,9 +142,6 @@ async def create_user(session: SessionDep, user_in: UserCreate):
                     created_at=now,
                 )
             )
-
-        user.default_organization_id = personal.id
-        session.add(user)
 
         await session.commit()
         await session.refresh(user)

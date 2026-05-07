@@ -28,6 +28,7 @@ from gpustack.api.auth import (
     authenticate_user,
 )
 from gpustack.server.deps import CurrentUserDep, SessionDep
+from gpustack.server.services import provision_personal_org
 from onelogin.saml2.auth import OneLogin_Saml2_Auth
 from fastapi.responses import RedirectResponse
 from lxml import etree
@@ -272,7 +273,15 @@ async def saml_callback(request: Request, session: SessionDep):
                 source=AuthProviderEnum.SAML,
                 require_password_change=False,
             )
-            await User.create(session, user_info)
+            user = await User.create(session, user_info)
+            await provision_personal_org(session, user)
+            await session.commit()
+        elif user.default_organization_id is None:
+            # Backfill for SSO users created before Personal Org
+            # provisioning was wired in. Idempotent: only fires when the
+            # user has no default Org.
+            await provision_personal_org(session, user)
+            await session.commit()
         jwt_manager: JWTManager = request.app.state.jwt_manager
         access_token = jwt_manager.create_jwt_token(
             username=username,
@@ -431,7 +440,15 @@ async def oidc_callback(request: Request, session: SessionDep):
             source=AuthProviderEnum.OIDC,
             require_password_change=False,
         )
-        await User.create(session, user_info)
+        user = await User.create(session, user_info)
+        await provision_personal_org(session, user)
+        await session.commit()
+    elif user.default_organization_id is None:
+        # Backfill for SSO users created before Personal Org
+        # provisioning was wired in. Idempotent: only fires when the
+        # user has no default Org.
+        await provision_personal_org(session, user)
+        await session.commit()
     jwt_manager: JWTManager = request.app.state.jwt_manager
     access_token = jwt_manager.create_jwt_token(
         username=username,
