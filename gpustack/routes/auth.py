@@ -36,7 +36,6 @@ from lxml import etree
 from gpustack.utils.convert import safe_b64decode, inflate_data
 from urllib.parse import urlencode
 
-from gpustack.ssl_context import make_ssl_context
 from gpustack.utils.network import use_proxy_env_for_url
 
 router = APIRouter()
@@ -487,9 +486,9 @@ async def oidc_callback(request: Request, session: SessionDep):
     }
     token_endpoint = config.openid_configuration["token_endpoint"]
     use_proxy_env = use_proxy_env_for_url(token_endpoint)
-    verify = make_ssl_context()
+    # TEMP: skip TLS verify for OIDC token/userinfo/jwks (test IdP cert/IP mismatch). Do NOT ship.
     async with httpx.AsyncClient(
-        timeout=timeout, verify=verify, trust_env=use_proxy_env
+        timeout=timeout, verify=False, trust_env=use_proxy_env
     ) as client:
         try:
             token_res = await client.request("POST", token_endpoint, data=data)

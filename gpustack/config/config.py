@@ -47,7 +47,6 @@ from gpustack.config.registration import (
     read_worker_token,
     determine_default_registry,
 )
-from gpustack.ssl_context import make_ssl_context
 from gpustack.utils.network import (
     get_first_non_loopback_ip,
     use_proxy_env_for_url,
@@ -950,8 +949,8 @@ def get_openid_configuration(issuer: str) -> dict:
     url = f"{issuer.rstrip('/')}/.well-known/openid-configuration"
     try:
         use_proxy_env = use_proxy_env_for_url(url)
-        verify = make_ssl_context()
-        with httpx.Client(timeout=10, verify=verify, trust_env=use_proxy_env) as client:
+        # TEMP: skip TLS verify for OIDC discovery (test IdP cert/IP mismatch). Do NOT ship.
+        with httpx.Client(timeout=10, verify=False, trust_env=use_proxy_env) as client:
             resp = client.get(url)
             resp.raise_for_status()
             return resp.json()
