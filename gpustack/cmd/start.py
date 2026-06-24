@@ -400,6 +400,26 @@ def start_cmd_options(parser_server: argparse.ArgumentParser):
         default=get_gpustack_env_bool("OIDC_USE_USERINFO"),
     )
 
+    # CAS settings
+    server_group.add_argument(
+        "--cas-server-url",
+        type=str,
+        help="CAS server base URL, e.g. https://cas.example.com/cas. Enables CAS single sign-on when set.",
+        default=get_gpustack_env("CAS_SERVER_URL"),
+    )
+    server_group.add_argument(
+        "--cas-callback-url",
+        type=str,
+        help="The service URL CAS redirects to after authentication. Defaults to `<server-url>/auth/cas/callback`; set it explicitly when behind a reverse proxy.",
+        default=get_gpustack_env("CAS_CALLBACK_URL"),
+    )
+    server_group.add_argument(
+        "--cas-validate-endpoint",
+        type=str,
+        help="CAS ticket validation endpoint path. `/serviceValidate` for CAS 2.0 (default), `/p3/serviceValidate` for CAS 3.0.",
+        default=get_gpustack_env("CAS_VALIDATE_ENDPOINT"),
+    )
+
     # SAML settings
     server_group.add_argument(
         "--saml-idp-server-url",
@@ -808,6 +828,9 @@ def set_server_options(args, config_data: dict):
         "saml_sp_private_key",
         "saml_sp_attribute_prefix",
         "saml_security",
+        "cas_server_url",
+        "cas_callback_url",
+        "cas_validate_endpoint",
         "server_external_url",
         "gateway_concurrency",
         "gateway_plugin_server_url",

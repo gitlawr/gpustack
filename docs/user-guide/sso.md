@@ -184,3 +184,65 @@ sudo docker run -d --name gpustack \
 !!! note
 
     Not all IdPs provide standard SAML Single Logout (SLO). Auth0 SAML connections commonly do not expose `singleLogoutService`. If unavailable, GPUStack will still clear local sessions on logout; for full browser sign-out with Auth0, consider using its OIDC `v2/logout` with `client_id` and `returnTo` allowed.
+
+## CAS
+
+GPUStack supports CAS (Central Authentication Service) authentication for Single Sign-On (SSO). This allows users to log in through a centralized CAS server. The CAS service URL must be `<server-url>/auth/cas/callback`.
+
+If your CAS server uses a certificate issued by a private or corporate CA, see [Additional Trusted CAs](../installation/installation.md#additional-trusted-cas) for how to mount CA certificates into the GPUStack container.
+
+The following CLI flags are available for CAS configuration:
+
+| <div style="width:180px">Flag</div>                   | Description                                                                                                                                                                                                              |
+|-------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--cas-server-url`                                    | CAS server base URL, e.g. `https://cas.example.com/cas`. CAS single sign-on is enabled when this is set.                                                                                                                |
+| `--cas-callback-url` (Optional)                       | The service URL CAS redirects to after authentication. Defaults to `<server-url>/auth/cas/callback`; set it explicitly when behind a reverse proxy.                                                                     |
+| `--cas-validate-endpoint` (Optional)                  | CAS ticket validation endpoint path. `/serviceValidate` for CAS 2.0 (default), `/p3/serviceValidate` for CAS 3.0.                                                                                                       |
+| `--external-auth-name` (Optional)                     | CAS attribute mapped to username. By default, the `<cas:user>` element is used.                                                                                                                                          |
+| `--external-auth-full-name` (Optional)                | CAS attribute mapped to the user's full name. Multiple elements can be combined, e.g. `firstName+lastName`. By default, the `displayName` (then `name`) attribute is used if available.                                 |
+| `--external-auth-avatar-url` (Optional)               | CAS attribute mapped to the user's avatar URL. By default, the `avatar` attribute is used if available.                                                                                                                  |
+| `--external-auth-default-inactive` (Optional)         | Prevents new CAS users from being activated by default.                                                                                                                                                                  |
+
+Group synchronization is configured via environment variables:
+
+| Environment variable                                  | Description                                                                                                                   |
+|-------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| `GPUSTACK_EXTERNAL_AUTH_GROUPS` (Optional)            | CAS attribute that carries the user's group list. Required for group synchronization.                                         |
+| `GPUSTACK_EXTERNAL_AUTH_GROUP_SYNC` (Optional)        | Set to `true` to reconcile the user's group memberships from the CAS attribute on every login (`source=CAS` memberships only). |
+
+You can also set the CAS options via environment variables instead of CLI flags:
+
+```bash
+GPUSTACK_CAS_SERVER_URL="https://cas.example.com/cas"
+GPUSTACK_CAS_CALLBACK_URL="{your-server-url}/auth/cas/callback"
+GPUSTACK_CAS_VALIDATE_ENDPOINT="/serviceValidate"  # or /p3/serviceValidate for CAS 3.0
+# Optional attribute mapping
+GPUSTACK_EXTERNAL_AUTH_NAME="uid"
+GPUSTACK_EXTERNAL_AUTH_FULL_NAME="displayName"
+GPUSTACK_EXTERNAL_AUTH_AVATAR_URL="avatar"
+GPUSTACK_EXTERNAL_AUTH_DEFAULT_INACTIVE="true"
+# Optional group synchronization
+GPUSTACK_EXTERNAL_AUTH_GROUPS="group"
+GPUSTACK_EXTERNAL_AUTH_GROUP_SYNC="true"
+```
+
+Then, run GPUStack with relevant CAS configuration. The following example uses Docker with CUDA:
+
+```bash
+sudo docker run -d --name gpustack \
+    --restart=unless-stopped \
+    --privileged \
+    --network=host \
+    --volume /var/run/docker.sock:/var/run/docker.sock \
+    --volume gpustack-data:/var/lib/gpustack \
+    --volume /path/to/custom-root-ca.crt:/usr/local/share/ca-certificates/custom-root-ca.crt:ro \
+    --runtime nvidia \
+    -e GPUSTACK_CAS_SERVER_URL="https://cas.example.com/cas" \
+    -e GPUSTACK_CAS_CALLBACK_URL="<your-server-url>/auth/cas/callback" \
+    -e GPUSTACK_CAS_VALIDATE_ENDPOINT="/serviceValidate" \
+    gpustack/gpustack
+```
+
+!!! note
+
+    In your CAS server, register the service URL `<server-url>/auth/cas/callback` and ensure it releases the attributes you map with `--external-auth-*`. GPUStack supports CAS protocol versions 2.0 and 3.0 via the standard `/serviceValidate` (or `/p3/serviceValidate`) ticket validation endpoint.

@@ -210,6 +210,22 @@ class Config(WorkerConfig, BaseSettings):
     saml_sp_slo_url: Optional[str] = None
     saml_idp_x509_cert: Optional[str] = ''  # saml idp_x509_cert
     saml_security: Optional[str] = '{}'  # saml security
+    # CAS (Central Authentication Service) protocol settings. Attribute
+    # and group mapping reuses the generic ``external_auth_name`` /
+    # ``external_auth_full_name`` / ``external_auth_avatar_url`` /
+    # ``external_auth_groups`` fields shared with OIDC/SAML (only one
+    # external provider is active at a time); these are the CAS-specific
+    # endpoints. ``cas_validate_endpoint`` selects the protocol version
+    # (``/serviceValidate`` for CAS 2.0, ``/p3/serviceValidate`` for 3.0).
+    cas_server_url: Optional[str] = (
+        None  # cas server base URL, e.g. https://cas.example.com/cas
+    )
+    cas_callback_url: Optional[str] = (
+        None  # cas service/callback URL (derived if unset)
+    )
+    cas_validate_endpoint: Optional[str] = (
+        "/serviceValidate"  # cas ticket validation path
+    )
     server_external_url: Optional[str] = None
     # custom post-logout redirection key for compatibility with different IdPs.
     external_auth_post_logout_redirect_key: Optional[str] = None
@@ -676,6 +692,8 @@ class Config(WorkerConfig, BaseSettings):
             self.openid_configuration = get_openid_configuration(self.oidc_issuer)
         elif self.saml_idp_server_url:
             self.external_auth_type = AuthProviderEnum.SAML
+        elif self.cas_server_url:
+            self.external_auth_type = AuthProviderEnum.CAS
 
     @staticmethod
     def get_data_dir():
