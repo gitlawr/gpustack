@@ -183,11 +183,16 @@ class ModelController:
 
             await self._reconcile(event)
 
-    async def _ensure_model_mcp_bridge(
+    async def _collect_model_mcp_bridge_args(
         self, session: AsyncSession, event_type: EventType, model: Model
-    ):
+    ) -> Optional[dict]:
+        """Read DB inputs for ``ensure_model_mcp_bridge`` and return them as a
+        kwargs dict the caller can use to invoke the HTTP path outside this
+        session. Returns ``None`` when the gateway is disabled so the caller
+        can skip the call entirely.
+        """
         if self._disable_gateway:
-            return
+            return None
         model_instances = await ModelInstance.all_by_fields(
             session,
             fields={"model_id": model.id, "deleted_at": None},
@@ -209,7 +214,7 @@ class ModelController:
             lora_route_name_for(model.name, entry.lora_name)
             for entry in normalized_lora_list(model)
         ]
-        await mcp_handler.ensure_model_mcp_bridge(
+        return dict(
             event_type=event_type,
             model_id=model.id,
             model_instances=model_instances,
@@ -232,7 +237,16 @@ class ModelController:
                     session=session, model=model, event=event
                 )
                 await sync_categories_and_meta(session, model, event)
-                await self._ensure_model_mcp_bridge(session, event.type, model)
+                # Collect inputs here so we can release the session before
+                # the Higress HTTP call below: holding it across that call
+                # would park the connection "idle in transaction" for the
+                # full Higress latency, and a hung Higress would never let
+                # the slot return.
+                mcp_args = await self._collect_model_mcp_bridge_args(
+                    session, event.type, model
+                )
+            if mcp_args is not None:
+                await mcp_handler.ensure_model_mcp_bridge(**mcp_args)
         except Exception as e:
             logger.error(f"Failed to reconcile model {model.name}: {e}")
 
@@ -2869,17 +2883,20 @@ class ModelProviderController:
                 provider_config_list, match_rules = (
                     mcp_handler.provider_proxy_plugin_spec(*providers)
                 )
-                await mcp_handler.ensure_wasm_plugin(
-                    api=self._higress_extension_api,
-                    name=mcp_handler.gpustack_ai_proxy_name,
-                    namespace=self._config.gateway_namespace,
-                    spec_diff=partial(
-                        mcp_handler.ai_proxy_diff_spec,
-                        expected_providers=provider_config_list,
-                        expected_match_rules=match_rules,
-                        operating_id_prefix=mcp_handler.provider_id_prefix,
-                    ),
-                )
+            # Drop the session before the Higress wasm-plugin call: a slow
+            # or hung gateway would otherwise pin the connection "idle in
+            # transaction" until either timeout fires.
+            await mcp_handler.ensure_wasm_plugin(
+                api=self._higress_extension_api,
+                name=mcp_handler.gpustack_ai_proxy_name,
+                namespace=self._config.gateway_namespace,
+                spec_diff=partial(
+                    mcp_handler.ai_proxy_diff_spec,
+                    expected_providers=provider_config_list,
+                    expected_match_rules=match_rules,
+                    operating_id_prefix=mcp_handler.provider_id_prefix,
+                ),
+            )
         except Exception as e:
             logger.error(f"Failed to ensure provider's ai_proxy config: {e}")
             raise
