@@ -7,6 +7,15 @@ DB_ECHO = os.getenv("GPUSTACK_DB_ECHO", "false").lower() == "true"
 DB_POOL_SIZE = int(os.getenv("GPUSTACK_DB_POOL_SIZE", 30))
 DB_MAX_OVERFLOW = int(os.getenv("GPUSTACK_DB_MAX_OVERFLOW", 20))
 DB_POOL_TIMEOUT = int(os.getenv("GPUSTACK_DB_POOL_TIMEOUT", 30))
+# Server-side ceiling on how long a PG/openGauss session may sit in the
+# "idle in transaction" state before the database terminates it. Without
+# this, a session held across a slow/hung external HTTP call (or one
+# orphaned by a cancellation race on async ``__aexit__``) keeps its pool
+# slot until the process exits — eventually wedging the pool at max.
+# 0 disables (matches PG default). The value is in seconds.
+DB_IDLE_IN_TRANSACTION_TIMEOUT = int(
+    os.getenv("GPUSTACK_DB_IDLE_IN_TRANSACTION_TIMEOUT", 60)
+)
 
 # Proxy configuration
 PROXY_TIMEOUT = int(os.getenv("GPUSTACK_PROXY_TIMEOUT_SECONDS", 1800))
