@@ -161,6 +161,33 @@ from gpustack.schemas.model_provider import (
 logger = logging.getLogger(__name__)
 
 
+async def _run_bounded(coro, *, label: str):
+    """Run ``coro`` under ``envs.RECONCILE_TIMEOUT`` so a hung external call
+    (K8s CRD, cloud-provider API) can't pin a DB session beyond the bound.
+
+    On timeout, the timeout context cancels the coroutine; the inner
+    ``async with async_session()`` exits via cancellation, returning the
+    pool slot. If cancellation races with ``__aexit__``'s rollback the
+    connection may be left ``idle in transaction``, but the server-side
+    ``idle_in_transaction_session_timeout`` then terminates it and the
+    next checkout opens a fresh one.
+
+    Treat ``timeout <= 0`` as opt-out.
+    """
+    timeout = envs.RECONCILE_TIMEOUT
+    if timeout <= 0:
+        await coro
+        return
+    try:
+        await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Reconcile timed out after %ds: %s. Retrying on next event.",
+            timeout,
+            label,
+        )
+
+
 class ModelController:
     def __init__(self, cfg: Config):
         self._config = cfg
@@ -1314,7 +1341,15 @@ class WorkerController:
                 continue
             try:
                 await self._reconcile(event)
-                await self._provisioning._reconcile(event)
+                # Provisioning interleaves DB session with cloud-provider
+                # API calls (create SSH key, create instance, wait for IP,
+                # attach volumes) — bound the whole call so a stuck cloud
+                # API can't pin a connection beyond the timeout.
+                worker_label = f"worker {event.data.name}" if event.data else "worker"
+                await _run_bounded(
+                    self._provisioning._reconcile(event),
+                    label=f"{worker_label} (provisioning)",
+                )
                 await self._notify_relatives(event)
             except Exception as e:
                 logger.error(f"Failed to reconcile worker: {e}")
@@ -3278,7 +3313,10 @@ class GPUInstanceController:
                     # Most startup CREATED events are filtered above, so this
                     # rarely blocks the subscribe loop in practice.
                     try:
-                        await self._reconcile_created(instance)
+                        await _run_bounded(
+                            self._reconcile_created(instance),
+                            label=f"GPU instance {instance.id} (create)",
+                        )
                     except Exception:
                         logger.exception(
                             f"Failed to reconcile GPU instance {instance.id}"
@@ -3339,7 +3377,10 @@ class GPUInstanceController:
                 if event is None:
                     return
                 try:
-                    await self._reconcile(event)
+                    await _run_bounded(
+                        self._reconcile(event),
+                        label=f"GPU instance {iid}",
+                    )
                 except Exception:
                     logger.exception(f"Failed to reconcile GPU instance {iid}")
         finally:

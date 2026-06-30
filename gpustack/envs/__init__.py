@@ -17,6 +17,16 @@ DB_IDLE_IN_TRANSACTION_TIMEOUT = int(
     os.getenv("GPUSTACK_DB_IDLE_IN_TRANSACTION_TIMEOUT", 60)
 )
 
+# Wall-clock ceiling on a single ``_reconcile`` invocation in controllers
+# whose reconcile interleaves DB session with external HTTP (K8s CRD,
+# cloud-provider APIs). A hung external endpoint would otherwise hold a
+# DB session for the lifetime of the hang; bounding the call lets the
+# session exit, return to the pool, and the controller move on. 0
+# disables the bound. The complement to DB_IDLE_IN_TRANSACTION_TIMEOUT:
+# this caps how long we *intend* to hold the session, that one caps how
+# long we end up *actually* holding it under cancellation races.
+RECONCILE_TIMEOUT = int(os.getenv("GPUSTACK_RECONCILE_TIMEOUT", 120))
+
 # Proxy configuration
 PROXY_TIMEOUT = int(os.getenv("GPUSTACK_PROXY_TIMEOUT_SECONDS", 1800))
 PROXY_UPSTREAM_IDLE_TIMEOUT = int(
