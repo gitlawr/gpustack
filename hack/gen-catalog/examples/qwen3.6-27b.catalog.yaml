@@ -1,0 +1,252 @@
+model_sets:
+- name: Qwen3.6-27B
+  description: Qwen3.6 dense multimodal model (27B) with gated delta networks hybrid attention, MTP, and
+    262K context
+  categories:
+  - llm
+  specs:
+  - name: Qwen3.6-27B
+    backend: vLLM
+    backend_version: 0.17.0
+    source: huggingface
+    huggingface_repo_id: Qwen/Qwen3.6-27B
+    quantization: BF16
+    mode: standard
+    backend_parameters:
+    - --trust-remote-code
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_xml
+    - --reasoning-parser=qwen3
+    provenance:
+      source: vllm-recipes
+      source_url: https://github.com/vllm-project/recipes/blob/main/models/Qwen/Qwen3.6-27B.yaml
+      distilled: true
+  - name: Qwen3.6-27B
+    backend: vLLM
+    backend_version: 0.17.0
+    source: huggingface
+    huggingface_repo_id: Qwen/Qwen3.6-27B-FP8
+    quantization: FP8
+    mode: standard
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=8.9'
+    backend_parameters:
+    - --trust-remote-code
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_xml
+    - --reasoning-parser=qwen3
+    - --max-num-seqs=512
+    provenance:
+      source: vllm-recipes
+      source_url: https://github.com/vllm-project/recipes/blob/main/models/Qwen/Qwen3.6-27B.yaml
+      distilled: true
+  - name: Qwen3.6-27B
+    backend: vLLM
+    backend_version: 0.17.0
+    source: huggingface
+    huggingface_repo_id: nvidia/Qwen3.6-27B-NVFP4
+    quantization: NVFP4
+    mode: standard
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=10.0'
+    backend_parameters:
+    - --trust-remote-code
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_xml
+    - --reasoning-parser=qwen3
+    provenance:
+      source: vllm-recipes
+      source_url: https://github.com/vllm-project/recipes/blob/main/models/Qwen/Qwen3.6-27B.yaml
+      distilled: true
+  - name: Qwen3.6-27B
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: Qwen/Qwen3.6-27B-FP8
+    quantization: FP8
+    mode: latency
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=8.9'
+    backend_parameters:
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=3
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=4
+    - --mem-fraction-static=0.8
+    - --reasoning-parser=qwen3
+    - --tool-call-parser=qwen3_coder
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/Qwen/Qwen3.6.jsx
+      distilled: true
+  - name: Qwen3.6-27B
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: Qwen/Qwen3.6-27B-FP8
+    quantization: FP8
+    mode: throughput
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=8.9'
+    backend_parameters:
+    - --mamba-radix-cache-strategy=extra_buffer
+    - --mem-fraction-static=0.85
+    - --reasoning-parser=qwen3
+    - --tool-call-parser=qwen3_coder
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/Qwen/Qwen3.6.jsx
+      distilled: true
+  - name: Qwen3.6-27B
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: Qwen/Qwen3.6-27B
+    quantization: BF16
+    mode: latency
+    gpu_filters:
+      vendor: nvidia
+    backend_parameters:
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=3
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=4
+    - --mem-fraction-static=0.8
+    - --reasoning-parser=qwen3
+    - --tool-call-parser=qwen3_coder
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/Qwen/Qwen3.6.jsx
+      distilled: true
+  - name: Qwen3.6-27B
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: Qwen/Qwen3.6-27B
+    quantization: BF16
+    mode: throughput
+    gpu_filters:
+      vendor: nvidia
+    backend_parameters:
+    - --mamba-radix-cache-strategy=extra_buffer
+    - --mem-fraction-static=0.85
+    - --reasoning-parser=qwen3
+    - --tool-call-parser=qwen3_coder
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/Qwen/Qwen3.6.jsx
+      distilled: true
+  - name: Qwen3.6-27B
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: nvidia/Qwen3.6-27B-NVFP4
+    quantization: NVFP4
+    mode: latency
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=10.0'
+    backend_parameters:
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=3
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=4
+    - --mem-fraction-static=0.8
+    - --attention-backend=trtllm_mha
+    - --reasoning-parser=qwen3
+    - --tool-call-parser=qwen3_coder
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/Qwen/Qwen3.6.jsx
+      distilled: true
+  - name: Qwen3.6-27B
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: nvidia/Qwen3.6-27B-NVFP4
+    quantization: NVFP4
+    mode: throughput
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=10.0'
+    backend_parameters:
+    - --mamba-radix-cache-strategy=extra_buffer
+    - --mem-fraction-static=0.85
+    - --attention-backend=trtllm_mha
+    - --reasoning-parser=qwen3
+    - --tool-call-parser=qwen3_coder
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/Qwen/Qwen3.6.jsx
+      distilled: true
+  feature_tiles:
+  - id: spec_decoding
+    label: spec_decoding
+    description: Multi-token prediction speculative decoding for lower latency
+    backends:
+    - vLLM
+    flags:
+    - --speculative-config={"method":"mtp","num_speculative_tokens":3}
+    default_on: false
+  - id: text_only
+    label: text_only
+    description: Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually
+      exclusive with encoder_parallel.
+    backends:
+    - vLLM
+    flags:
+    - --language-model-only
+    default_on: false
+  - id: encoder_parallel
+    label: encoder_parallel
+    description: Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder.
+      Mutually exclusive with text_only.
+    backends:
+    - vLLM
+    flags:
+    - --mm-encoder-tp-mode=data
+    default_on: true
+  - id: eagle-314
+    label: EAGLE / MTP 3-1-4
+    description: Speculative decoding for lower latency
+    backends:
+    - SGLang
+    flags:
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=3
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=4
+    default_on: false
+  - id: v2
+    label: Mamba Radix Cache V2
+    description: Higher throughput (extra buffer, needs FLA kernel)
+    backends:
+    - SGLang
+    flags:
+    - --mamba-radix-cache-strategy=extra_buffer
+    default_on: false
+  - id: fa3
+    label: Vision FA3
+    description: Multimodal attention on Hopper
+    backends:
+    - SGLang
+    flags:
+    - --mm-attention-backend=fa3
+    default_on: false
+    disable_by_hw:
+    - hw:
+      - b200
+      - b300
+      reason: FA3 vision path is Hopper-only; use FA4 on Blackwell.
+  - id: fa4
+    label: Vision FA4
+    description: Multimodal attention on Blackwell
+    backends:
+    - SGLang
+    flags:
+    - --mm-attention-backend=fa4
+    default_on: false
+    disable_by_hw:
+    - hw:
+      - h100
+      - h200
+      reason: FA4 vision path is Blackwell-only; use FA3 on Hopper.
+

@@ -1,0 +1,461 @@
+{
+ "_note": "RECONSTRUCTED from docs.sglang.io cookbook page for prototype; not the raw jsx.",
+ "modelName": "Qwen3.6-27B",
+ "modelNames": {
+  "default|fp8": "Qwen/Qwen3.6-27B-FP8",
+  "default|bf16": "Qwen/Qwen3.6-27B",
+  "default|nvfp4": "nvidia/Qwen3.6-27B-NVFP4"
+ },
+ "dockerImages": {
+  "h200": "lmsysorg/sglang:latest",
+  "h100": "lmsysorg/sglang:latest",
+  "b200": "lmsysorg/sglang:latest",
+  "b300": "lmsysorg/sglang:latest"
+ },
+ "github": {
+  "cookbookModel": "Qwen/Qwen3.6"
+ },
+ "playgroundFeatures": {
+  "parsers": {
+   "items": [
+    {
+     "id": "reasoning",
+     "flag": "--reasoning-parser qwen3"
+    },
+    {
+     "id": "toolCall",
+     "flag": "--tool-call-parser qwen3_coder"
+    }
+   ]
+  },
+  "speculative": {
+   "options": [
+    {
+     "id": "eagle-314",
+     "label": "EAGLE / MTP 3-1-4",
+     "description": "Speculative decoding for lower latency",
+     "flags": [
+      "--speculative-algorithm EAGLE",
+      "--speculative-num-steps 3",
+      "--speculative-eagle-topk 1",
+      "--speculative-num-draft-tokens 4"
+     ]
+    }
+   ]
+  },
+  "mambaCache": {
+   "options": [
+    {
+     "id": "v2",
+     "label": "Mamba Radix Cache V2",
+     "description": "Higher throughput (extra buffer, needs FLA kernel)",
+     "flags": [
+      "--mamba-radix-cache-strategy extra_buffer"
+     ]
+    }
+   ]
+  },
+  "vision": {
+   "options": [
+    {
+     "id": "fa3",
+     "label": "Vision FA3",
+     "description": "Multimodal attention on Hopper",
+     "flags": [
+      "--mm-attention-backend fa3"
+     ],
+     "disable": {
+      "hw": [
+       "b200",
+       "b300"
+      ],
+      "reason": "FA3 vision path is Hopper-only; use FA4 on Blackwell."
+     }
+    },
+    {
+     "id": "fa4",
+     "label": "Vision FA4",
+     "description": "Multimodal attention on Blackwell",
+     "flags": [
+      "--mm-attention-backend fa4"
+     ],
+     "disable": {
+      "hw": [
+       "h100",
+       "h200"
+      ],
+      "reason": "FA4 vision path is Blackwell-only; use FA3 on Hopper."
+     }
+    }
+   ]
+  }
+ },
+ "cells": [
+  {
+   "match": {
+    "hw": "h200",
+    "variant": "default",
+    "quant": "fp8",
+    "strategy": "low-latency",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--speculative-algorithm EAGLE",
+    "--speculative-num-steps 3",
+    "--speculative-eagle-topk 1",
+    "--speculative-num-draft-tokens 4",
+    "--mem-fraction-static 0.8",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h200",
+    "variant": "default",
+    "quant": "fp8",
+    "strategy": "balanced",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mem-fraction-static 0.8",
+    "--page-size 64",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h200",
+    "variant": "default",
+    "quant": "fp8",
+    "strategy": "high-throughput",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mamba-radix-cache-strategy extra_buffer",
+    "--mem-fraction-static 0.85",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h100",
+    "variant": "default",
+    "quant": "fp8",
+    "strategy": "low-latency",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--speculative-algorithm EAGLE",
+    "--speculative-num-steps 3",
+    "--speculative-eagle-topk 1",
+    "--speculative-num-draft-tokens 4",
+    "--mem-fraction-static 0.8",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h100",
+    "variant": "default",
+    "quant": "fp8",
+    "strategy": "balanced",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mem-fraction-static 0.8",
+    "--page-size 64",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h100",
+    "variant": "default",
+    "quant": "fp8",
+    "strategy": "high-throughput",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mamba-radix-cache-strategy extra_buffer",
+    "--mem-fraction-static 0.85",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h200",
+    "variant": "default",
+    "quant": "bf16",
+    "strategy": "low-latency",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--speculative-algorithm EAGLE",
+    "--speculative-num-steps 3",
+    "--speculative-eagle-topk 1",
+    "--speculative-num-draft-tokens 4",
+    "--mem-fraction-static 0.8",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h200",
+    "variant": "default",
+    "quant": "bf16",
+    "strategy": "balanced",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mem-fraction-static 0.8",
+    "--page-size 64",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h200",
+    "variant": "default",
+    "quant": "bf16",
+    "strategy": "high-throughput",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mamba-radix-cache-strategy extra_buffer",
+    "--mem-fraction-static 0.85",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h100",
+    "variant": "default",
+    "quant": "bf16",
+    "strategy": "low-latency",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--speculative-algorithm EAGLE",
+    "--speculative-num-steps 3",
+    "--speculative-eagle-topk 1",
+    "--speculative-num-draft-tokens 4",
+    "--mem-fraction-static 0.8",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h100",
+    "variant": "default",
+    "quant": "bf16",
+    "strategy": "balanced",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mem-fraction-static 0.8",
+    "--page-size 64",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "h100",
+    "variant": "default",
+    "quant": "bf16",
+    "strategy": "high-throughput",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mamba-radix-cache-strategy extra_buffer",
+    "--mem-fraction-static 0.85",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "b200",
+    "variant": "default",
+    "quant": "nvfp4",
+    "strategy": "low-latency",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--speculative-algorithm EAGLE",
+    "--speculative-num-steps 3",
+    "--speculative-eagle-topk 1",
+    "--speculative-num-draft-tokens 4",
+    "--mem-fraction-static 0.8",
+    "--attention-backend trtllm_mha",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "b200",
+    "variant": "default",
+    "quant": "nvfp4",
+    "strategy": "balanced",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mem-fraction-static 0.8",
+    "--page-size 64",
+    "--attention-backend trtllm_mha",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "b200",
+    "variant": "default",
+    "quant": "nvfp4",
+    "strategy": "high-throughput",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mamba-radix-cache-strategy extra_buffer",
+    "--mem-fraction-static 0.85",
+    "--attention-backend trtllm_mha",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "b300",
+    "variant": "default",
+    "quant": "nvfp4",
+    "strategy": "low-latency",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--speculative-algorithm EAGLE",
+    "--speculative-num-steps 3",
+    "--speculative-eagle-topk 1",
+    "--speculative-num-draft-tokens 4",
+    "--mem-fraction-static 0.8",
+    "--attention-backend trtllm_mha",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "b300",
+    "variant": "default",
+    "quant": "nvfp4",
+    "strategy": "balanced",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mem-fraction-static 0.8",
+    "--page-size 64",
+    "--attention-backend trtllm_mha",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  },
+  {
+   "match": {
+    "hw": "b300",
+    "variant": "default",
+    "quant": "nvfp4",
+    "strategy": "high-throughput",
+    "nodes": "single"
+   },
+   "verified": true,
+   "env": [],
+   "flags": [
+    "--model-path {{MODEL_NAME}}",
+    "--tp 1",
+    "--mamba-radix-cache-strategy extra_buffer",
+    "--mem-fraction-static 0.85",
+    "--attention-backend trtllm_mha",
+    "--host {{HOST_IP}}",
+    "--port {{PORT}}"
+   ]
+  }
+ ]
+}

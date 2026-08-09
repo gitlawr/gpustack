@@ -1,0 +1,335 @@
+model_sets:
+- name: GLM-5.2
+  description: GLM-5.2 — frontier-scale MoE language model (~743B total parameters, 39B active) with up
+    to 5-token MTP speculative decoding and thinking mode
+  categories:
+  - llm
+  specs:
+  - name: GLM-5.2
+    backend: vLLM
+    backend_version: 0.23.0
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2-FP8
+    quantization: FP8
+    mode: standard
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=8.9'
+    backend_parameters:
+    - --kv-cache-dtype=fp8_e4m3
+    - --tool-call-parser=glm47
+    - --enable-auto-tool-choice
+    - --reasoning-parser=glm45
+    provenance:
+      source: vllm-recipes
+      source_url: https://github.com/vllm-project/recipes/blob/main/models/zai-org/GLM-5.2.yaml
+      distilled: true
+  - name: GLM-5.2
+    backend: vLLM
+    backend_version: 0.23.0
+    source: huggingface
+    huggingface_repo_id: amd/GLM-5.2-MXFP4
+    quantization: MXFP4
+    mode: standard
+    gpu_filters:
+      vendor: amd
+      vendor_variant: gfx950
+    backend_parameters:
+    - --kv-cache-dtype=fp8_e4m3
+    - --tool-call-parser=glm47
+    - --enable-auto-tool-choice
+    - --reasoning-parser=glm45
+    provenance:
+      source: vllm-recipes
+      source_url: https://github.com/vllm-project/recipes/blob/main/models/zai-org/GLM-5.2.yaml
+      distilled: true
+  - name: GLM-5.2
+    backend: vLLM
+    backend_version: 0.23.0
+    source: huggingface
+    huggingface_repo_id: nvidia/GLM-5.2-NVFP4
+    quantization: NVFP4
+    mode: standard
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=10.0'
+    backend_parameters:
+    - --kv-cache-dtype=fp8_e4m3
+    - --tool-call-parser=glm47
+    - --enable-auto-tool-choice
+    - --reasoning-parser=glm45
+    provenance:
+      source: vllm-recipes
+      source_url: https://github.com/vllm-project/recipes/blob/main/models/zai-org/GLM-5.2.yaml
+      distilled: true
+  - name: GLM-5.2
+    backend: vLLM
+    backend_version: 0.23.0
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2
+    quantization: BF16
+    mode: standard
+    backend_parameters:
+    - --kv-cache-dtype=fp8_e4m3
+    - --tool-call-parser=glm47
+    - --enable-auto-tool-choice
+    - --reasoning-parser=glm45
+    provenance:
+      source: vllm-recipes
+      source_url: https://github.com/vllm-project/recipes/blob/main/models/zai-org/GLM-5.2.yaml
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2-FP8
+    quantization: FP8
+    mode: latency
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=8.9'
+    backend_parameters:
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=5
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=6
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2-FP8
+    quantization: FP8
+    mode: throughput
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=9.0'
+    backend_parameters:
+    - --enable-dp-attention
+    - --moe-a2a-backend=deepep
+    - --mem-fraction-static=0.85
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2
+    quantization: BF16
+    mode: latency
+    gpu_filters:
+      vendor: nvidia
+    backend_parameters:
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=5
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=6
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2
+    quantization: BF16
+    mode: throughput
+    backend_parameters:
+    - --max-running-requests=256
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: nvidia/GLM-5.2-NVFP4
+    quantization: NVFP4
+    mode: latency
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=10.0'
+    backend_parameters:
+    - --quantization=modelopt_fp4
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=5
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=6
+    - --chunked-prefill-size=8192
+    - --mem-fraction-static=0.85
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: nvidia/GLM-5.2-NVFP4
+    quantization: NVFP4
+    mode: throughput
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=10.0'
+    backend_parameters:
+    - --quantization=modelopt_fp4
+    - --enable-dp-attention
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2-FP8
+    quantization: FP8
+    mode: latency
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=8.9'
+    backend_parameters:
+    - --dsa-prefill-backend=tilelang
+    - --dsa-decode-backend=tilelang
+    - --chunked-prefill-size=131072
+    - --mem-fraction-static=0.80
+    - --watchdog-timeout=1200
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2-FP8
+    quantization: FP8
+    mode: throughput
+    gpu_filters:
+      vendor: nvidia
+      compute_capability: '>=8.9'
+    backend_parameters:
+    - --dsa-prefill-backend=tilelang
+    - --dsa-decode-backend=tilelang
+    - --mem-fraction-static=0.85
+    - --cuda-graph-max-bs=256
+    - --max-running-requests=256
+    - --watchdog-timeout=1200
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2
+    quantization: BF16
+    mode: latency
+    gpu_filters:
+      vendor: amd
+    backend_parameters:
+    - --dsa-prefill-backend=tilelang
+    - --dsa-decode-backend=tilelang
+    - --chunked-prefill-size=131072
+    - --mem-fraction-static=0.80
+    - --watchdog-timeout=1200
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  - name: GLM-5.2
+    backend: SGLang
+    source: huggingface
+    huggingface_repo_id: zai-org/GLM-5.2
+    quantization: BF16
+    mode: throughput
+    gpu_filters:
+      vendor: amd
+    backend_parameters:
+    - --dsa-prefill-backend=tilelang
+    - --dsa-decode-backend=tilelang
+    - --mem-fraction-static=0.85
+    - --cuda-graph-max-bs=256
+    - --max-running-requests=256
+    - --watchdog-timeout=1200
+    - --reasoning-parser=glm45
+    - --tool-call-parser=glm47
+    provenance:
+      source: sglang-cookbook
+      source_url: https://github.com/sgl-project/sglang/blob/main/docs/src/snippets/configs/zai-org/glm-5.2.jsx
+      distilled: true
+  feature_tiles:
+  - id: spec_decoding:mtp
+    label: spec_decoding (mtp)
+    description: Multi-Token Prediction speculative decoding (up to 7 draft tokens)
+    backends:
+    - vLLM
+    flags:
+    - --speculative-config={"method":"mtp","num_speculative_tokens":5}
+    default_on: false
+  - id: spec_decoding:dspark
+    label: spec_decoding (dspark)
+    description: Multi-Token Prediction speculative decoding (up to 7 draft tokens)
+    backends:
+    - vLLM
+    flags:
+    - '--speculative-config={"model": "RedHatAI/GLM-5.2-speculator.dspark","num_speculative_tokens": 7,"method":
+      "dspark"}'
+    default_on: false
+  - id: deepep
+    label: DeepEP
+    backends:
+    - SGLang
+    flags:
+    - --moe-a2a-backend=deepep
+    default_on: false
+  - id: mtp-516
+    label: EAGLE / MTP 5-1-6 (low-latency)
+    backends:
+    - SGLang
+    flags:
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=5
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=6
+    default_on: false
+    disable_by_hw:
+    - hw:
+      - mi355x
+      - mi325x
+      - mi300x
+      reason: ''
+  - id: mtp-112
+    label: EAGLE / MTP 1-1-2 (balanced)
+    backends:
+    - SGLang
+    flags:
+    - --speculative-algorithm=EAGLE
+    - --speculative-num-steps=1
+    - --speculative-eagle-topk=1
+    - --speculative-num-draft-tokens=2
+    default_on: false
+    disable_by_hw:
+    - hw:
+      - mi355x
+      - mi325x
+      - mi300x
+      reason: ''
+
