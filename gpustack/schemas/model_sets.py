@@ -26,6 +26,39 @@ class GPUFilters(BaseModel):
         return v
 
 
+class SpecProvenance(BaseModel):
+    """Where a catalog spec came from. Informational only — never used to gate
+    availability (that's ``gpu_filters``). Enables source/verified badges in the UI."""
+
+    source: Optional[str] = None
+    """e.g. 'vllm-recipes' | 'sglang-cookbook' | 'manual'."""
+    source_url: Optional[str] = None
+    source_version: Optional[str] = None
+    verified: Optional[bool] = None
+    verified_hardware: Optional[List[str]] = None
+    distilled: Optional[bool] = None
+
+
+class TileHardwareDisable(BaseModel):
+    hw: Optional[List[str]] = None
+    reason: Optional[str] = None
+
+
+class FeatureTile(BaseModel):
+    """A toggleable capability. The UI renders it as a click-to-enable tile that merges
+    ``flags``/``env`` into the deployment's backend parameters; ``disable_by_hw`` greys
+    it out on unsupported GPUs."""
+
+    id: str
+    label: Optional[str] = None
+    description: Optional[str] = None
+    backends: Optional[List[str]] = None
+    flags: Optional[List[str]] = None
+    env: Optional[dict] = None
+    default_on: Optional[bool] = False
+    disable_by_hw: Optional[List[TileHardwareDisable]] = None
+
+
 class ModelSpec(ModelSpecBase):
     name: Optional[str] = None
     quantization: Optional[str] = None
@@ -45,6 +78,8 @@ class ModelSpec(ModelSpecBase):
     # model-create payload, and ModelCreate.owner_principal_id is a
     # non-nullable int — echoing ``null`` there fails validation with
     # a 422.
+    provenance: Optional[SpecProvenance] = None
+
     owner_principal_id: Optional[int] = Field(default=None, exclude=True)
 
     # The cluster the model would be evaluated against, stamped
@@ -76,6 +111,7 @@ class ModelSetBase(BaseModel):
     size_unit: Optional[SizeUnit] = None
     licenses: Optional[List[str]] = None
     release_date: Optional[date] = None
+    feature_tiles: Optional[List[FeatureTile]] = None
 
     model_config = ConfigDict(protected_namespaces=())
 

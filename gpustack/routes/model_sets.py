@@ -108,8 +108,10 @@ def filter_specs_by_gpu(
 ) -> List[ModelSpec]:
     """Filter model specs based on the GPUs available."""
 
-    # Matched specs mapping by mode (standard, throughput, latency, etc.).
-    filtered: Dict[str, ModelSpec] = {}
+    # Keep one spec per (mode, quantization, backend) so distinct quantization /
+    # backend variants of the same optimization mode all survive (the UI lets the
+    # user pick among them); only exact duplicates collapse.
+    filtered: Dict[tuple, ModelSpec] = {}
 
     gpu_vendors = {gpu.vendor.lower() for gpu in gpus}
 
@@ -121,13 +123,14 @@ def filter_specs_by_gpu(
     }
 
     for spec in specs:
-        # If already selected for this mode, skip
-        if spec.mode in filtered:
+        key = (spec.mode, spec.quantization, spec.backend)
+        # If an identical variant was already selected, skip
+        if key in filtered:
             continue
 
         gf = spec.gpu_filters
         if gf is None:
-            filtered[spec.mode] = spec
+            filtered[key] = spec
             continue
 
         # --- GPU Vendor check ---
@@ -150,7 +153,7 @@ def filter_specs_by_gpu(
             if wanted.isdisjoint(vendor_variants):
                 continue
 
-        filtered[spec.mode] = spec
+        filtered[key] = spec
 
     result = list(filtered.values())
 
