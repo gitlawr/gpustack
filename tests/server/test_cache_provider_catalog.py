@@ -157,6 +157,72 @@ def test_version_declaring_both_launch_slots_is_rejected():
         )
 
 
+def test_component_declarations_validate():
+    """Multi-component providers declare per-role topology and launch;
+    dependencies must point at singleton components (the only ones with
+    one addressable endpoint) and cannot chain."""
+    from gpustack.schemas.cache_providers import CacheProviderComponent
+
+    provider = CacheProvider(
+        name="Pool",
+        default_image="repo/pool:{{version}}",
+        versions={"v1.0": {}},
+        components={
+            "master": CacheProviderComponent(
+                topology="singleton",
+                run_command="pool-master --port {{port}}",
+                serves_metrics=True,
+                gpu_access=False,
+            ),
+            "store": CacheProviderComponent(
+                topology="per_node",
+                depends_on="master",
+                run_command="pool-store --port {{port}}",
+                gpu_access=False,
+            ),
+        },
+    )
+    assert provider.component_layouts() == {
+        "master": "singleton",
+        "store": "per_node",
+    }
+    assert provider.get_component("store").depends_on == "master"
+
+    # single-component providers map the None component, so legacy
+    # instance rows (component=None) keep matching
+    single = CacheProvider(
+        name="Solo",
+        topology="per_node",
+        default_image="repo/solo:{{version}}",
+        versions={"v1.0": {}},
+    )
+    assert single.component_layouts() == {None: "per_node"}
+    assert single.get_component(None) is None
+
+    with pytest.raises(ValidationError):
+        CacheProvider(
+            name="Dangling",
+            default_image="repo/x:{{version}}",
+            versions={"v1.0": {}},
+            components={
+                "store": CacheProviderComponent(topology="per_node", depends_on="ghost")
+            },
+        )
+    with pytest.raises(ValidationError):
+        # a per_node dependency has no single address to hand out
+        CacheProvider(
+            name="FanDep",
+            default_image="repo/x:{{version}}",
+            versions={"v1.0": {}},
+            components={
+                "a": CacheProviderComponent(topology="per_node"),
+                "b": CacheProviderComponent(topology="singleton", depends_on="a"),
+            },
+        )
+    with pytest.raises(ValidationError):
+        CacheProviderComponent(run_command="x", run_args="y")
+
+
 def test_lmcache_provider_declaration():
     provider = get_cache_provider("LMCache")
     assert provider is not None

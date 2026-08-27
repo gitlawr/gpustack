@@ -362,6 +362,60 @@ class CacheProviderExternalField(BaseModel):
     the injection placeholder namespace."""
 
 
+class CacheProviderComponent(BaseModel):
+    """One process role of a multi-component managed provider (e.g.
+    Mooncake's coordinating master and its per-node memory-segment
+    stores). A provider without ``components`` is single-component: the
+    provider-level topology and the version launch templates describe
+    its one process, and nothing changes for it."""
+
+    topology: str = "singleton"
+    """Instance layout of this component: "singleton" runs one instance
+    (on a scheduler-picked worker when the service pins none), "per_node"
+    runs one per matching cluster worker."""
+
+    depends_on: Optional[str] = None
+    """Name of a component whose instances must be RUNNING (with ports
+    known) before this component's instances are created — e.g. stores
+    need the master's address. Only singleton components can be depended
+    on: they are the only ones with one addressable endpoint."""
+
+    run_command: Optional[str] = None
+    run_args: Optional[str] = None
+    """Launch template of this component, same semantics as the version
+    slots (a command takes the entrypoint, args ride the image's own).
+    Components own their launch: version-level launch templates apply
+    only to single-component providers, since one template cannot serve
+    two roles. {{component.<name>.address}} resolves to a singleton
+    component's host:port."""
+
+    env: Dict[str, str] = {}
+    """Env template for this component's container; values support
+    {{placeholder}} including cross-component addresses."""
+
+    health_check: Optional[CacheProviderHealthCheck] = None
+    """Probe for this component's instances; None inherits the
+    provider-level health_check."""
+
+    serves_metrics: bool = False
+    """Whether this component's instances expose the exposition the
+    provider's metrics declaration describes (scrape targets are built
+    from these instances only — e.g. the Mooncake master, not the
+    stores)."""
+
+    gpu_access: bool = True
+    """Whether this component's container mounts the node's GPUs. LMCache
+    needs a CUDA context for its IPC transport; a pure-RAM component
+    (Mooncake master/store) opts out and saves the per-GPU context
+    memory."""
+
+    @model_validator(mode="after")
+    def _one_launch_slot(self):
+        if self.run_command and self.run_args:
+            raise ValueError("a component declares run_command or run_args, not both")
+        return self
+
+
 class CacheProvider(BaseModel):
     name: str
     display_name: Optional[str] = None
@@ -395,6 +449,13 @@ class CacheProvider(BaseModel):
     ``topology``: placement and attach contract only coincide for
     LMCache-style providers — a distributed pool may run per-node data
     components while engines attach its cluster-wide endpoint."""
+
+    components: Dict[str, CacheProviderComponent] = {}
+    """Managed-mode process roles, keyed by component name. Empty means
+    single-component (the provider-level topology and version launch
+    templates describe the one process). Declared components each own
+    their topology, launch and env; the shared image layout still comes
+    from the version."""
 
     default_version: Optional[str] = None
     versions: Dict[str, CacheProviderVersionConfig] = {}
@@ -460,6 +521,48 @@ class CacheProvider(BaseModel):
     l2_backends: Dict[str, CacheProviderL2Backend] = {}
     """Adapter type identifier (the "type" value in the adapter JSON)
     -> backend declaration."""
+
+    def component_layouts(self) -> Dict[Optional[str], str]:
+        """Component name -> topology. A single-component provider maps
+        {None: topology}: instance rows of such providers carry a None
+        component, so legacy rows keep matching without migration."""
+        if self.components:
+            return {name: c.topology for name, c in self.components.items()}
+        return {None: self.topology}
+
+    def get_component(self, name: Optional[str]) -> Optional[CacheProviderComponent]:
+        if name is None:
+            return None
+        return self.components.get(name)
+
+    @model_validator(mode="after")
+    def _validate_components(self) -> "CacheProvider":
+        for name, component in self.components.items():
+            if component.topology not in ("singleton", "per_node"):
+                raise ValueError(
+                    f"component '{name}' declares unknown topology "
+                    f"'{component.topology}'"
+                )
+            dep_name = component.depends_on
+            if dep_name is None:
+                continue
+            dependency = self.components.get(dep_name)
+            if dependency is None or dep_name == name:
+                raise ValueError(
+                    f"component '{name}' depends on unknown component " f"'{dep_name}'"
+                )
+            if dependency.topology != "singleton":
+                raise ValueError(
+                    f"component '{name}' depends on '{dep_name}', which is "
+                    "not a singleton: only singleton components have one "
+                    "addressable endpoint"
+                )
+            if dependency.depends_on:
+                raise ValueError(
+                    f"component '{name}' depends on '{dep_name}', which has "
+                    "its own dependency: chains are not supported"
+                )
+        return self
 
     def metrics_for(self, version: Optional[str]) -> Optional[CacheProviderMetrics]:
         """The effective metrics declaration for a service pinned to
