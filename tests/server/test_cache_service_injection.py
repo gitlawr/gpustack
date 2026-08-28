@@ -509,7 +509,7 @@ async def test_resolve_managed_mooncake_injects_store_connector():
     }
     config = json.loads(snapshot.files["/tmp/gpustack-mooncake.json"])
     assert config["mode"] == "embedded"
-    assert config["global_segment_size"] == "4GB"
+    assert config["global_segment_size"] == "20GB"
     assert config["master_server_address"] == "10.0.0.9:50051"
     assert config["metadata_server"] == "P2PHANDSHAKE"
     assert config["protocol"] == "tcp"

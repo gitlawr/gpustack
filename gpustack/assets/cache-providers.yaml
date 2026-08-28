@@ -415,7 +415,7 @@
         per node); size it so the total across a node's GPUs fits in
         host RAM.
       type: number
-      default: 4
+      default: 20
       min: 0
       step: 1
       visible_by: pool_mode
@@ -437,7 +437,7 @@
         DRAM each store replica registers to the pool (per replica);
         size it to its worker's available RAM.
       type: number
-      default: 16
+      default: 40
       min: 1
       step: 1
       visible_by: pool_mode

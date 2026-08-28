@@ -549,7 +549,11 @@ def test_mooncake_provider_declaration():
     assert fields["pool_mode"].option_values() == ["embedded", "standalone-store"]
     # options carry display labels where the stored value reads poorly
     assert fields["pool_mode"].options[1].label == "Standalone Store"
-    assert fields["engine_segment_size"].default == 4
+    # 20 per GPU / 40 per store replica: production-leaning anchors
+    # aligned with LMCache's default 20 GiB (note the engine value
+    # multiplies by the node's GPU count)
+    assert fields["engine_segment_size"].default == 20
+    assert fields["store_segment_size"].default == 40
     assert fields["protocol"].option_values() == ["tcp", "rdma"]
     assert fields["eviction_high_watermark_ratio"].default == 0.95
     assert fields["eviction_ratio"].default == 0.1
@@ -607,7 +611,7 @@ def test_mooncake_injection_renders_store_connector_env():
     # The managed defaults render the mainstream embedded shape: each
     # engine GPU contributes the default segment size.
     assert config["mode"] == "embedded"
-    assert config["global_segment_size"] == "4GB"
+    assert config["global_segment_size"] == "20GB"
     assert config["master_server_address"] == "10.0.0.9:50051"
     assert config["metadata_server"] == "P2PHANDSHAKE"
     assert config["protocol"] == "tcp"
