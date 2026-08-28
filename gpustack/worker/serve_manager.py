@@ -65,6 +65,8 @@ from gpustack.schemas.models import (
 )
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.controlloop import (
+    RestartActionEnum,
+    RestartBudget,
     WorkloadPhase,
     classify_workload,
     describe_workload_failure,
@@ -84,6 +86,17 @@ _WORKLOAD_FAILED_MESSAGE = "Inference server exited or unhealthy."
 # One health-check cycle (+2s margin) to let a container return after a stream
 # EOF; beyond that gpustack marks it ERROR and takes over recovery.
 LOG_RECONNECT_GRACE_SECONDS = envs.MODEL_INSTANCE_HEALTH_CHECK_INTERVAL + 2
+
+RESTART_BUDGET = RestartBudget(
+    base_delay_seconds=10,
+    max_delay_seconds=300,
+    # Unlike a cache server, an inference server is not given up on: the
+    # failure is often outside it (a registry outage, a node coming back), and
+    # a user who wants it to stop retrying turns off the model's
+    # restart_on_error. See _restart_backoff_counts for what is not persisted.
+    max_attempts=None,
+    first_attempt_immediate=True,
+)
 
 # Global lock for port assignment to avoid pickle serialization issues
 _port_lock = threading.Lock()
@@ -218,6 +231,18 @@ class ServeManager:
 
         # Instance-level port tracking to avoid conflicts
         self._assigned_ports: Dict[int, Set[int]] = {}
+
+        # Consecutive restarts per instance, cleared once it serves again, so
+        # a crash long after a recovery meets a fresh set of attempts.
+        #
+        # In-process only, so a worker restart forgets the backoff and the
+        # instances still crash-looping get one immediate retry each. The
+        # instance row cannot hold it: restart_count is the log-file
+        # generation number ({id}.{restart_count}.log, with _cleanup_old_logs
+        # reading 0 as "fresh lifecycle, purge everything"), so it has to keep
+        # increasing and cannot double as a consecutive-crash counter the way
+        # a cache service instance's does. Persisting this needs a column of
+        # its own.
         self._restart_backoff_counts: Dict[int, int] = {}
 
         # Inference health check failure tracking
@@ -434,7 +459,9 @@ class ServeManager:
                     # Surface the workload's own diagnosis (e.g. a device-plugin
                     # admission rejection, an image-pull failure, an exit code)
                     # when available.
-                    failure_message = describe_workload_failure(workload, _WORKLOAD_FAILED_MESSAGE)
+                    failure_message = describe_workload_failure(
+                        workload, _WORKLOAD_FAILED_MESSAGE
+                    )
                     with contextlib.suppress(NotFoundException):
                         # Get patch dict for main worker.
                         if is_main_worker:
@@ -1778,22 +1805,22 @@ class ServeManager:
         last_restart_time = mi.last_restart_time or mi.updated_at
 
         current_time = datetime.now(timezone.utc)
-        delay = min(10 * (2 ** (backoff_count - 1)), 300) if backoff_count > 0 else 0
-        if backoff_count > 0 and last_restart_time:
-            elapsed_time = (current_time - last_restart_time).total_seconds()
-            if elapsed_time < delay:
-                logger.trace(
-                    f"Delaying restart of {mi.name} for {delay - elapsed_time:.2f} seconds."
-                )
-                return
+        decision = RESTART_BUDGET.decide(backoff_count, last_restart_time, current_time)
+        if decision.action == RestartActionEnum.WAIT:
+            logger.trace(
+                f"Delaying restart of {mi.name} for "
+                f"{decision.delay_remaining_seconds:.2f} seconds."
+            )
+            return
 
         logger.info(
             f"Restarting model instance {mi.name} "
-            f"(attempt {backoff_count + 1}) after {delay} seconds delay."
+            f"(attempt {decision.attempt}) after "
+            f"{RESTART_BUDGET.delay_for(backoff_count)} seconds delay."
         )
 
         with contextlib.suppress(NotFoundException):
-            self._restart_backoff_counts[mi.id] = backoff_count + 1
+            self._restart_backoff_counts[mi.id] = decision.attempt
             self._update_model_instance(
                 mi.id,
                 restart_count=restart_count + 1,

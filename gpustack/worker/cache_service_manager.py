@@ -37,6 +37,8 @@ from gpustack.worker.cache_service.provisioner import (
 )
 from gpustack.worker.cache_service.state import update_cache_service_instance
 from gpustack.worker.controlloop import (
+    RestartActionEnum,
+    RestartBudget,
     WorkloadPhase,
     classify_workload,
     watch_forever,
@@ -55,6 +57,16 @@ RESTART_BACKOFF_MAX_SECONDS = 300
 RESTART_COUNT_RESET_SECONDS = 600
 """How long an instance must stay healthy after its last restart before the
 consecutive-restart budget is cleared."""
+
+RESTART_BUDGET = RestartBudget(
+    base_delay_seconds=RESTART_BACKOFF_BASE_SECONDS,
+    max_delay_seconds=RESTART_BACKOFF_MAX_SECONDS,
+    max_attempts=MAX_CONSECUTIVE_RESTARTS,
+    reset_after_seconds=RESTART_COUNT_RESET_SECONDS,
+)
+"""A cache server is a service with no successful end, so its first crash is
+already backed off; the count lives on the instance row and is forgiven once
+it has stayed healthy for the reset window."""
 
 PENDING_START_GRACE_SECONDS = 60
 """How long an instance may stay PENDING before the sync pass re-drives its
@@ -582,11 +594,8 @@ class CacheServiceManager:
             # An instance that has stayed healthy past the reset window has
             # broken out of its crash loop; clear the consecutive-restart
             # budget so a much later crash gets a fresh set of attempts.
-            if (
-                (instance.restart_count or 0) > 0
-                and instance.last_restart_time is not None
-                and (now - instance.last_restart_time).total_seconds()
-                >= RESTART_COUNT_RESET_SECONDS
+            if RESTART_BUDGET.should_forgive(
+                instance.restart_count or 0, instance.last_restart_time, now
             ):
                 updates["restart_count"] = 0
             if updates:
@@ -630,8 +639,11 @@ class CacheServiceManager:
                 )
             return
 
-        restart_count = instance.restart_count or 0
-        if restart_count >= MAX_CONSECUTIVE_RESTARTS:
+        now = datetime.now(timezone.utc)
+        decision = RESTART_BUDGET.decide(
+            instance.restart_count or 0, instance.last_restart_time, now
+        )
+        if decision.action == RestartActionEnum.GIVE_UP:
             self._update_cache_service_instance(
                 instance.id,
                 state=CacheServiceStateEnum.ERROR,
@@ -643,17 +655,7 @@ class CacheServiceManager:
                 healthy=False,
             )
             return
-
-        now = datetime.now(timezone.utc)
-        delay = min(
-            RESTART_BACKOFF_BASE_SECONDS * 2**restart_count,
-            RESTART_BACKOFF_MAX_SECONDS,
-        )
-        last_restart_time = instance.last_restart_time
-        if (
-            last_restart_time is not None
-            and (now - last_restart_time).total_seconds() < delay
-        ):
+        if decision.action == RestartActionEnum.WAIT:
             # Within the backoff window; retry on a later sync round.
             return
 
@@ -666,7 +668,7 @@ class CacheServiceManager:
                 f"{workload_name}: {e}"
             )
 
-        attempt = restart_count + 1
+        attempt = decision.attempt
         logger.info(
             f"Restarting crashed cache service {cache_service.name} instance "
             f"(id={instance.id}), attempt {attempt}/{MAX_CONSECUTIVE_RESTARTS}"

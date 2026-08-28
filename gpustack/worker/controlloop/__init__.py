@@ -9,6 +9,11 @@ domain knowledge, so a new kind of workload does not arrive with a fourth copy
 of them.
 """
 
+from gpustack.worker.controlloop.backoff import (
+    RestartActionEnum,
+    RestartBudget,
+    RestartDecision,
+)
 from gpustack.worker.controlloop.watcher import watch_forever
 from gpustack.worker.controlloop.workload_state import (
     WorkloadPhase,
@@ -19,6 +24,9 @@ from gpustack.worker.controlloop.workload_state import (
 from gpustack.worker.controlloop.writeback import update_resource
 
 __all__ = [
+    "RestartActionEnum",
+    "RestartBudget",
+    "RestartDecision",
     "WorkloadPhase",
     "classify_workload",
     "describe_workload_failure",
