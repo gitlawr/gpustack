@@ -1,12 +1,11 @@
 import asyncio
-import multiprocessing
-import setproctitle
 import os
 import re
 import time
 from typing import Dict, NamedTuple, Optional, Callable, List, Set, Tuple
 import logging
 from collections import Counter, deque
+from functools import partial
 
 from gpustack_runtime.deployer import (
     delete_workload,
@@ -16,19 +15,18 @@ from gpustack_runtime.deployer import (
 from gpustack.api.exceptions import raise_if_response_error
 from gpustack.config.config import Config
 from gpustack.config import registration
-from gpustack.logging import RedirectStdoutStderr
 from gpustack.schemas.benchmark import (
     Benchmark,
     BenchmarkLoadModeEnum,
     BenchmarkStateEnum,
     benchmark_load_mode,
 )
-from gpustack.utils.process import terminate_process_tree, add_signal_handlers
 from gpustack.worker.benchmark import analysis, artifacts
 from gpustack.worker.benchmark.runner import BenchmarkRunner
 from gpustack.client import ClientSet
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.controlloop import (
+    ProvisionRunner,
     WorkloadPhase,
     classify_workload,
     watch_forever,
@@ -91,6 +89,21 @@ class CollectedResults(NamedTuple):
     skipped: int
 
 
+def provision_benchmark(
+    benchmark: Benchmark,
+    fallback_registry: Optional[str],
+    clientset: ClientSet,
+    cfg: Config,
+):
+    """
+    The domain half of provisioning, run by the shared subprocess entry point.
+
+    Module level so spawn can pickle it by reference; the leading arguments are
+    bound with functools.partial at the call site.
+    """
+    BenchmarkRunner(clientset, benchmark, cfg, fallback_registry).start()
+
+
 class BenchmarkManager:
     @property
     def _worker_id(self) -> int:
@@ -120,12 +133,6 @@ class BenchmarkManager:
     The clientset to access the API server.
     """
 
-    _provisioning_processes: Dict[int, multiprocessing.Process]
-    """
-    The mapping of benchmark ID to provisioning (sub)process.
-    When the (sub)process is alive, the benchmark is provisioning.
-    If the (sub)process exited, the benchmark is either running or failed.
-    """
     _benchmark_by_id: Dict[int, Benchmark]
     _benchmark_queue: deque
     _queue_lock: asyncio.Lock
@@ -148,7 +155,7 @@ class BenchmarkManager:
         self._benchmark_dir = f"{cfg.benchmark_dir}"
         self._clientset_getter = clientset_getter
 
-        self._provisioning_processes = {}
+        self._provisioning = ProvisionRunner(cfg, lambda: self._clientset.headers)
         self._benchmark_by_id = {}
         self._benchmark_queue = deque()
         self._queue_lock = asyncio.Lock()
@@ -285,7 +292,7 @@ class BenchmarkManager:
         Args:
             benchmark: The benchmark to start.
         """
-        if benchmark.id in self._provisioning_processes:
+        if self._provisioning.is_running(benchmark.id):
             logger.warning(
                 f"Benchmark {benchmark.name}(id={benchmark.id}) is provisioning. Skipping start."
             )
@@ -302,20 +309,13 @@ class BenchmarkManager:
             fallback_registry = registration.determine_default_registry(
                 self._config.system_default_container_registry
             )
-            process = multiprocessing.Process(
-                target=BenchmarkManager._launch_benchmark,
-                args=(
-                    benchmark,
-                    self._clientset.headers,
-                    log_file_path,
-                    self._config,
-                    fallback_registry,
-                ),
+            process = self._provisioning.start(
+                benchmark.id,
+                description=f"benchmark {benchmark.name}(id={benchmark.id})",
+                proctitle=f"gpustack_benchmark_{benchmark.id}",
+                log_path=log_file_path,
+                provision=partial(provision_benchmark, benchmark, fallback_registry),
             )
-            process.daemon = False
-            process.start()
-
-            self._provisioning_processes[benchmark.id] = process
             self._set_active_benchmark(benchmark.id)
             patch_dict = {
                 "state": BenchmarkStateEnum.RUNNING,
@@ -326,7 +326,7 @@ class BenchmarkManager:
 
         except Exception as e:
             # Clean up provisioning process if started.
-            if benchmark.id in self._provisioning_processes:
+            if self._provisioning.is_running(benchmark.id):
                 self._stop_benchmark(benchmark)
             patch_dict = {
                 "state": BenchmarkStateEnum.ERROR,
@@ -336,56 +336,6 @@ class BenchmarkManager:
             logger.error(
                 f"Failed to start benchmark {benchmark.name}(id={benchmark.id}): {e}"
             )
-
-    @staticmethod
-    def _launch_benchmark(
-        benchmark: Benchmark,
-        client_headers: dict,
-        log_file_path: str,
-        cfg: Config,
-        fallback_registry: Optional[str] = None,
-    ):
-        """
-        Serve benchmark in a subprocess.
-        Exits the subprocess when serving ends.
-
-        Args:
-            benchmark: The benchmark to serve.
-            client_headers: The headers for the clientset.
-            log_file_path: The path to the log file.
-            cfg: The configuration.
-            fallback_registry: The fallback container registry to use if needed.
-        """
-
-        setproctitle.setproctitle(f"gpustack_benchmark_{benchmark.id}")
-        add_signal_handlers()
-
-        clientset = ClientSet(
-            base_url=cfg.get_server_url(),
-            headers=client_headers,
-        )
-
-        with open(log_file_path, "w", buffering=1, encoding="utf-8") as log_file:
-            with RedirectStdoutStderr(log_file):
-                try:
-                    server_ins = BenchmarkRunner(
-                        clientset,
-                        benchmark,
-                        cfg,
-                        fallback_registry,
-                    )
-                    logger.info(
-                        f"Provisioning benchmark {benchmark.name}(id={benchmark.id})"
-                    )
-                    server_ins.start()
-                    logger.info(
-                        f"Finished provisioning benchmark {benchmark.name}(id={benchmark.id})"
-                    )
-                except Exception as e:
-                    logger.exception(
-                        f"Error provisioning benchmark {benchmark.name}(id={benchmark.id}): {e}"
-                    )
-                    raise e
 
     async def _update_benchmark_state(self, id: int, **kwargs):
         client = self._clientset.http_client.get_async_httpx_client()
@@ -415,14 +365,13 @@ class BenchmarkManager:
         """
 
         # Teardown provisioning process if still alive.
-        if self._is_provisioning(benchmark):
-            try:
-                terminate_process_tree(self._provisioning_processes[benchmark.id].pid)
-            except Exception as e:
-                logger.error(
-                    "Failed to terminate the provisioning process of benchmark "
-                    f"{benchmark.name}(id={benchmark.id}): {e}"
-                )
+        try:
+            self._provisioning.terminate(benchmark.id)
+        except Exception as e:
+            logger.error(
+                "Failed to terminate the provisioning process of benchmark "
+                f"{benchmark.name}(id={benchmark.id}): {e}"
+            )
 
         # Delete workload.
         try:
@@ -443,7 +392,7 @@ class BenchmarkManager:
         # simply discarded when it's popped.
 
         # Cleanup internal states.
-        self._provisioning_processes.pop(benchmark.id, None)
+        self._provisioning.forget(benchmark.id)
         self._benchmark_by_id.pop(benchmark.id, None)
         self._container_log_offset.pop(benchmark.id, None)
         self._last_log_snapshot_at.pop(benchmark.id, None)
@@ -460,11 +409,7 @@ class BenchmarkManager:
         Args:
             benchmark: The benchmark to check.
         """
-        if process := self._provisioning_processes.get(benchmark.id):
-            if process.is_alive():
-                process.join(timeout=0)
-                return process.is_alive()
-        return False
+        return self._provisioning.is_running(benchmark.id)
 
     def sync_benchmark_state(self):
         """

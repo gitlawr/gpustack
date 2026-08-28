@@ -1,14 +1,13 @@
 import asyncio
 import contextlib
+from functools import partial
 from datetime import datetime, timezone
 import json
-import multiprocessing
 import re
 import threading
 import time
 
 import requests
-import setproctitle
 import os
 from typing import Dict, Optional, Set, List, Callable
 from pathlib import Path
@@ -24,9 +23,6 @@ from gpustack import envs
 from gpustack.api.exceptions import NotFoundException
 from gpustack.config.config import Config
 from gpustack.config import registration
-from gpustack.logging import (
-    RedirectStdoutStderr,
-)
 from gpustack.schemas.inference_backend import (
     InferenceBackend,
     is_built_in_backend,
@@ -35,7 +31,6 @@ from gpustack.schemas.inference_backend import (
 from gpustack.utils import network
 from gpustack.utils.convert import safe_int
 from gpustack.utils.command import find_int_parameter
-from gpustack.utils.process import terminate_process_tree, add_signal_handlers
 from gpustack.worker.backends.ascend_mindie import AscendMindIEServer
 from gpustack.worker.backends.sglang import SGLangServer
 from gpustack.utils.command import resolve_executor_backend
@@ -63,6 +58,7 @@ from gpustack.schemas.models import (
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.controlloop import (
     ContainerLogPersistence,
+    ProvisionRunner,
     RestartActionEnum,
     RestartBudget,
     WorkloadPhase,
@@ -150,6 +146,27 @@ def _parse_allocated_accelerators(annotations: Optional[Dict[str, str]]) -> List
     return accelerators
 
 
+def provision_model_instance(
+    mi: ModelInstance,
+    backend: BackendEnum,
+    worker_id: int,
+    inference_backend: InferenceBackend,
+    fallback_registry: Optional[str],
+    clientset: ClientSet,
+    cfg: Config,
+):
+    """
+    The domain half of provisioning, run by the shared subprocess entry point.
+
+    Module level so spawn can pickle it by reference; the leading arguments are
+    bound with functools.partial at the call site.
+    """
+    server_cls = _SERVER_CLASS_MAPPING.get(backend, CustomServer)
+    server_cls(
+        clientset, mi, cfg, worker_id, inference_backend, fallback_registry
+    ).start()
+
+
 class ServeManager:
     @property
     def _worker_id(self) -> int:
@@ -178,22 +195,6 @@ class ServeManager:
     """
     The inference backend manager.
     """
-    _provisioning_processes: Dict[int, multiprocessing.Process]
-    """
-    The mapping of model instance ID to provisioning (sub)process.
-    When the (sub)process is alive, the model instance is provisioning.
-    If the (sub)process exited, the model instance is either running or failed.
-    """
-    _log_persistence_threads: Dict[int, List[threading.Thread]]
-    """
-    The mapping of model instance ID to log persistence threads.
-    Each model instance may have multiple threads (one per loggable container).
-    """
-    _log_persistence_stop_events: Dict[int, List[threading.Event]]
-    """
-    The mapping of model instance ID to stop events for log persistence threads.
-    Used to signal threads to stop gracefully.
-    """
     _error_model_instances: Dict[int, ModelInstance]
     """
     The mapping of model instance ID to error model instances.
@@ -220,7 +221,7 @@ class ServeManager:
         self._serve_log_dir = f"{cfg.log_dir}/serve"
         self._clientset_getter = clientset_getter
 
-        self._provisioning_processes = {}
+        self._provisioning = ProvisionRunner(cfg, lambda: self._clientset.headers)
         self._container_logs = ContainerLogPersistence(LOG_RECONNECT_GRACE_SECONDS)
         self._error_model_instances = {}
         self._model_cache_by_instance = {}
@@ -764,61 +765,6 @@ class ServeManager:
                     **{f"distributed_servers.subordinate_workers.{sw_pos}": sw},
                 )
 
-    @staticmethod
-    def _serve_model_instance(
-        mi: ModelInstance,
-        backend: BackendEnum,
-        client_headers: dict,
-        log_file_path: str,
-        cfg: Config,
-        worker_id: int,
-        inference_backend: InferenceBackend,
-        fallback_registry: Optional[str] = None,
-    ):
-        """
-        Serve model instance in a subprocess.
-        Exits the subprocess when serving ends.
-
-        Args:
-            mi: The model instance to serve.
-            backend: The backend of the model instance.
-            client_headers: The headers for the clientset.
-            log_file_path: The path to the log file.
-            cfg: The configuration.
-            worker_id: The ID of the worker.
-            inference_backend: The inference backend configuration.
-            fallback_registry: The fallback container registry to use if needed.
-        """
-
-        setproctitle.setproctitle(f"gpustack_model_instance_{mi.id}")
-        add_signal_handlers()
-
-        clientset = ClientSet(
-            base_url=cfg.get_server_url(),
-            headers=client_headers,
-        )
-
-        with open(log_file_path, "w", buffering=1, encoding="utf-8") as log_file:
-            with RedirectStdoutStderr(log_file):
-                try:
-                    server_cls = _SERVER_CLASS_MAPPING.get(backend, CustomServer)
-                    server_ins = server_cls(
-                        clientset,
-                        mi,
-                        cfg,
-                        worker_id,
-                        inference_backend,
-                        fallback_registry,
-                    )
-                    logger.info(f"Provisioning model instance {mi.name}")
-                    server_ins.start()
-                    logger.info(f"Finished provisioning model instance {mi.name}")
-                except Exception as e:
-                    logger.exception(
-                        f"Error provisioning model instance {mi.name}: {e}"
-                    )
-                    raise e
-
     def sync_model_instances_inference_health(self):
         """
         Synchronize model instances' inference health by sending actual inference requests.
@@ -1255,14 +1201,15 @@ class ServeManager:
                 else None
             )
 
-            process = multiprocessing.Process(
-                target=ServeManager._serve_model_instance,
-                args=(
+            process = self._provisioning.start(
+                mi.id,
+                description=f"model instance {mi.name}",
+                proctitle=f"gpustack_model_instance_{mi.id}",
+                log_path=log_file_path,
+                provision=partial(
+                    provision_model_instance,
                     mi,
                     backend,
-                    self._clientset.headers,
-                    log_file_path,
-                    self._config,
                     self._worker_id,
                     self._inference_backend_manager.get_backend_by_name(
                         backend, model.owner_principal_id
@@ -1270,9 +1217,6 @@ class ServeManager:
                     fallback_registry,
                 ),
             )
-            process.daemon = False
-            process.start()
-            self._provisioning_processes[mi.id] = process
 
             # Start container log persistence for containerized backends
             self._start_container_log_persistence(mi)
@@ -1308,7 +1252,7 @@ class ServeManager:
 
         except Exception as e:
             # Clean up provisioning process if started.
-            if mi.id in self._provisioning_processes:
+            if self._provisioning.is_running(mi.id):
                 self._stop_model_instance(mi)
 
             # Get patch dict for main worker.
@@ -1493,8 +1437,7 @@ class ServeManager:
             self._purge_instance_logs(mi.id)
 
         # Teardown provisioning process if still alive.
-        if self._is_provisioning(mi):
-            terminate_process_tree(self._provisioning_processes[mi.id].pid)
+        self._provisioning.terminate(mi.id)
 
         # Delete workload.
         deployment_metadata = mi.get_deployment_metadata(self._worker_id)
@@ -1502,7 +1445,7 @@ class ServeManager:
             delete_workload(deployment_metadata.name)
 
         # Cleanup internal states.
-        self._provisioning_processes.pop(mi.id, None)
+        self._provisioning.forget(mi.id)
         self._assigned_ports.pop(mi.id, None)
         self._error_model_instances.pop(mi.id, None)
         self._model_cache_by_instance.pop(mi.id, None)
@@ -1596,11 +1539,7 @@ class ServeManager:
         Args:
             mi: The model instance to check.
         """
-        if process := self._provisioning_processes.get(mi.id):
-            if process.is_alive():
-                process.join(timeout=0)
-                return process.is_alive()
-        return False
+        return self._provisioning.is_running(mi.id)
 
     def _get_health_check_path(
         self, backend: str, owner_principal_id: Optional[int] = None

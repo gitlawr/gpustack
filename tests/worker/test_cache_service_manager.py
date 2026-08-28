@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from functools import partial
 import tempfile
 from pathlib import Path
 from contextlib import contextmanager
@@ -25,9 +26,11 @@ from gpustack.schemas.cache_services import (
 )
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.cache_service.provisioner import CacheServiceProvisioner
+from gpustack.worker.controlloop import run_provisioning
 from gpustack.worker.cache_service_manager import (
     MAX_CONSECUTIVE_RESTARTS,
     CacheServiceManager,
+    provision_cache_service_instance,
 )
 from gpustack_runtime.deployer import WorkloadStatusStateEnum
 
@@ -1181,24 +1184,21 @@ def test_launch_spawns_provisioning_subprocess_with_allocated_ports():
             "gpustack.worker.cache_service_manager.network.get_free_port",
             side_effect=lambda **kwargs: next(ports),
         ),
-        patch(
-            "gpustack.worker.cache_service_manager.multiprocessing.Process"
-        ) as process_cls,
+        patch.object(manager._provisioning, "start") as start,
     ):
         manager._start_cache_service_instance(instance)
 
-    kwargs = process_cls.call_args[1]
-    assert kwargs["target"] is CacheServiceManager._provision_cache_service_instance
-    passed_instance, port, metrics_port, _headers, log_path, cfg, _registry = kwargs[
-        "args"
-    ]
+    key, kwargs = start.call_args[0][0], start.call_args[1]
+    assert key == instance.id
+    assert kwargs["log_path"] == f"{_LOG_DIR}/cache-services/{instance.id}.0.log"
+    assert kwargs["proctitle"] == f"gpustack_cache_service_instance_{instance.id}"
+
+    provision = kwargs["provision"]
+    assert provision.func is provision_cache_service_instance
+    passed_instance, port, metrics_port, _registry = provision.args
     assert passed_instance.id == instance.id
     assert (port, metrics_port) == (40001, 40002)
-    assert log_path == f"{_LOG_DIR}/cache-services/{instance.id}.0.log"
-    assert cfg is manager._config
 
-    process_cls.return_value.start.assert_called_once()
-    assert manager._provisioning_processes[instance.id] is process_cls.return_value
     assert manager._assigned_ports[instance.id] == (40001, 40002)
 
 
@@ -1213,10 +1213,7 @@ def test_launch_failure_sets_error_and_releases_ports():
             "gpustack.worker.cache_service_manager.network.get_free_port",
             side_effect=[40001, 40002],
         ),
-        patch(
-            "gpustack.worker.cache_service_manager.multiprocessing.Process",
-            side_effect=RuntimeError("boom"),
-        ),
+        patch.object(manager._provisioning, "start", side_effect=RuntimeError("boom")),
         patch.object(manager, "_update_cache_service_instance") as update,
     ):
         manager._start_cache_service_instance(instance)
@@ -1241,7 +1238,7 @@ def test_launch_releases_the_in_flight_claim():
             "gpustack.worker.cache_service_manager.network.get_free_port",
             side_effect=[40001, 40002],
         ),
-        patch("gpustack.worker.cache_service_manager.multiprocessing.Process"),
+        patch.object(manager._provisioning, "start"),
     ):
         manager._start_cache_service_instance(instance)
 
@@ -1251,16 +1248,13 @@ def test_launch_releases_the_in_flight_claim():
 def test_launch_is_not_duplicated_while_the_subprocess_runs():
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance()
-    manager._provisioning_processes[instance.id] = SimpleNamespace(
-        is_alive=lambda: True, join=lambda timeout=0: None, pid=999
-    )
-
-    with patch(
-        "gpustack.worker.cache_service_manager.multiprocessing.Process"
-    ) as process_cls:
+    with (
+        patch.object(manager._provisioning, "is_running", return_value=True),
+        patch.object(manager._provisioning, "start") as start,
+    ):
         manager._start_cache_service_instance(instance)
 
-    process_cls.assert_not_called()
+    start.assert_not_called()
 
 
 def test_sync_leaves_an_instance_whose_provisioning_is_still_running():
@@ -1271,11 +1265,8 @@ def test_sync_leaves_an_instance_whose_provisioning_is_still_running():
     clientset.cache_service_instances.list.return_value = SimpleNamespace(
         items=[instance]
     )
-    manager._provisioning_processes[instance.id] = SimpleNamespace(
-        is_alive=lambda: True, join=lambda timeout=0: None, pid=999
-    )
-
     with (
+        patch.object(manager._provisioning, "is_running", return_value=True),
         patch("gpustack.worker.cache_service_manager.get_workload") as get_wl,
         patch.object(manager, "_update_cache_service_instance") as update,
     ):
@@ -1301,9 +1292,7 @@ def test_provisioning_entry_point_writes_a_readable_log(tmp_path):
     root.handlers[:] = []
 
     with (
-        patch(
-            "gpustack.worker.cache_service_manager.ClientSet", return_value=clientset
-        ),
+        patch("gpustack.worker.controlloop.launcher.ClientSet", return_value=clientset),
         patch(
             "gpustack.worker.cache_service.provisioner.get_cache_provider",
             return_value=_new_provider(),
@@ -1316,17 +1305,19 @@ def test_provisioning_entry_point_writes_a_readable_log(tmp_path):
         patch("gpustack.worker.cache_service.provisioner.create_workload"),
         _patch_update(),
     ):
-        CacheServiceManager._provision_cache_service_instance(
-            instance,
-            40001,
-            40002,
-            {},
-            str(log_path),
-            SimpleNamespace(
+        run_provisioning(
+            proctitle="gpustack_cache_service_instance_11",
+            log_path=str(log_path),
+            cfg=SimpleNamespace(
                 debug=False,
                 get_server_url=lambda: "http://127.0.0.1",
                 system_default_container_registry=None,
             ),
+            client_headers={},
+            provision=partial(
+                provision_cache_service_instance, instance, 40001, 40002, None
+            ),
+            description=f"cache service instance {instance.id}",
         )
 
     root.handlers[:] = original_handlers
@@ -1342,20 +1333,13 @@ def test_stop_terminates_the_provisioning_subprocess():
     after it was deleted."""
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance()
-    manager._provisioning_processes[instance.id] = SimpleNamespace(
-        is_alive=lambda: True, pid=4321
-    )
-
     with (
         patch("gpustack.worker.cache_service_manager.delete_workload"),
-        patch(
-            "gpustack.worker.cache_service_manager.terminate_process_tree"
-        ) as terminate,
+        patch.object(manager._provisioning, "terminate") as terminate,
     ):
         manager._stop_cache_service_instance(instance)
 
-    terminate.assert_called_once_with(4321)
-    assert instance.id not in manager._provisioning_processes
+    terminate.assert_called_once_with(instance.id)
 
 
 # ---------------------------------------------------------------------------
@@ -2001,7 +1985,7 @@ def test_start_instance_reuses_recorded_ports():
         patch(
             "gpustack.worker.cache_service_manager.network.get_free_port"
         ) as get_free_port,
-        patch("gpustack.worker.cache_service_manager.multiprocessing.Process"),
+        patch.object(manager._provisioning, "start"),
     ):
         manager._start_cache_service_instance(instance)
 
@@ -2049,14 +2033,11 @@ def test_a_restart_numbers_a_fresh_provisioning_log():
             "gpustack.worker.cache_service_manager.network.get_free_port",
             side_effect=[40001, 40002],
         ),
-        patch(
-            "gpustack.worker.cache_service_manager.multiprocessing.Process"
-        ) as process_cls,
+        patch.object(manager._provisioning, "start") as start,
     ):
         manager._start_cache_service_instance(instance)
 
-    log_path = process_cls.call_args[1]["args"][4]
-    assert log_path.endswith(f"/{instance.id}.4.log")
+    assert start.call_args[1]["log_path"].endswith(f"/{instance.id}.4.log")
 
 
 def test_restart_count_only_ever_increases():
@@ -2190,7 +2171,7 @@ def test_launch_starts_container_log_persistence():
             "gpustack.worker.cache_service_manager.network.get_free_port",
             side_effect=[40001, 40002],
         ),
-        patch("gpustack.worker.cache_service_manager.multiprocessing.Process"),
+        patch.object(manager._provisioning, "start"),
         patch.object(manager._container_logs, "start") as start,
     ):
         manager._start_cache_service_instance(instance)

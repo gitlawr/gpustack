@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import multiprocessing
+from functools import partial
 import os
 import socket
 import threading
@@ -9,18 +9,15 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Set, Tuple
 
 import httpx
-import setproctitle
 
 from gpustack_runtime.deployer import (
     delete_workload,
     get_workload,
 )
-from gpustack_runtime.logging import setup_logging as setup_runtime_logging
 
 from gpustack.api.exceptions import NotFoundException
 from gpustack.client import ClientSet
 from gpustack.config.config import Config
-from gpustack.logging import RedirectStdoutStderr, setup_logging
 from gpustack.schemas.cache_providers import CacheProviderHealthCheck
 from gpustack.schemas.cache_services import (
     CacheServiceInstance,
@@ -30,7 +27,6 @@ from gpustack.schemas.cache_services import (
 from gpustack.server.bus import Event, EventType
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.utils import network
-from gpustack.utils.process import add_signal_handlers, terminate_process_tree
 from gpustack.worker.cache_service.provisioner import (
     CacheServiceProvisioner,
     resolve_fallback_registry,
@@ -38,6 +34,7 @@ from gpustack.worker.cache_service.provisioner import (
 from gpustack.worker.cache_service.state import update_cache_service_instance
 from gpustack.worker.controlloop import (
     ContainerLogPersistence,
+    ProvisionRunner,
     RestartActionEnum,
     RestartBudget,
     WorkloadPhase,
@@ -80,6 +77,30 @@ start. The start is normally driven by the instance's PENDING event; this
 window bounds how long a start that never took effect — a missed event, a
 worker restart mid-start, a state write-back that did not reach the server —
 keeps the instance stuck."""
+
+
+def provision_cache_service_instance(
+    instance: CacheServiceInstance,
+    port: int,
+    metrics_port: int,
+    fallback_registry: Optional[str],
+    clientset: ClientSet,
+    cfg: Config,
+):
+    """
+    The domain half of provisioning, run by the shared subprocess entry point.
+
+    Module level so spawn can pickle it by reference; the leading arguments are
+    bound with functools.partial at the call site.
+    """
+    CacheServiceProvisioner(
+        clientset=clientset,
+        instance=instance,
+        cfg=cfg,
+        port=port,
+        metrics_port=metrics_port,
+        fallback_registry=fallback_registry,
+    ).start()
 
 
 def _running_on(loop: asyncio.AbstractEventLoop) -> bool:
@@ -129,14 +150,6 @@ class CacheServiceManager:
     Guarded by _start_lock.
     """
 
-    _provisioning_processes: Dict[int, multiprocessing.Process]
-    """
-    The mapping of cache service instance ID to provisioning (sub)process.
-    While the (sub)process is alive the instance is still being provisioned —
-    pulling the provider image can take minutes — so the sync pass neither
-    re-drives its start nor treats the missing workload as a crash.
-    """
-
     _loop: Optional[asyncio.AbstractEventLoop]
     """The worker's event loop, captured when the watch starts. Launches are
     posted here from other threads so every fork happens on the same thread,
@@ -180,7 +193,7 @@ class CacheServiceManager:
         self._assigned_ports = {}
         self._starting = set()
         self._last_start_attempt = {}
-        self._provisioning_processes = {}
+        self._provisioning = ProvisionRunner(cfg, lambda: self._clientset.headers)
         self._loop = None
         self._container_logs = ContainerLogPersistence(LOG_RECONNECT_GRACE_SECONDS)
 
@@ -292,16 +305,7 @@ class CacheServiceManager:
         with CacheServiceManager._start_lock:
             if instance_id in self._starting:
                 return True
-        process = self._provisioning_processes.get(instance_id)
-        if process is None:
-            return False
-        # Reap an exited child here so it does not linger as a zombie until
-        # the instance is stopped, and so is_alive() reports the truth.
-        process.join(timeout=0)
-        if process.is_alive():
-            return True
-        self._provisioning_processes.pop(instance_id, None)
-        return False
+        return self._provisioning.is_running(instance_id)
 
     def _provision_log_path(self, instance_id: int, restart_count: int) -> str:
         """One provisioning log per start, numbered like a model instance's
@@ -359,23 +363,24 @@ class CacheServiceManager:
             restart_count = instance.restart_count or 0
             self._cleanup_old_logs(instance.id, restart_count)
             log_file_path = self._provision_log_path(instance.id, restart_count)
-            process = multiprocessing.Process(
-                target=CacheServiceManager._provision_cache_service_instance,
-                args=(
+            self._provisioning.start(
+                instance.id,
+                description=(
+                    f"cache service instance {instance.id} "
+                    f"(service id={instance.cache_service_id})"
+                ),
+                proctitle=f"gpustack_cache_service_instance_{instance.id}",
+                log_path=log_file_path,
+                provision=partial(
+                    provision_cache_service_instance,
                     instance,
                     port,
                     metrics_port,
-                    self._clientset.headers,
-                    log_file_path,
-                    self._config,
                     # Resolved here so the child does not re-probe the default
                     # registry, which may cost a network round trip.
                     resolve_fallback_registry(self._config),
                 ),
             )
-            process.daemon = False
-            process.start()
-            self._provisioning_processes[instance.id] = process
 
             # Started now rather than once the container exists: the stream
             # loop retries until it does, so a container that dies seconds
@@ -402,54 +407,6 @@ class CacheServiceManager:
             )
         finally:
             self._release_start(instance.id)
-
-    @staticmethod
-    def _provision_cache_service_instance(
-        instance: CacheServiceInstance,
-        port: int,
-        metrics_port: int,
-        client_headers: dict,
-        log_file_path: str,
-        cfg: Config,
-        fallback_registry: Optional[str] = None,
-    ):
-        """
-        Provision a cache service instance in a subprocess.
-        Exits the subprocess once the workload has been created.
-
-        Args:
-            instance: The cache service instance to provision.
-            port: The service port allocated for the instance.
-            metrics_port: The metrics port allocated for the instance.
-            client_headers: The headers for the clientset.
-            log_file_path: The path to the provisioning log file.
-            cfg: The configuration.
-            fallback_registry: The container registry to fall back to when a
-                provider image carries none.
-        """
-        setproctitle.setproctitle(f"gpustack_cache_service_instance_{instance.id}")
-        add_signal_handlers()
-
-        clientset = ClientSet(
-            base_url=cfg.get_server_url(),
-            headers=client_headers,
-        )
-
-        with open(log_file_path, "w", buffering=1, encoding="utf-8") as log_file:
-            with RedirectStdoutStderr(log_file):
-                # The container runtime logs the image pull through its own
-                # logger; without this it has no handler and the pull — the
-                # slowest part of a start — leaves no trace at all.
-                setup_logging(debug=cfg.debug)
-                setup_runtime_logging()
-                CacheServiceProvisioner(
-                    clientset=clientset,
-                    instance=instance,
-                    cfg=cfg,
-                    port=port,
-                    metrics_port=metrics_port,
-                    fallback_registry=fallback_registry,
-                ).start()
 
     def _allocate_ports(self, instance: CacheServiceInstance) -> Tuple[int, int]:
         """
@@ -541,10 +498,8 @@ class CacheServiceManager:
         with CacheServiceManager._start_lock:
             for stale_id in set(self._last_start_attempt) - listed_ids:
                 self._last_start_attempt.pop(stale_id, None)
-        for stale_id in set(self._provisioning_processes) - listed_ids:
-            process = self._provisioning_processes.pop(stale_id, None)
-            if process is not None and process.is_alive():
-                terminate_process_tree(process.pid)
+        for stale_id in self._provisioning.keys() - listed_ids:
+            self._provisioning.terminate(stale_id)
         if not instances_page.items:
             return
 
@@ -821,9 +776,7 @@ class CacheServiceManager:
         # would otherwise create the workload again right after it is deleted.
         self._container_logs.stop(instance.id)
 
-        process = self._provisioning_processes.pop(instance.id, None)
-        if process is not None and process.is_alive():
-            terminate_process_tree(process.pid)
+        self._provisioning.terminate(instance.id)
 
         deployment_metadata = instance.get_deployment_metadata()
         try:

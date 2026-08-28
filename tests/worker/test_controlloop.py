@@ -9,11 +9,13 @@ from gpustack_runtime.deployer import WorkloadStatusStateEnum
 
 from gpustack.api.exceptions import NotFoundException
 from gpustack.worker.controlloop import (
+    ProvisionRunner,
     RestartActionEnum,
     RestartBudget,
     WorkloadPhase,
     classify_workload,
     needs_restart,
+    run_provisioning,
     update_resource,
     watch_forever,
 )
@@ -226,3 +228,155 @@ def test_forgiveness_needs_the_full_stable_window():
 def test_nothing_to_forgive_without_attempts_or_a_configured_window():
     assert not CACHE_SERVICE_BUDGET.should_forgive(0, _NOW - timedelta(days=1), _NOW)
     assert not MODEL_INSTANCE_BUDGET.should_forgive(3, _NOW - timedelta(days=1), _NOW)
+
+
+# ---------------------------------------------------------------------------
+# Provisioning subprocesses
+# ---------------------------------------------------------------------------
+
+
+def _runner():
+    cfg = SimpleNamespace(debug=False, get_server_url=lambda: "http://127.0.0.1")
+    return ProvisionRunner(cfg, lambda: {"Authorization": "Bearer t"})
+
+
+def test_start_tracks_the_process_and_passes_the_preamble_its_inputs():
+    runner = _runner()
+
+    with patch(
+        "gpustack.worker.controlloop.launcher.multiprocessing.Process"
+    ) as process_cls:
+        returned = runner.start(
+            7, "thing 7", "gpustack_thing_7", "/tmp/7.log", provision=_noop
+        )
+
+    kwargs = process_cls.call_args[1]
+    assert kwargs["target"] is run_provisioning
+    proctitle, log_path, cfg, headers, provision, description = kwargs["args"]
+    assert (proctitle, log_path, description) == (
+        "gpustack_thing_7",
+        "/tmp/7.log",
+        "thing 7",
+    )
+    assert headers == {"Authorization": "Bearer t"}
+    assert provision is _noop
+    assert cfg is runner._cfg
+
+    assert returned is process_cls.return_value
+    assert runner.is_running(7) is True
+
+
+def test_is_running_reaps_an_exited_child():
+    """Left untouched it lingers as a zombie until the workload is stopped."""
+    runner = _runner()
+    process = MagicMock()
+    process.is_alive.return_value = False
+    runner._processes[7] = process
+
+    assert runner.is_running(7) is False
+
+    process.join.assert_called_once_with(timeout=0)
+    assert 7 not in runner._processes
+
+
+def test_is_running_is_false_for_an_unknown_key():
+    assert _runner().is_running(7) is False
+
+
+def test_terminate_kills_the_tree_and_forgets_the_key():
+    runner = _runner()
+    process = MagicMock()
+    process.is_alive.return_value = True
+    process.pid = 4242
+    runner._processes[7] = process
+
+    with patch(
+        "gpustack.worker.controlloop.launcher.terminate_process_tree"
+    ) as terminate:
+        runner.terminate(7)
+
+    terminate.assert_called_once_with(4242)
+    assert 7 not in runner._processes
+
+
+def test_terminate_leaves_an_already_dead_child_alone():
+    runner = _runner()
+    process = MagicMock()
+    process.is_alive.return_value = False
+    runner._processes[7] = process
+
+    with patch(
+        "gpustack.worker.controlloop.launcher.terminate_process_tree"
+    ) as terminate:
+        runner.terminate(7)
+
+    terminate.assert_not_called()
+    assert 7 not in runner._processes
+
+
+def test_provisioning_preamble_redirects_output_and_rebuilds_the_clientset(tmp_path):
+    """The child inherits nothing under spawn, so the preamble is what gives it
+    a clientset and a root logger bound to its own log file."""
+    log_path = tmp_path / "7.log"
+    seen = {}
+
+    def provision(clientset, cfg):
+        seen["clientset"] = clientset
+        seen["cfg"] = cfg
+        logging.getLogger("probe").info("from-the-logger")
+        print("from-stdout")
+
+    cfg = SimpleNamespace(debug=False, get_server_url=lambda: "http://127.0.0.1")
+    root = logging.getLogger()
+    original_handlers, original_level = root.handlers[:], root.level
+    root.handlers[:] = []
+    try:
+        with patch("gpustack.worker.controlloop.launcher.ClientSet") as clientset_cls:
+            run_provisioning(
+                "gpustack_thing_7", str(log_path), cfg, {"h": "v"}, provision, "thing 7"
+            )
+    finally:
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+
+    clientset_cls.assert_called_once_with(
+        base_url="http://127.0.0.1", headers={"h": "v"}
+    )
+    assert seen["clientset"] is clientset_cls.return_value
+    assert seen["cfg"] is cfg
+
+    contents = log_path.read_text()
+    assert "from-the-logger" in contents
+    assert "from-stdout" in contents
+    assert "Provisioning thing 7" in contents
+
+
+def test_provisioning_preamble_reports_a_failure_and_reraises(tmp_path):
+    """The subprocess dies either way; what matters is that the reason lands in
+    the log file rather than only in the exit status."""
+    log_path = tmp_path / "7.log"
+
+    def provision(clientset, cfg):
+        raise RuntimeError("boom")
+
+    cfg = SimpleNamespace(debug=False, get_server_url=lambda: "http://127.0.0.1")
+    root = logging.getLogger()
+    original_handlers, original_level = root.handlers[:], root.level
+    root.handlers[:] = []
+    try:
+        with patch("gpustack.worker.controlloop.launcher.ClientSet"):
+            with pytest.raises(RuntimeError):
+                run_provisioning(
+                    "gpustack_thing_7", str(log_path), cfg, {}, provision, "thing 7"
+                )
+    finally:
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+
+    contents = log_path.read_text()
+    assert "Error provisioning thing 7: boom" in contents
+    assert "RuntimeError" in contents
+
+
+def _noop(clientset, cfg):
+    pass

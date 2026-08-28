@@ -2,6 +2,7 @@ from collections import deque
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import MagicMock
 
 import gpustack.worker.benchmark_manager as bm
 from gpustack.schemas import benchmark as bm_schemas
@@ -669,13 +670,13 @@ class TestQueueCancelGuard:
         mgr = object.__new__(BenchmarkManager)
         mgr._benchmark_queue = deque()
         mgr._canceled_ids = set()
-        mgr._provisioning_processes = {}
         mgr._benchmark_by_id = {}
         mgr._container_log_offset = {}
         mgr._last_log_snapshot_at = {}
         mgr._partial_synced_count = {}
         mgr._last_partial_sync_at = {}
         mgr._active_benchmark_id = None
+        mgr._provisioning = MagicMock()
         mgr._is_provisioning = lambda _b: False
         mgr._clear_active_benchmark = lambda _i: None
         return mgr
@@ -725,21 +726,18 @@ class TestQueueCancelGuard:
         # Same argument one step earlier: the provisioning kill is also on the path
         # to the cleanup, so it cannot be the thing that skips it.
         monkeypatch.setattr(bm, "delete_workload", lambda _name: None)
-        monkeypatch.setattr(
-            bm,
-            "terminate_process_tree",
-            lambda _pid: (_ for _ in ()).throw(RuntimeError()),
-        )
         mgr = self._manager()
         cleared = []
         mgr._clear_active_benchmark = lambda i: cleared.append(i)
-        mgr._is_provisioning = lambda _b: True
-        mgr._provisioning_processes[1] = SimpleNamespace(pid=4242)
+
+        def _explode(_key):
+            raise RuntimeError()
+
+        mgr._provisioning.terminate = _explode
 
         mgr._stop_benchmark(SimpleNamespace(id=1, name="a"))
 
         assert cleared == [1]
-        assert 1 not in mgr._provisioning_processes
 
     def test_queue_worker_skips_a_canceled_benchmark(self, monkeypatch):
         # The real cancel path: a benchmark stopped/deleted while QUEUED stays in

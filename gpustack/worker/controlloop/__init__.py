@@ -10,6 +10,7 @@ of them.
 """
 
 from gpustack.worker.controlloop.container_logs import ContainerLogPersistence
+from gpustack.worker.controlloop.launcher import ProvisionRunner, run_provisioning
 from gpustack.worker.controlloop.backoff import (
     RestartActionEnum,
     RestartBudget,
@@ -26,6 +27,7 @@ from gpustack.worker.controlloop.writeback import update_resource
 
 __all__ = [
     "ContainerLogPersistence",
+    "ProvisionRunner",
     "RestartActionEnum",
     "RestartBudget",
     "RestartDecision",
@@ -33,6 +35,7 @@ __all__ = [
     "classify_workload",
     "describe_workload_failure",
     "needs_restart",
+    "run_provisioning",
     "update_resource",
     "watch_forever",
 ]
