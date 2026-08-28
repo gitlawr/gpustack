@@ -4,12 +4,11 @@ from functools import partial
 from datetime import datetime, timezone
 import json
 import re
-import threading
 import time
 
 import requests
 import os
-from typing import Dict, Optional, Set, List, Callable
+from typing import Dict, Optional, List, Callable
 from pathlib import Path
 import logging
 
@@ -58,6 +57,7 @@ from gpustack.schemas.models import (
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.controlloop import (
     ContainerLogPersistence,
+    PortAllocator,
     ProvisionRunner,
     RestartActionEnum,
     RestartBudget,
@@ -91,9 +91,6 @@ RESTART_BUDGET = RestartBudget(
     max_attempts=None,
     first_attempt_immediate=True,
 )
-
-# Global lock for port assignment to avoid pickle serialization issues
-_port_lock = threading.Lock()
 
 _SERVER_CLASS_MAPPING = {
     BackendEnum.VLLM: VLLMServer,
@@ -227,8 +224,12 @@ class ServeManager:
         self._model_cache_by_instance = {}
         self._model_instance_by_instance_id = {}
 
-        # Instance-level port tracking to avoid conflicts
-        self._assigned_ports: Dict[int, Set[int]] = {}
+        # Instance-level port tracking to avoid conflicts. No peer lookup:
+        # unlike a cache service instance, a model instance that already has a
+        # port keeps it, so the only conflicts to avoid are within this
+        # process. A worker restart therefore starts from an empty set, which
+        # is the same gap the cache service manager's peer read closes.
+        self._ports = PortAllocator(cfg.service_port_range)
 
         # Consecutive restarts per instance, cleared once it serves again, so
         # a crash long after a recovery meets a fresh set of attempts.
@@ -1295,24 +1296,10 @@ class ServeManager:
             # Port already assigned, skip.
             return
 
-        with _port_lock:
-            if mi.port:
-                # Port already assigned, skip.
-                return
-
-            if self._assigned_ports:
-                unavailable_ports = set.union(*self._assigned_ports.values())
-            else:
-                unavailable_ports = set()
-
+        with self._ports.session(mi.id, host=mi.worker_ip) as session:
             # Main serving port
-            mi.port = network.get_free_port(
-                port_range=self._config.service_port_range,
-                unavailable_ports=unavailable_ports,
-                host=mi.worker_ip,
-            )
+            mi.port = session.take()
             mi.ports = [mi.port]
-            unavailable_ports.add(mi.port)
 
             # Additional ports for distributed servers (mp path allocates all):
             #   ports[0]: HTTP API (always)
@@ -1325,12 +1312,7 @@ class ServeManager:
                 # Allocate first so we can fence off the 10-port band vLLM reserves
                 # around VLLM_DP_MASTER_PORT (= connecting port), keeping the cross
                 # ports (incl. VLLM_PORT) outside it.
-                connecting_port = network.get_free_port(
-                    port_range=self._config.service_port_range,
-                    unavailable_ports=unavailable_ports,
-                    host=mi.worker_ip,
-                )
-                unavailable_ports.add(connecting_port)
+                connecting_port = session.take()
 
                 cross_ports: List[int] = []
                 if backend == BackendEnum.VLLM:
@@ -1344,7 +1326,7 @@ class ServeManager:
                         _, end_port = network.parse_port_range(
                             self._config.service_port_range
                         )
-                        unavailable_ports |= set(
+                        session.exclude(
                             range(
                                 connecting_port, min(connecting_port + 10, end_port + 1)
                             )
@@ -1357,18 +1339,10 @@ class ServeManager:
                         )
                         cross_port_count = 1 if dps and dps > 1 else 0
                     for _ in range(cross_port_count):
-                        cross_port = network.get_free_port(
-                            port_range=self._config.service_port_range,
-                            unavailable_ports=unavailable_ports,
-                            host=mi.worker_ip,
-                        )
-                        cross_ports.append(cross_port)
-                        unavailable_ports.add(cross_port)
+                        cross_ports.append(session.take())
 
                 mi.ports.extend(cross_ports)
                 mi.ports.append(connecting_port)
-
-            self._assigned_ports[mi.id] = set(mi.ports)
 
     def _restart_model_instance(self, mi: ModelInstance):
         """
@@ -1446,7 +1420,7 @@ class ServeManager:
 
         # Cleanup internal states.
         self._provisioning.forget(mi.id)
-        self._assigned_ports.pop(mi.id, None)
+        self._ports.release(mi.id)
         self._error_model_instances.pop(mi.id, None)
         self._model_cache_by_instance.pop(mi.id, None)
         self._model_instance_by_instance_id.pop(mi.id, None)

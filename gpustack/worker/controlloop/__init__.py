@@ -11,6 +11,8 @@ of them.
 
 from gpustack.worker.controlloop.container_logs import ContainerLogPersistence
 from gpustack.worker.controlloop.launcher import ProvisionRunner, run_provisioning
+from gpustack.worker.controlloop.ports import PortAllocator
+from gpustack.worker.controlloop.reaper import OrphanReaper, WorkloadKind
 from gpustack.worker.controlloop.backoff import (
     RestartActionEnum,
     RestartBudget,
@@ -27,10 +29,13 @@ from gpustack.worker.controlloop.writeback import update_resource
 
 __all__ = [
     "ContainerLogPersistence",
+    "OrphanReaper",
+    "PortAllocator",
     "ProvisionRunner",
     "RestartActionEnum",
     "RestartBudget",
     "RestartDecision",
+    "WorkloadKind",
     "WorkloadPhase",
     "classify_workload",
     "describe_workload_failure",

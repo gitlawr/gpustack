@@ -23,7 +23,6 @@ from gpustack.schemas.cache_services import (
     CacheServiceConfig,
     CacheServiceL2Storage,
     CacheServiceModeEnum,
-    CacheServiceStateEnum,
 )
 from gpustack.schemas.workloads import (
     Workload,
@@ -391,7 +390,7 @@ def test_start_instance_removes_stale_workload_first():
     and first start share one code path."""
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance()
-    manager._assigned_ports[instance.id] = (40009, 40010)
+    manager._ports._assigned[instance.id] = {40009, 40010}
 
     call_order = []
     ports = iter([40001, 40002])
@@ -402,7 +401,7 @@ def test_start_instance_removes_stale_workload_first():
             return_value=_new_provider(),
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             side_effect=lambda **kwargs: next(ports),
         ),
         patch(
@@ -441,7 +440,7 @@ def test_start_instance_tolerates_missing_stale_workload():
             return_value=_new_provider(),
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             return_value=40001,
         ),
         patch(
@@ -491,7 +490,7 @@ def test_start_instance_drops_flags_with_empty_rendered_values():
             return_value=provider,
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             return_value=40001,
         ),
         patch(
@@ -1080,7 +1079,7 @@ def test_start_instance_failure_sets_error_and_releases_port():
             return_value=_new_provider(),
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             return_value=40001,
         ),
         patch(
@@ -1156,7 +1155,7 @@ def test_allocate_ports_excludes_ports_of_sibling_instances():
         return 40002 if len(port_calls) == 1 else 40003
 
     with patch(
-        "gpustack.worker.cache_service_manager.network.get_free_port",
+        "gpustack.worker.controlloop.ports.network.get_free_port",
         side_effect=fake_get_free_port,
     ):
         port, metrics_port = manager._allocate_ports(instance)
@@ -1174,7 +1173,7 @@ def test_allocate_ports_excludes_ports_of_sibling_instances():
         ("40000-41000", {40001, 40011}),
         ("40000-41000", {40001, 40011, 40002}),
     ]
-    assert manager._assigned_ports[instance.id] == (40002, 40003)
+    assert manager._ports.assigned(instance.id) == {40002, 40003}
 
 
 # ---------------------------------------------------------------------------
@@ -1192,7 +1191,7 @@ def test_launch_spawns_provisioning_subprocess_with_allocated_ports():
 
     with (
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             side_effect=lambda **kwargs: next(ports),
         ),
         patch.object(manager._provisioning, "start") as start,
@@ -1210,7 +1209,7 @@ def test_launch_spawns_provisioning_subprocess_with_allocated_ports():
     assert passed_instance.id == instance.id
     assert (port, metrics_port) == (40001, 40002)
 
-    assert manager._assigned_ports[instance.id] == (40001, 40002)
+    assert manager._ports.assigned(instance.id) == {40001, 40002}
 
 
 def test_launch_failure_sets_error_and_releases_ports():
@@ -1221,7 +1220,7 @@ def test_launch_failure_sets_error_and_releases_ports():
 
     with (
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             side_effect=[40001, 40002],
         ),
         patch.object(manager._provisioning, "start", side_effect=RuntimeError("boom")),
@@ -1234,7 +1233,7 @@ def test_launch_failure_sets_error_and_releases_ports():
         state=WorkloadStateEnum.ERROR,
         state_message="boom",
     )
-    assert instance.id not in manager._assigned_ports
+    assert manager._ports.assigned(instance.id) == set()
 
 
 def test_launch_releases_the_in_flight_claim():
@@ -1246,7 +1245,7 @@ def test_launch_releases_the_in_flight_claim():
 
     with (
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             side_effect=[40001, 40002],
         ),
         patch.object(manager._provisioning, "start"),
@@ -1820,13 +1819,13 @@ def test_sync_skips_instance_when_parent_service_missing():
 def test_stop_instance_deletes_workload_and_frees_port():
     manager, _ = _build_manager(worker_id=1)
     instance = _new_instance(state=WorkloadStateEnum.RUNNING)
-    manager._assigned_ports[instance.id] = (40001, 40002)
+    manager._ports._assigned[instance.id] = {40001, 40002}
 
     with patch("gpustack.worker.cache_service_manager.delete_workload") as delete:
         manager._stop_cache_service_instance(instance)
 
     delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME)
-    assert instance.id not in manager._assigned_ports
+    assert manager._ports.assigned(instance.id) == set()
 
 
 def test_stop_instance_tolerates_missing_workload():
@@ -1960,18 +1959,18 @@ def test_start_instance_reuses_recorded_ports():
     instance = _new_instance(port=40005, metrics_port=40015)
     with (
         patch(
-            "gpustack.worker.cache_service_manager.network.is_port_available",
+            "gpustack.worker.controlloop.ports.network.is_port_available",
             return_value=True,
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port"
+            "gpustack.worker.controlloop.ports.network.get_free_port"
         ) as get_free_port,
         patch.object(manager._provisioning, "start"),
     ):
         manager._start_cache_service_instance(instance)
 
     get_free_port.assert_not_called()
-    assert manager._assigned_ports[instance.id] == (40005, 40015)
+    assert manager._ports.assigned(instance.id) == {40005, 40015}
 
 
 def test_probe_targets_metrics_port_for_http_health_check(monkeypatch):
@@ -2011,7 +2010,7 @@ def test_a_restart_numbers_a_fresh_provisioning_log():
 
     with (
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             side_effect=[40001, 40002],
         ),
         patch.object(manager._provisioning, "start") as start,
@@ -2147,7 +2146,7 @@ def test_launch_starts_container_log_persistence():
 
     with (
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             side_effect=[40001, 40002],
         ),
         patch.object(manager._provisioning, "start"),
@@ -2186,7 +2185,7 @@ def test_sync_reaps_an_instance_the_server_no_longer_reports():
     manager, clientset = _build_manager(worker_id=1)
     started = _new_instance()
     manager._workload_name_by_instance[started.id] = INSTANCE_WORKLOAD_NAME
-    manager._assigned_ports[started.id] = (40001, 40002)
+    manager._ports._assigned[started.id] = {40001, 40002}
     manager._restart_attempts[started.id] = 2
     clientset.workloads.list.return_value = SimpleNamespace(items=[])
 
@@ -2200,7 +2199,7 @@ def test_sync_reaps_an_instance_the_server_no_longer_reports():
     delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME)
     stop_logs.assert_called_once_with(started.id)
     terminate.assert_called_once_with(started.id)
-    assert started.id not in manager._assigned_ports
+    assert manager._ports.assigned(started.id) == set()
     assert started.id not in manager._restart_attempts
     assert started.id not in manager._workload_name_by_instance
 
@@ -2248,7 +2247,7 @@ def test_launch_records_the_workload_name_for_reaping():
 
     with (
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.controlloop.ports.network.get_free_port",
             side_effect=[40001, 40002],
         ),
         patch.object(manager._provisioning, "start"),

@@ -45,10 +45,10 @@ def test_cleanup_keeps_workloads_of_this_workers_instances():
     ]
     with (
         patch(
-            "gpustack.worker.workload_cleaner.list_workloads",
+            "gpustack.worker.controlloop.reaper.list_workloads",
             return_value=workloads,
         ),
-        patch("gpustack.worker.workload_cleaner.delete_workload") as delete,
+        patch("gpustack.worker.controlloop.reaper.delete_workload") as delete,
     ):
         cleaner.cleanup_orphan_workloads()
 
@@ -68,14 +68,14 @@ def test_cleanup_spares_recent_cache_service_workloads():
     workload = _cache_workload("cache-svc-5-i99")
     with (
         patch(
-            "gpustack.worker.workload_cleaner.list_workloads",
+            "gpustack.worker.controlloop.reaper.list_workloads",
             return_value=[workload],
         ),
         patch(
-            "gpustack.worker.workload_cleaner.network.is_offline",
+            "gpustack.worker.controlloop.reaper.network.is_offline",
             return_value=(False, None),
         ),
-        patch("gpustack.worker.workload_cleaner.delete_workload") as delete,
+        patch("gpustack.worker.controlloop.reaper.delete_workload") as delete,
     ):
         cleaner.cleanup_orphan_workloads()
 

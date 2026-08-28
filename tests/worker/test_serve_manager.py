@@ -60,7 +60,7 @@ def _get_workload_sequence(states):
 def _build_serve_manager(worker_id: int = 1):
     clientset = MagicMock()
     clientset.model_instances.list.return_value = SimpleNamespace(items=[])
-    cfg = SimpleNamespace(log_dir="/tmp")
+    cfg = SimpleNamespace(log_dir="/tmp", service_port_range="40000-41000")
     manager = ServeManager(lambda: worker_id, lambda: clientset, cfg)
     manager._inference_backend_manager = MagicMock()
     return manager, clientset
@@ -504,7 +504,7 @@ def _build_vgpu_manager(worker_id=1, device_index=1):
             gpu_devices=[SimpleNamespace(uuid="GPU-uuid-1", index=device_index)]
         )
     )
-    cfg = SimpleNamespace(log_dir="/tmp")
+    cfg = SimpleNamespace(log_dir="/tmp", service_port_range="40000-41000")
     manager = ServeManager(lambda: worker_id, lambda: clientset, cfg)
     manager._inference_backend_manager = MagicMock()
     return manager, clientset

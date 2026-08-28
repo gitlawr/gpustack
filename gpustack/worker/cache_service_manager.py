@@ -31,7 +31,6 @@ from gpustack.schemas.workloads import (
 )
 from gpustack.server.bus import Event, EventType
 from gpustack.server.cache_provider_catalog import get_cache_provider
-from gpustack.utils import network
 from gpustack.worker.cache_service.provisioner import (
     CacheServiceProvisioner,
     resolve_fallback_registry,
@@ -39,6 +38,7 @@ from gpustack.worker.cache_service.provisioner import (
 from gpustack.worker.cache_service.state import update_cache_service_instance
 from gpustack.worker.controlloop import (
     ContainerLogPersistence,
+    PortAllocator,
     ProvisionRunner,
     RestartActionEnum,
     RestartBudget,
@@ -125,7 +125,6 @@ class CacheServiceManager:
     parent cache service.
     """
 
-    _port_lock = threading.Lock()
     _start_lock = threading.Lock()
 
     @property
@@ -174,13 +173,6 @@ class CacheServiceManager:
     Guarded by _start_lock.
     """
 
-    _assigned_ports: Dict[int, Tuple[int, int]]
-    """
-    (port, metrics_port) pairs allocated in this process, keyed by cache
-    service instance ID. Guarded by _port_lock so concurrent starts can't
-    hand out the same port.
-    """
-
     _clientset_getter: Callable[[], ClientSet]
     _worker_id_getter: Callable[[], int]
 
@@ -195,7 +187,7 @@ class CacheServiceManager:
         self._config = cfg
         self._provision_log_dir = f"{cfg.log_dir}/cache-services"
 
-        self._assigned_ports = {}
+        self._ports = PortAllocator(cfg.service_port_range, self._peer_ports)
         self._starting = set()
         self._last_start_attempt = {}
         self._provisioning = ProvisionRunner(cfg, lambda: self._clientset.headers)
@@ -423,74 +415,47 @@ class CacheServiceManager:
 
     def _allocate_ports(self, instance: Workload) -> Tuple[int, int]:
         """
-        Allocate the instance's (port, metrics_port) pair on this worker.
-
-        Ports already handed out by this process and ports recorded on other
-        cache service instances of this worker are both treated as
-        unavailable, so a restarted worker can't re-issue a port an existing
-        instance holds. The metrics port additionally excludes the service
-        port picked just before it.
+        Allocate the instance's (service, metrics) port pair on this worker.
         """
-        with CacheServiceManager._port_lock:
-            unavailable_ports = {
-                port for pair in self._assigned_ports.values() for port in pair
-            }
-            try:
-                instances_page = self._clientset.workloads.list(
-                    # page=-1 disables pagination: a truncated page would
-                    # blind the conflict check to the ports it dropped.
-                    params={
-                        "worker_id": self._worker_id,
-                        "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE.value,
-                        "page": -1,
-                    }
-                )
-                for existing in instances_page.items or []:
-                    if existing.id == instance.id:
-                        continue
-                    unavailable_ports.update(
-                        port for port in (existing.ports or {}).values() if port
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to list cache service instances for port "
-                    f"allocation: {e}"
-                )
-
+        recorded = instance.ports or {}
+        with self._ports.session(instance.id) as session:
             # Prefer the ports already recorded on the instance: engines
             # attached to this cache server carry them in denormalized
             # snapshots that nothing refreshes, so a restart that changed
             # ports would strand every running deployment on a dead
             # endpoint until its model instances are recreated.
-            recorded = instance.ports or {}
-            port = recorded.get(CACHE_SERVICE_PORT)
-            metrics_port = recorded.get(CACHE_SERVICE_METRICS_PORT)
-            if (
-                port
-                and metrics_port
-                and port not in unavailable_ports
-                and metrics_port not in unavailable_ports
-                and network.is_port_available(port)
-                and network.is_port_available(metrics_port)
+            if not session.reuse(
+                [
+                    recorded.get(CACHE_SERVICE_PORT),
+                    recorded.get(CACHE_SERVICE_METRICS_PORT),
+                ]
             ):
-                self._assigned_ports[instance.id] = (port, metrics_port)
-                return port, metrics_port
+                session.take()
+                session.take()
+            return session.taken[0], session.taken[1]
 
-            port = network.get_free_port(
-                port_range=self._config.service_port_range,
-                unavailable_ports=unavailable_ports,
-            )
-            unavailable_ports.add(port)
-            metrics_port = network.get_free_port(
-                port_range=self._config.service_port_range,
-                unavailable_ports=unavailable_ports,
-            )
-            self._assigned_ports[instance.id] = (port, metrics_port)
-            return port, metrics_port
+    def _peer_ports(self, instance_id: int) -> Set[int]:
+        """Ports the worker's other cache service instances already hold, so a
+        restarted worker cannot re-issue one of them."""
+        instances_page = self._clientset.workloads.list(
+            # page=-1 disables pagination: a truncated page would blind the
+            # conflict check to the ports it dropped.
+            params={
+                "worker_id": self._worker_id,
+                "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE.value,
+                "page": -1,
+            }
+        )
+        return {
+            port
+            for existing in instances_page.items or []
+            if existing.id != instance_id
+            for port in (existing.ports or {}).values()
+            if port
+        }
 
     def _release_ports(self, instance_id: int):
-        with CacheServiceManager._port_lock:
-            self._assigned_ports.pop(instance_id, None)
+        self._ports.release(instance_id)
 
     def sync_cache_service_instances_state(self):
         """
