@@ -5,6 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 from gpustack.api.exceptions import NotFoundException
 from gpustack.schemas.cache_providers import (
+    CacheProviderComponent,
     CacheProvider,
     CacheProviderHealthCheck,
     CacheProviderL2Backend,
@@ -518,6 +519,77 @@ def test_start_instance_merges_user_parameters_over_template():
         "--ram=16",
         "--eviction-policy=LRU",
     ]
+
+
+def _two_component_provider() -> CacheProvider:
+    """A master serving the endpoint plus an env-driven store replica."""
+    return _new_provider(
+        components={
+            "master": CacheProviderComponent(
+                topology="replicas",
+                attach_endpoint=True,
+                run_command="mooncake_master --rpc_port {{port}}",
+            ),
+            "store": CacheProviderComponent(
+                topology="replicas",
+                depends_on="master",
+                run_command="python3 -m mooncake.mooncake_store_service",
+                env={"MOONCAKE_MASTER": "{{component.master.address}}"},
+            ),
+        }
+    )
+
+
+def test_user_parameters_reach_only_the_attach_component():
+    """Free-form parameters extend the endpoint component's argv; a
+    dependent component runs a different binary whose parser would
+    reject the foreign flags, so its vector stays declared-only."""
+    manager, clientset = _build_manager(worker_id=1)
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(
+            ram_size=8,
+            parameters=["--default_kv_lease_ttl=60000"],
+            env={"MC_TCP_ENABLE_CONNECTION_POOL": "1"},
+        )
+    )
+    provider = _two_component_provider()
+
+    create, _ = _run_start(
+        manager,
+        clientset,
+        cache_service,
+        provider,
+        instance=_new_instance(component="master"),
+    )
+    master_exec = create.call_args[0][0].containers[0].execution
+    assert master_exec.command == [
+        "mooncake_master",
+        "--rpc_port",
+        "40001",
+        "--default_kv_lease_ttl=60000",
+    ]
+
+    create, _ = _run_start(
+        manager,
+        clientset,
+        cache_service,
+        provider,
+        instance=_new_instance(
+            component="store",
+            component_addresses={"master": "10.0.0.1:40001"},
+        ),
+    )
+    store_container = create.call_args[0][0].containers[0]
+    assert store_container.execution.command == [
+        "python3",
+        "-m",
+        "mooncake.mooncake_store_service",
+    ]
+    store_env = {e.name: e.value for e in store_container.envs}
+    assert store_env["MOONCAKE_MASTER"] == "10.0.0.1:40001"
+    # service-level env is namespaced by its consumer, so it reaches
+    # every component
+    assert store_env["MC_TCP_ENABLE_CONNECTION_POOL"] == "1"
 
 
 def test_start_instance_resolves_runtime_image():

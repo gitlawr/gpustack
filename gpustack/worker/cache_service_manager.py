@@ -515,7 +515,10 @@ class CacheServiceManager:
         CMD arguments appended to the image's own. A declared component
         owns its launch (one version template cannot serve two roles);
         the version launch serves single-component providers. The user
-        parameters join whichever vector applies."""
+        parameters join the vector of the component engines attach to
+        only — the other components run different binaries whose parsers
+        would reject foreign flags (service-level env, by contrast,
+        reaches every component: env is namespaced by the consumer)."""
         if component_spec is not None:
             overrides_entrypoint = bool(component_spec.run_command)
             launch_template = component_spec.run_command or component_spec.run_args
@@ -534,7 +537,9 @@ class CacheServiceManager:
         user_parameters = (
             cache_service.config.parameters if cache_service.config else None
         )
-        if user_parameters:
+        if user_parameters and (
+            component_spec is None or component_spec.attach_endpoint
+        ):
             argv = (
                 merge_flag_arguments(argv, user_parameters)
                 if argv
