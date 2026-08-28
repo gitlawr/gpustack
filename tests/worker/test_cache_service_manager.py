@@ -7,6 +7,7 @@ from gpustack.api.exceptions import NotFoundException
 from gpustack.schemas.cache_providers import (
     CacheProviderComponent,
     CacheProvider,
+    CacheProviderField,
     CacheProviderHealthCheck,
     CacheProviderL2Backend,
     CacheProviderL2Field,
@@ -52,7 +53,9 @@ def _new_cache_service(**overrides) -> CacheService:
         cluster_id=1,
         worker_id=1,
         state=CacheServiceStateEnum.PENDING,
-        config=CacheServiceConfig(ram_size=8, chunk_size=256, env={"FOO": "bar"}),
+        config=CacheServiceConfig(
+            fields={"ram_size": 8, "chunk_size": 256}, env={"FOO": "bar"}
+        ),
     )
     fields.update(overrides)
     return CacheService(**fields)
@@ -90,6 +93,10 @@ def _new_provider(**overrides) -> CacheProvider:
             )
         },
         health_check=CacheProviderHealthCheck(scheme="tcp"),
+        managed_fields=[
+            CacheProviderField(name="ram_size", type="number", required=True),
+            CacheProviderField(name="chunk_size", type="number"),
+        ],
     )
     fields.update(overrides)
     return CacheProvider(**fields)
@@ -273,7 +280,7 @@ def test_start_instance_creates_workload_and_patches_starting():
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance()
     clientset.cache_services.get.return_value = _new_cache_service(
-        config=CacheServiceConfig(ram_size=8, chunk_size=None, env={"FOO": "bar"})
+        config=CacheServiceConfig(fields={"ram_size": 8}, env={"FOO": "bar"})
     )
 
     # get_free_port mutates the shared unavailable-ports set, so snapshot
@@ -455,7 +462,7 @@ def test_start_instance_drops_flags_with_empty_rendered_values():
     )
     instance = _new_instance()
     clientset.cache_services.get.return_value = _new_cache_service(
-        config=CacheServiceConfig(ram_size=8, chunk_size=None)
+        config=CacheServiceConfig(fields={"ram_size": 8})
     )
 
     with (
@@ -499,8 +506,7 @@ def test_start_instance_merges_user_parameters_over_template():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
-            chunk_size=None,
+            fields={"ram_size": 8},
             parameters=["--ram=16", "--eviction-policy=LRU"],
         )
     )
@@ -547,7 +553,7 @@ def test_user_parameters_reach_only_the_attach_component():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             parameters=["--default_kv_lease_ttl=60000"],
             env={"MC_TCP_ENABLE_CONNECTION_POOL": "1"},
         )
@@ -597,7 +603,9 @@ def test_start_instance_resolves_runtime_image():
     a CUDA 12 node gets the cu129 image; the plain image serves nodes
     whose runtime has no entry (and accelerator-less workers)."""
     manager, clientset = _build_manager(worker_id=1)
-    cache_service = _new_cache_service(config=CacheServiceConfig(ram_size=8))
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(fields={"ram_size": 8})
+    )
     provider = _new_provider()
     provider.versions["v1"].runtime_images = {
         "cuda": {
@@ -627,7 +635,9 @@ def test_start_instance_fails_fast_on_unsupported_accelerator():
     with the cause before any container exists — the plain image targets
     another accelerator family and would only crash-loop."""
     manager, clientset = _build_manager(worker_id=1)
-    cache_service = _new_cache_service(config=CacheServiceConfig(ram_size=8))
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(fields={"ram_size": 8})
+    )
     provider = _new_provider()
     provider.versions["v1"].runtime_images = {
         "cuda": {"13": "registry.example.com/mooncake/server:v1"}
@@ -651,8 +661,6 @@ def test_start_instance_fails_fast_on_unsupported_accelerator():
 
 
 def _field_provider(**overrides):
-    from gpustack.schemas.cache_providers import CacheProviderField
-
     return _new_provider(
         managed_fields=[
             CacheProviderField(
@@ -684,7 +692,9 @@ def test_start_instance_renders_field_defaults():
     without any user configuration (the eviction policy is required
     upstream), and a default-less unset field drops its flag entirely."""
     manager, clientset = _build_manager(worker_id=1)
-    cache_service = _new_cache_service(config=CacheServiceConfig(ram_size=8))
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(fields={"ram_size": 8})
+    )
 
     create, _ = _run_start(manager, clientset, cache_service, _field_provider())
 
@@ -700,8 +710,7 @@ def test_start_instance_field_values_and_parameter_override():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
-            fields={"eviction_ratio": 0.5},
+            fields={"ram_size": 8, "eviction_ratio": 0.5},
             parameters=["--eviction-policy=noop"],
         )
     )
@@ -722,7 +731,7 @@ def test_start_instance_custom_version_uses_service_image():
     cache_service = _new_cache_service(
         provider_version="custom",
         config=CacheServiceConfig(
-            ram_size=8, chunk_size=256, image="myteam/cache-server:dev"
+            fields={"ram_size": 8, "chunk_size": 256}, image="myteam/cache-server:dev"
         ),
     )
 
@@ -753,7 +762,9 @@ def test_start_instance_custom_version_applies_registry_override():
     manager._config.system_default_container_registry = "registry.corp.local"
     cache_service = _new_cache_service(
         provider_version="custom",
-        config=CacheServiceConfig(ram_size=8, image="myteam/cache-server:dev"),
+        config=CacheServiceConfig(
+            fields={"ram_size": 8}, image="myteam/cache-server:dev"
+        ),
     )
 
     create, _ = _run_start(
@@ -768,7 +779,7 @@ def test_start_instance_custom_version_missing_image_sets_error():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         provider_version="custom",
-        config=CacheServiceConfig(ram_size=8),
+        config=CacheServiceConfig(fields={"ram_size": 8}),
     )
 
     create, update = _run_start(
@@ -786,7 +797,9 @@ def test_start_instance_custom_version_without_provider_support_sets_error():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         provider_version="custom",
-        config=CacheServiceConfig(ram_size=8, image="myteam/cache-server:dev"),
+        config=CacheServiceConfig(
+            fields={"ram_size": 8}, image="myteam/cache-server:dev"
+        ),
     )
 
     create, update = _run_start(manager, clientset, cache_service, _new_provider())
@@ -802,7 +815,9 @@ def test_start_instance_custom_version_without_default_version_sets_error():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         provider_version="custom",
-        config=CacheServiceConfig(ram_size=8, image="myteam/cache-server:dev"),
+        config=CacheServiceConfig(
+            fields={"ram_size": 8}, image="myteam/cache-server:dev"
+        ),
     )
     provider = _new_provider(custom_version=True, default_version=None, versions={})
 
@@ -819,7 +834,7 @@ def test_start_instance_renders_fs_l2_adapter():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             l2_storages=[
                 CacheServiceL2Storage(
                     backend="fs",
@@ -847,7 +862,7 @@ def test_start_instance_resp_l2_credentials_go_to_env():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             env={"FOO": "bar"},
             l2_storages=[
                 CacheServiceL2Storage(
@@ -882,7 +897,9 @@ def test_start_instance_resp_l2_credentials_go_to_env():
 
 def test_start_instance_without_l2_storage_omits_flag():
     manager, clientset = _build_manager(worker_id=1)
-    cache_service = _new_cache_service(config=CacheServiceConfig(ram_size=8))
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(fields={"ram_size": 8})
+    )
 
     create, _ = _run_start(manager, clientset, cache_service, _l2_provider())
 
@@ -898,7 +915,7 @@ def test_start_instance_renders_l2_cascade_in_declared_order():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             l2_storages=[
                 CacheServiceL2Storage(backend="fs", params={"base_path": "/data/ssd"}),
                 CacheServiceL2Storage(
@@ -929,7 +946,7 @@ def test_start_instance_allows_repeated_l2_backend_without_env_fields():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             l2_storages=[
                 CacheServiceL2Storage(backend="fs", params={"base_path": "/data/ssd"}),
                 CacheServiceL2Storage(backend="fs", params={"base_path": "/data/hdd"}),
@@ -955,7 +972,7 @@ def test_start_instance_l2_env_collision_sets_error():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             l2_storages=[
                 CacheServiceL2Storage(
                     backend="resp",
@@ -984,7 +1001,7 @@ def test_start_instance_l2_hand_written_adapters_append_after(caplog):
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             parameters=[
                 "--l2-adapter",
                 '{"type":"s3","bucket":"kv-spill"}',
@@ -1016,7 +1033,7 @@ def test_start_instance_unknown_l2_backend_sets_error():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             l2_storages=[CacheServiceL2Storage(backend="s3", params={})],
         )
     )
@@ -1032,7 +1049,7 @@ def test_start_instance_l2_without_provider_support_sets_error():
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             l2_storages=[
                 CacheServiceL2Storage(backend="fs", params={"base_path": "/data/l2"})
             ],
@@ -1758,14 +1775,18 @@ def test_start_instance_without_run_command_runs_image_entrypoint():
         }
     )
 
-    cache_service = _new_cache_service(config=CacheServiceConfig(ram_size=8))
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(fields={"ram_size": 8})
+    )
     create, _ = _run_start(manager, clientset, cache_service, provider)
     execution = create.call_args[0][0].containers[0].execution
     assert execution.command is None
     assert not execution.args
 
     cache_service = _new_cache_service(
-        config=CacheServiceConfig(ram_size=8, parameters=["--host", "0.0.0.0"])
+        config=CacheServiceConfig(
+            fields={"ram_size": 8}, parameters=["--host", "0.0.0.0"]
+        )
     )
     create, _ = _run_start(manager, clientset, cache_service, provider)
     execution = create.call_args[0][0].containers[0].execution
@@ -1789,7 +1810,7 @@ def test_start_instance_with_run_args_keeps_the_image_entrypoint():
     )
 
     cache_service = _new_cache_service(
-        config=CacheServiceConfig(ram_size=8, parameters=["--ram", "16"])
+        config=CacheServiceConfig(fields={"ram_size": 8}, parameters=["--ram", "16"])
     )
     create, _ = _run_start(manager, clientset, cache_service, provider)
     execution = create.call_args[0][0].containers[0].execution
@@ -1815,7 +1836,7 @@ def test_start_instance_without_run_command_carries_l2_adapter_as_arguments():
 
     cache_service = _new_cache_service(
         config=CacheServiceConfig(
-            ram_size=8,
+            fields={"ram_size": 8},
             l2_storages=[
                 CacheServiceL2Storage(backend="fs", params={"base_path": "/mnt/kv"})
             ],
@@ -1837,12 +1858,16 @@ def test_start_instance_host_ipc_override(monkeypatch):
     and the CPU host-copy path works without it."""
     manager, clientset = _build_manager(worker_id=1)
 
-    cache_service = _new_cache_service(config=CacheServiceConfig(ram_size=8))
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(fields={"ram_size": 8})
+    )
     create, _ = _run_start(manager, clientset, cache_service, _new_provider())
     assert create.call_args[0][0].host_ipc is True
 
     cache_service = _new_cache_service(
-        config=CacheServiceConfig(ram_size=8, env={"GPUSTACK_HOST_IPC": "0"})
+        config=CacheServiceConfig(
+            fields={"ram_size": 8}, env={"GPUSTACK_HOST_IPC": "0"}
+        )
     )
     create, _ = _run_start(manager, clientset, cache_service, _new_provider())
     assert create.call_args[0][0].host_ipc is False
@@ -1850,7 +1875,9 @@ def test_start_instance_host_ipc_override(monkeypatch):
     from gpustack import envs as gpustack_envs
 
     monkeypatch.setattr(gpustack_envs, "HOST_IPC", "false")
-    cache_service = _new_cache_service(config=CacheServiceConfig(ram_size=8))
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(fields={"ram_size": 8})
+    )
     create, _ = _run_start(manager, clientset, cache_service, _new_provider())
     assert create.call_args[0][0].host_ipc is False
 
@@ -1862,7 +1889,9 @@ def test_start_instance_reuses_recorded_ports():
     deployment on a dead endpoint."""
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance(port=40005, metrics_port=40015)
-    cache_service = _new_cache_service(config=CacheServiceConfig(ram_size=8))
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(fields={"ram_size": 8})
+    )
     clientset.cache_services.get.return_value = cache_service
     with (
         patch(

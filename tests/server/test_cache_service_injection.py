@@ -52,7 +52,7 @@ def managed_cache_service(**overrides):
         cluster_id=1,
         worker_id=2,
         state=CacheServiceStateEnum.RUNNING,
-        config=CacheServiceConfig(ram_size=8, chunk_size=256),
+        config=CacheServiceConfig(fields={"ram_size": 8, "chunk_size": 256}),
     )
     fields.update(overrides)
     return CacheService(**fields)

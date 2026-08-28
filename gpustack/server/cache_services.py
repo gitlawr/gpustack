@@ -257,7 +257,9 @@ async def resolve_instance_cache_config(
     # the cache server renders the service value into its own command, so
     # honoring a deployment-side value here would let the engine chunk
     # differently from the server it attaches to.
-    chunk_size = service.config.chunk_size if service.config else None
+    chunk_size = ((service.config.fields if service.config else None) or {}).get(
+        "chunk_size"
+    )
     snapshot_base = dict(
         cache_service_id=service.id,
         cache_service_name=service.name,
@@ -347,7 +349,6 @@ async def resolve_instance_cache_config(
         "host": endpoint.host,
         "port": endpoint.port,
         "chunk_size": chunk_size,
-        "ram_size": service.config.ram_size if service.config else None,
         # The consuming instance's own worker IP: external connectors (e.g.
         # Mooncake) use it as the client identity / RDMA peer address, which
         # defaults to localhost and would be wrong across nodes.

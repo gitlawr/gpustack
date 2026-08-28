@@ -24,6 +24,7 @@ from gpustack.api.tenant import TenantContext
 from gpustack.routes import cache_services as cache_services_route
 from gpustack.schemas.cache_providers import (
     CacheProvider,
+    CacheProviderField,
     CacheProviderIntegration,
     CacheProviderExternalField,
     CacheProviderL2Backend,
@@ -85,6 +86,10 @@ def _provider(
         versions={"v1": CacheProviderVersionConfig(image="lmcache:v1")},
         custom_version=custom_version,
         inference_backend_integrations=[CacheProviderIntegration(backend="vLLM")],
+        managed_fields=[
+            CacheProviderField(name="ram_size", type="number", required=True),
+            CacheProviderField(name="chunk_size", type="number"),
+        ],
     )
 
 
@@ -115,13 +120,13 @@ def _provider_with_l2(supported_modes=None) -> CacheProvider:
 
 def _l2_config(backend: str, **params) -> CacheServiceConfig:
     return CacheServiceConfig(
-        ram_size=20,
+        fields={"ram_size": 20},
         l2_storages=[CacheServiceL2Storage(backend=backend, params=params)],
     )
 
 
 def _l2_cascade_config(*storages: CacheServiceL2Storage) -> CacheServiceConfig:
-    return CacheServiceConfig(ram_size=20, l2_storages=list(storages))
+    return CacheServiceConfig(fields={"ram_size": 20}, l2_storages=list(storages))
 
 
 def _patch_provider(monkeypatch, provider: CacheProvider):
@@ -157,7 +162,7 @@ def _managed_create(**overrides) -> CacheServiceCreate:
         mode=CacheServiceModeEnum.MANAGED,
         cluster_id=1,
         worker_id=5,
-        config=CacheServiceConfig(ram_size=20),
+        config=CacheServiceConfig(fields={"ram_size": 20}),
     )
     fields.update(overrides)
     return CacheServiceCreate(**fields)
@@ -258,7 +263,9 @@ async def test_create_accepts_custom_version_with_image(monkeypatch):
         ctx=_user_ctx(),
         cache_service_in=_managed_create(
             provider_version="custom",
-            config=CacheServiceConfig(ram_size=20, image="myteam/lmcache:dev"),
+            config=CacheServiceConfig(
+                fields={"ram_size": 20}, image="myteam/lmcache:dev"
+            ),
         ),
     )
 
@@ -267,7 +274,7 @@ async def test_create_accepts_custom_version_with_image(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("config", [None, CacheServiceConfig(ram_size=20)])
+@pytest.mark.parametrize("config", [None, CacheServiceConfig(fields={"ram_size": 20})])
 async def test_create_rejects_custom_version_without_image(monkeypatch, config):
     worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
     _patch_create_prereqs(monkeypatch, worker=worker)
@@ -294,7 +301,9 @@ async def test_create_rejects_custom_version_without_provider_opt_in(monkeypatch
             ctx=_user_ctx(),
             cache_service_in=_managed_create(
                 provider_version="custom",
-                config=CacheServiceConfig(ram_size=20, image="myteam/lmcache:dev"),
+                config=CacheServiceConfig(
+                    fields={"ram_size": 20}, image="myteam/lmcache:dev"
+                ),
             ),
         )
 
@@ -314,7 +323,9 @@ async def test_create_rejects_image_with_declared_version(monkeypatch):
             ctx=_user_ctx(),
             cache_service_in=_managed_create(
                 provider_version="v1",
-                config=CacheServiceConfig(ram_size=20, image="myteam/lmcache:dev"),
+                config=CacheServiceConfig(
+                    fields={"ram_size": 20}, image="myteam/lmcache:dev"
+                ),
             ),
         )
 
@@ -685,7 +696,7 @@ def _update_in(**overrides) -> CacheServiceUpdate:
         mode=CacheServiceModeEnum.MANAGED,
         cluster_id=1,
         worker_id=5,
-        config=CacheServiceConfig(ram_size=20),
+        config=CacheServiceConfig(fields={"ram_size": 20}),
     )
     fields.update(overrides)
     return CacheServiceUpdate(**fields)
@@ -883,7 +894,9 @@ async def test_update_accepts_custom_version_with_image(monkeypatch):
         id=9,
         cache_service_in=_update_in(
             provider_version="custom",
-            config=CacheServiceConfig(ram_size=20, image="myteam/lmcache:dev"),
+            config=CacheServiceConfig(
+                fields={"ram_size": 20}, image="myteam/lmcache:dev"
+            ),
         ),
     )
 
@@ -905,7 +918,7 @@ async def test_update_rejects_custom_version_without_image(monkeypatch):
             id=9,
             cache_service_in=_update_in(
                 provider_version="custom",
-                config=CacheServiceConfig(ram_size=20),
+                config=CacheServiceConfig(fields={"ram_size": 20}),
             ),
         )
 
@@ -928,7 +941,9 @@ async def test_update_rejects_image_with_declared_version(monkeypatch):
             id=9,
             cache_service_in=_update_in(
                 provider_version="v1",
-                config=CacheServiceConfig(ram_size=20, image="myteam/lmcache:dev"),
+                config=CacheServiceConfig(
+                    fields={"ram_size": 20}, image="myteam/lmcache:dev"
+                ),
             ),
         )
 
@@ -951,7 +966,9 @@ async def test_create_rejects_blank_config_parameters(monkeypatch, bad_parameter
             session=MagicMock(),
             ctx=_user_ctx(),
             cache_service_in=_managed_create(
-                config=CacheServiceConfig(ram_size=20, parameters=bad_parameters)
+                config=CacheServiceConfig(
+                    fields={"ram_size": 20}, parameters=bad_parameters
+                )
             ),
         )
 
@@ -1007,7 +1024,9 @@ async def test_create_accepts_free_form_config_parameters(monkeypatch):
         session=MagicMock(),
         ctx=_user_ctx(),
         cache_service_in=_managed_create(
-            config=CacheServiceConfig(ram_size=20, parameters=["--eviction-policy=LRU"])
+            config=CacheServiceConfig(
+                fields={"ram_size": 20}, parameters=["--eviction-policy=LRU"]
+            )
         ),
     )
 
@@ -1262,7 +1281,7 @@ async def test_create_normalizes_empty_l2_storages_to_none(monkeypatch):
         session=MagicMock(),
         ctx=_user_ctx(),
         cache_service_in=_managed_create(
-            config=CacheServiceConfig(ram_size=20, l2_storages=[])
+            config=CacheServiceConfig(fields={"ram_size": 20}, l2_storages=[])
         ),
     )
 
@@ -2148,7 +2167,9 @@ async def test_update_requires_ram_size(monkeypatch):
             session=MagicMock(),
             ctx=_user_ctx(),
             id=9,
-            cache_service_in=_update_in(config=CacheServiceConfig(ram_size=None)),
+            cache_service_in=_update_in(
+                config=CacheServiceConfig(fields={"ram_size": None})
+            ),
         )
     assert "ram_size" in exc_info.value.message
     service.update.assert_not_called()
@@ -2161,7 +2182,7 @@ def _fielded_provider():
     from gpustack.schemas.cache_providers import CacheProviderField
 
     provider = _provider()
-    provider.managed_fields = [
+    provider.managed_fields = provider.managed_fields + [
         CacheProviderField(
             name="eviction_policy",
             default="LRU",
@@ -2195,7 +2216,9 @@ async def test_create_rejects_invalid_managed_field_values(
         monkeypatch, worker=SimpleNamespace(id=5, cluster_id=1, deleted_at=None)
     )
 
-    create_in = _managed_create(config=CacheServiceConfig(ram_size=20, fields=fields))
+    create_in = _managed_create(
+        config=CacheServiceConfig(fields={"ram_size": 20, **fields})
+    )
     with pytest.raises(BadRequestException) as exc_info:
         await cache_services_route.create_cache_service(
             session=MagicMock(), ctx=_user_ctx(), cache_service_in=create_in

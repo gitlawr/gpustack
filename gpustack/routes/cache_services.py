@@ -870,19 +870,6 @@ async def _validate_cache_service_mode(
     """
     if cache_service_in.mode == CacheServiceModeEnum.MANAGED:
         provider = get_cache_provider(cache_service_in.provider_name)
-        # An explicit capacity keeps the cache server's memory footprint
-        # deliberate instead of falling through to an engine-internal
-        # default the platform can't see. Multi-component providers state
-        # capacity through their own declared fields (a Mooncake master
-        # takes no capacity at all), so the built-in field is theirs to
-        # skip.
-        if not (provider and provider.components) and (
-            cache_service_in.config is None or not cache_service_in.config.ram_size
-        ):
-            raise BadRequestException(
-                message="config.ram_size is required for managed cache services"
-            )
-
         layouts = provider.component_layouts() if provider else {"": "replicas"}
         if all(topology == "per_node" for topology in layouts.values()):
             if cache_service_in.worker_id is not None:
@@ -954,6 +941,24 @@ def _validate_external_fields(cache_service_in: CacheServiceBase) -> None:
             )
 
 
+def _validate_required_fields(
+    cache_service_in: CacheServiceBase, provider, values: Dict[str, Any]
+) -> None:
+    """A required field must resolve to something the templates can
+    render — the configured value or the declared default."""
+    for field in provider.managed_fields:
+        if not field.required:
+            continue
+        value = values.get(field.name, field.default)
+        if value is None or value == "":
+            raise BadRequestException(
+                message=(
+                    f"config.fields.{field.name} is required for "
+                    f"provider '{cache_service_in.provider_name}'"
+                )
+            )
+
+
 def _validate_managed_fields(cache_service_in: CacheServiceBase) -> None:
     """config.fields must match the provider's managed_fields declaration:
     an unknown name is a typo (the worker would silently ignore it), and a
@@ -962,10 +967,12 @@ def _validate_managed_fields(cache_service_in: CacheServiceBase) -> None:
     budget."""
     config = cache_service_in.config
     values = (config.fields if config else None) or {}
-    if not values:
-        return
     provider = get_cache_provider(cache_service_in.provider_name)
     if provider is None:
+        return
+    if getattr(cache_service_in, "mode", None) == CacheServiceModeEnum.MANAGED:
+        _validate_required_fields(cache_service_in, provider, values)
+    if not values:
         return
     declared = {field.name: field for field in provider.managed_fields}
     for name, value in values.items():
@@ -1152,9 +1159,9 @@ async def update_cache_service(
                 )
 
     # Update runs the same validation set as create: without it, a
-    # provider_version unknown to the catalog or a cleared ram_size only
-    # surfaces as a worker-side start failure, and worker_id could be
-    # re-pointed across clusters.
+    # provider_version unknown to the catalog or a cleared required field
+    # only surfaces as a worker-side start failure, and worker_id could
+    # be re-pointed across clusters.
     _validate_cache_service_provider(cache_service_in)
     _validate_cache_service_custom_version(cache_service_in)
     _validate_cache_service_config(cache_service_in.config)

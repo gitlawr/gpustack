@@ -591,12 +591,6 @@ class CacheServiceManager:
             "host": "0.0.0.0",
             "port": port,
             "metrics_port": metrics_port,
-            "ram_size": (
-                cache_service.config.ram_size if cache_service.config else None
-            ),
-            "chunk_size": (
-                cache_service.config.chunk_size if cache_service.config else None
-            ),
         }
         field_values = (
             cache_service.config.fields if cache_service.config else None

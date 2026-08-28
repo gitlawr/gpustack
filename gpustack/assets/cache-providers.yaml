@@ -89,6 +89,23 @@
   # follow the v0.5.2 storage-manager argument group. The eviction
   # policy is required upstream, so its default always renders.
   managed_fields:
+    - name: ram_size
+      label: RAM Size (GiB)
+      description: Cache capacity held in the cache server's memory.
+      type: number
+      required: true
+      default: 20
+      min: 1
+      step: 1
+    - name: chunk_size
+      label: Chunk Size
+      description: >-
+        Tokens per KV cache chunk. Smaller chunks reuse at finer
+        granularity but cost more overhead; empty uses the engine
+        default.
+      type: number
+      min: 1
+      step: 1
     - name: eviction_policy
       label: Eviction Policy
       default: LRU
@@ -376,6 +393,9 @@
       topology: replicas
       replicas_by: store_replicas
       depends_on: master
+      # per-replica claim the form's placement pre-flight checks
+      resource_profile:
+        ram_gib: "{{store_segment_size}}"
       enabled_by: pool_mode
       enabled_when: standalone-store
       gpu_access: false
@@ -563,6 +583,23 @@
     ram_gib: "{{ram_size}}"
     cpu: 2
   managed_fields:
+    - name: ram_size
+      label: RAM Size (GiB)
+      description: Cache capacity held in the cache server's memory.
+      type: number
+      required: true
+      default: 20
+      min: 1
+      step: 1
+    - name: chunk_size
+      label: Chunk Size
+      description: >-
+        Tokens per KV cache chunk. Smaller chunks reuse at finer
+        granularity but cost more overhead; empty uses the engine
+        default.
+      type: number
+      min: 1
+      step: 1
     - name: eviction_policy
       label: Eviction Policy
       default: LRU

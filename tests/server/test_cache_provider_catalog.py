@@ -315,15 +315,23 @@ def test_lmcache_provider_declaration():
     # and consumers read the effective command off the version config.
     for declared in provider.versions.values():
         assert declared.run_command == provider.default_run_command
-    # The eviction knobs are declared fields: structured in the UI, wired
-    # into the run command through their placeholders. The eviction policy
-    # is required upstream, so its default renders even untouched.
+    # Capacity, chunking and the eviction knobs are all ordinary declared
+    # fields wired into the run command through their placeholders; the
+    # platform reserves only host/port/metrics_port for itself.
     fields = {field.name: field for field in provider.managed_fields}
     assert set(fields) == {
+        "ram_size",
+        "chunk_size",
         "eviction_policy",
         "eviction_trigger_watermark",
         "eviction_ratio",
     }
+    # capacity always renders (required guards a cleared value, the
+    # default seeds the form); chunking may fall through to the engine
+    assert fields["ram_size"].required and fields["ram_size"].default == 20
+    assert not fields["chunk_size"].required
+    # the pre-flight sizes an instance by the capacity field
+    assert provider.resource_profile.ram_gib == "{{ram_size}}"
     assert fields["eviction_policy"].default == "LRU"
     assert fields["eviction_policy"].options == ["LRU", "IsolatedLRU", "noop"]
     assert fields["eviction_trigger_watermark"].type == "number"
@@ -341,7 +349,7 @@ def test_lmcache_provider_declaration():
     # shadows a reserved platform placeholder.
     for name in fields:
         assert f"{{{{{name}}}}}" in version_config.run_command
-    assert not set(fields) & {"host", "port", "metrics_port", "ram_size", "chunk_size"}
+    assert not set(fields) & {"host", "port", "metrics_port"}
     # Capacity flows through --l1-size-gb on the command line, not env.
     assert not version_config.env
 

@@ -98,12 +98,6 @@ class CacheServiceL2Storage(BaseModel):
 
 
 class CacheServiceConfig(BaseModel):
-    ram_size: Optional[int] = None
-    """Cache capacity held in the cache server's memory (unit: GiB)."""
-
-    chunk_size: Optional[int] = None
-    """Size for each KV cache chunk (unit: number of tokens)."""
-
     image: Optional[str] = None
     """Container image for the custom provider version; ignored otherwise."""
 

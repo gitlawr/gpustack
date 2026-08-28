@@ -182,7 +182,11 @@ class CacheProviderIntegration(BaseModel):
 
 
 class CacheProviderResourceProfile(BaseModel):
-    """How capacity config maps to host resource claims. Informational in v1."""
+    """How capacity config maps to per-instance host resource claims.
+    ram_gib is a template over the declared field values (e.g.
+    "{{ram_size}}"); the service form's placement pre-flight renders it
+    to warn about workers that cannot hold an instance. The scheduler
+    does not enforce it."""
 
     ram_gib: Optional[str] = None
     cpu: Optional[float] = None
@@ -323,7 +327,7 @@ class CacheProviderField(BaseModel):
 
     name: str
     """Placeholder name; must not collide with the reserved platform
-    placeholders (host/port/metrics_port/ram_size/chunk_size)."""
+    placeholders (host/port/metrics_port)."""
 
     label: Optional[str] = None
     description: Optional[str] = None
@@ -333,6 +337,11 @@ class CacheProviderField(BaseModel):
     "true"/"false")."""
 
     default: Optional[Any] = None
+
+    required: bool = False
+    """Managed creation rejects a blank value (a declared default
+    satisfies it), and the form marks the input accordingly."""
+
     options: Optional[List[Union[str, "CacheProviderFieldOption"]]] = None
     """When set, the UI offers a fixed choice. An entry is either the
     value itself or {value, label} when the display text differs from
@@ -472,6 +481,12 @@ class CacheProviderComponent(BaseModel):
     needs a CUDA context for its IPC transport; a pure-RAM component
     (Mooncake master/store) opts out and saves the per-GPU context
     memory."""
+
+    resource_profile: Optional[CacheProviderResourceProfile] = None
+    """Per-instance host resource claim of this component (e.g. the
+    store's segment size), same template semantics as the provider-level
+    profile — which describes the single-component case only and does
+    not apply to components."""
 
     @model_validator(mode="after")
     def _one_launch_slot(self):
@@ -894,8 +909,6 @@ RESERVED_INJECTION_PLACEHOLDERS = frozenset(
         "host",
         "port",
         "metrics_port",
-        "ram_size",
-        "chunk_size",
         "local_hostname",
         "master_server_address",
         "locality",
