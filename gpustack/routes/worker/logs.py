@@ -614,18 +614,39 @@ async def get_serve_logs(
 
 @router.get("/cacheServiceInstanceLogs/{instance_id}")
 async def get_cache_service_instance_logs(
+    request: Request,
     instance_id: int,
     log_options: LogOptionsDep,
     cache_service_id: int = Query(),
 ):
-    """Stream a managed cache service instance's container logs.
+    """Stream a managed cache service instance's logs as two chained sources:
+    the provisioning log the worker's subprocess wrote — provider resolution
+    and image pull, everything that happens before a container exists —
+    followed by the container's own logs read live from the container runtime.
 
-    Logs are read live from the container runtime rather than from
-    persisted files, so the ``previous`` option has no effect here.
+    Container logs are read live rather than from persisted files, so the
+    ``previous`` option has no effect here.
     """
+    log_dir = request.app.state.config.log_dir
+    provision_log_path = Path(log_dir) / "cache-services" / f"{instance_id}.log"
     workload_name = cache_service_instance_workload_name(cache_service_id, instance_id)
 
     def iter_logs():
+        # The provisioning log covers a single start and is short, so it
+        # streams whole; ``tail`` applies to the container logs, which is
+        # where a caller asking for the last N lines means it.
+        try:
+            if provision_log_path.exists():
+                with open(
+                    provision_log_path, "r", encoding="utf-8", errors="ignore"
+                ) as provision_log:
+                    yield from provision_log
+        except Exception as e:
+            logger.warning(
+                f"Failed to read provisioning logs of cache service instance "
+                f"{instance_id}: {e}"
+            )
+
         try:
             logs = logs_workload(
                 name=workload_name,
@@ -633,7 +654,10 @@ async def get_cache_service_instance_logs(
                 follow=log_options.follow,
             )
         except Exception as e:
-            yield f"Failed to fetch cache service logs: {e}\n"
+            # Before the container exists — image still pulling, or a start
+            # that failed early — the provisioning log above is the whole
+            # story, so this is a note rather than the only output.
+            yield f"Cache service container logs are not available yet: {e}\n"
             return
         if isinstance(logs, (bytes, str)):
             yield logs

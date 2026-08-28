@@ -1,61 +1,46 @@
 import asyncio
 import logging
-import shlex
+import multiprocessing
+import os
 import socket
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from pathlib import Path
+from typing import Callable, Dict, Optional, Set, Tuple
 
 import httpx
+import setproctitle
 
 from gpustack_runtime.deployer import (
-    Container,
-    ContainerEnv,
-    ContainerExecution,
-    ContainerProfileEnum,
-    ContainerResources,
-    WorkloadPlan,
-    WorkloadStatusStateEnum,
-    create_workload,
     delete_workload,
     get_workload,
 )
-from gpustack_runtime.detector import detect_backend, detect_devices
-from gpustack_runtime.envs import (
-    GPUSTACK_RUNTIME_DETECT_BACKEND_MAP_RESOURCE_KEY,
-    to_bool,
-)
+from gpustack_runtime.logging import setup_logging as setup_runtime_logging
 
-from gpustack import envs
 from gpustack.api.exceptions import NotFoundException
 from gpustack.client import ClientSet
-from gpustack.config import registration
 from gpustack.config.config import Config
-from gpustack.schemas.cache_providers import (
-    CUSTOM_VERSION,
-    CacheProvider,
-    CacheProviderHealthCheck,
-    CacheProviderVersionConfig,
-    render_l2_adapter,
-    render_template,
-)
+from gpustack.logging import RedirectStdoutStderr, setup_logging
+from gpustack.schemas.cache_providers import CacheProviderHealthCheck
 from gpustack.schemas.cache_services import (
     CacheServiceInstance,
-    CacheServiceInstanceUpdate,
     CacheServicePublic,
     CacheServiceStateEnum,
 )
 from gpustack.server.bus import Event, EventType
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.utils import network
-from gpustack.utils.attrs import set_attr
-from gpustack.utils.command import (
-    drop_empty_flag_values,
-    extract_flag_arguments,
-    merge_flag_arguments,
+from gpustack.utils.process import add_signal_handlers, terminate_process_tree
+from gpustack.worker.cache_service.provisioner import (
+    CacheServiceProvisioner,
+    resolve_fallback_registry,
 )
-from gpustack.utils.config import apply_registry_override_to_image
-from gpustack.utils.runtime import transform_workload_plan
+from gpustack.worker.cache_service.state import update_cache_service_instance
+from gpustack.worker.controlloop import (
+    WorkloadPhase,
+    classify_workload,
+    watch_forever,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +98,23 @@ class CacheServiceManager:
 
     _starting: Set[int]
     """
-    IDs of instances whose start is in flight in this process, so the sync
-    pass does not re-drive a start that is still running (pulling the
-    provider image can take minutes). Guarded by _start_lock.
+    IDs of instances whose launch is in flight in this process — from the
+    moment the start is claimed until the provisioning subprocess is spawned.
+    Guarded by _start_lock.
+    """
+
+    _provisioning_processes: Dict[int, multiprocessing.Process]
+    """
+    The mapping of cache service instance ID to provisioning (sub)process.
+    While the (sub)process is alive the instance is still being provisioned —
+    pulling the provider image can take minutes — so the sync pass neither
+    re-drives its start nor treats the missing workload as a crash.
+    """
+
+    _provision_log_dir: str
+    """
+    The directory holding the provisioning logs of cache service instances
+    (written by the subprocess).
     """
 
     _last_start_attempt: Dict[int, datetime]
@@ -145,26 +144,24 @@ class CacheServiceManager:
         self._worker_id_getter = worker_id_getter
         self._clientset_getter = clientset_getter
         self._config = cfg
+        self._provision_log_dir = f"{cfg.log_dir}/cache-services"
 
         self._assigned_ports = {}
         self._starting = set()
         self._last_start_attempt = {}
+        self._provisioning_processes = {}
+
+        os.makedirs(self._provision_log_dir, exist_ok=True)
 
     async def watch_cache_service_instances_event(self):
         """
         Loop to watch cache service instances' event and handle.
         """
-        logger.info("Watching cache service instances event.")
-        while True:
-            try:
-                await self._clientset.cache_service_instances.awatch(
-                    callback=self._handle_cache_service_instance_event
-                )
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error watching cache service instances: {e}")
-                await asyncio.sleep(5)
+        await watch_forever(
+            "cache service instances",
+            self._clientset.cache_service_instances.awatch,
+            callback=self._handle_cache_service_instance_event,
+        )
 
     def _handle_cache_service_instance_event(self, event: Event):
         """
@@ -192,9 +189,10 @@ class CacheServiceManager:
 
     def _schedule_start(self, instance: CacheServiceInstance):
         """
-        Run the blocking workload creation off the watch event loop.
-        Without a running loop (direct invocation), run inline. A start
-        already in flight for this instance is not started a second time.
+        Run the launch off the watch event loop: allocating ports lists the
+        worker's instances, which must not block the loop. Without a running
+        loop (direct invocation), run inline. A start already in flight for
+        this instance is not started a second time.
         """
         if not self._claim_start(instance.id):
             logger.debug(
@@ -227,174 +225,74 @@ class CacheServiceManager:
             self._starting.discard(instance_id)
             self._last_start_attempt.pop(instance_id, None)
 
+    def _is_provisioning(self, instance_id: int) -> bool:
+        """
+        Whether a start for this instance is still under way in this process,
+        either claimed but not yet spawned, or running in a subprocess.
+        """
+        with CacheServiceManager._start_lock:
+            if instance_id in self._starting:
+                return True
+        process = self._provisioning_processes.get(instance_id)
+        if process is None:
+            return False
+        # Reap an exited child here so it does not linger as a zombie until
+        # the instance is stopped, and so is_alive() reports the truth.
+        process.join(timeout=0)
+        if process.is_alive():
+            return True
+        self._provisioning_processes.pop(instance_id, None)
+        return False
+
+    def _provision_log_path(self, instance_id: int) -> str:
+        return f"{self._provision_log_dir}/{instance_id}.log"
+
     def _start_cache_service_instance(self, instance: CacheServiceInstance):
         """
-        Start the managed cache server container for a cache service
-        instance.
+        Launch the provisioning subprocess for a cache service instance.
+
+        Resolving the provider declaration and pulling its image runs in a
+        subprocess whose output lands in the instance's provisioning log, so a
+        start that is slow or fails before the container exists is readable
+        while it happens. Ports are allocated here, in the process that owns
+        the worker-wide allocation, and passed in.
 
         Args:
             instance: The cache service instance to start.
         """
         try:
-            try:
-                cache_service = self._clientset.cache_services.get(
-                    id=instance.cache_service_id
-                )
-            except NotFoundException:
-                self._update_cache_service_instance(
-                    instance.id,
-                    state=CacheServiceStateEnum.ERROR,
-                    state_message=(
-                        f"Parent cache service {instance.cache_service_id} "
-                        "not found."
-                    ),
-                )
-                return
-
-            provider = get_cache_provider(cache_service.provider_name)
-            if provider is None:
-                self._update_cache_service_instance(
-                    instance.id,
-                    state=CacheServiceStateEnum.ERROR,
-                    state_message=f"Unknown cache provider: {cache_service.provider_name}",
-                )
-                return
-
-            version_config, resolved_version, source_image = (
-                self._resolve_version_config(cache_service, provider)
-            )
-
-            # Starting is idempotent: a stale workload left over from a
-            # previous run of this instance (crash, manual restart) is removed
-            # first, so restart and first start share this code path.
-            deployment_metadata = instance.get_deployment_metadata()
-            try:
-                delete_workload(deployment_metadata.name)
-            except Exception as e:
-                # The workload may not exist yet.
+            if self._is_provisioning(instance.id):
                 logger.debug(
-                    f"Skipped deleting workload {deployment_metadata.name} "
-                    f"before start: {e}"
+                    f"Skipped starting cache service instance {instance.id}: "
+                    "a start is already in flight"
                 )
+                return
+
             self._release_ports(instance.id)
-
             port, metrics_port = self._allocate_ports(instance)
-            params = self._build_template_params(
-                cache_service, provider, port, metrics_port
-            )
 
-            # A declared run command is the whole argument vector and takes
-            # the image's ENTRYPOINT slot; run_args instead keeps the
-            # image's own entrypoint and rides as the CMD arguments
-            # appended to it (container semantics: args alone append, a
-            # command replaces). The user parameters and L2 flags below
-            # join whichever vector the version declared.
-            overrides_entrypoint = bool(version_config.run_command)
-            launch_template = version_config.run_command or version_config.run_args
-            argv: Optional[List[str]] = None
-            if launch_template:
-                # Render per token so an optional placeholder resolving to
-                # None yields an empty token that is dropped together with
-                # the flag it belongs to.
-                rendered_tokens = [
-                    render_template(token, params)
-                    for token in shlex.split(launch_template)
-                ]
-                argv = drop_empty_flag_values(rendered_tokens)
-            user_parameters = (
-                cache_service.config.parameters if cache_service.config else None
-            )
-            if user_parameters:
-                argv = (
-                    merge_flag_arguments(argv, user_parameters)
-                    if argv
-                    else list(user_parameters)
-                )
-
-            # L2 storage config renders after the user-parameters merge so
-            # the structured config always wins over a hand-written flag.
-            argv, l2_env = self._apply_l2_storage(cache_service, provider, argv)
-
-            # Provider env templates render first; entries rendering empty are
-            # dropped so unset optional parameters don't produce invalid
-            # config. Service-level env overrides provider defaults, and the
-            # L2 storage credentials override both.
-            env: Dict[str, str] = {}
-            for key, value in (version_config.env or {}).items():
-                rendered = render_template(value, params)
-                if rendered:
-                    env[key] = rendered
-            if cache_service.config and cache_service.config.env:
-                env.update(cache_service.config.env)
-            env.update(l2_env)
-
-            fallback_registry = registration.determine_default_registry(
-                self._config.system_default_container_registry
-            )
-            image = apply_registry_override_to_image(
-                self._config, source_image, fallback_registry
-            )
-            if not image:
-                raise ValueError(
-                    f"Failed to resolve image for cache provider "
-                    f"{cache_service.provider_name} version {resolved_version}"
-                )
-
-            run_container = Container(
-                image=image,
-                name="default",
-                profile=ContainerProfileEnum.RUN,
-                execution=ContainerExecution(
-                    privileged=False,
-                    command=argv if overrides_entrypoint else None,
-                    args=None if overrides_entrypoint else argv,
+            log_file_path = self._provision_log_path(instance.id)
+            process = multiprocessing.Process(
+                target=CacheServiceManager._provision_cache_service_instance,
+                args=(
+                    instance,
+                    port,
+                    metrics_port,
+                    self._clientset.headers,
+                    log_file_path,
+                    self._config,
+                    # Resolved here so the child does not re-probe the default
+                    # registry, which may cost a network round trip.
+                    resolve_fallback_registry(self._config),
                 ),
-                envs=[
-                    ContainerEnv(name=name, value=value) for name, value in env.items()
-                ],
-                resources=self._gpu_resources(),
             )
-            workload_plan = WorkloadPlan(
-                name=deployment_metadata.name,
-                host_network=True,
-                # Shares the host IPC namespace with the engine containers
-                # so the cache server can import their KV buffers by CUDA
-                # IPC handle (the lmcache_driven zero-copy path). Same
-                # escape hatch as the engine side: service env, then the
-                # worker-global GPUSTACK_HOST_IPC, overrides the default —
-                # e.g. Kubernetes PodSecurity baseline rejects hostIPC
-                # pods, and the CPU host-copy path works without it.
-                host_ipc=self._host_ipc_enabled(cache_service),
-                containers=[run_container],
-                labels=deployment_metadata.labels,
-            )
+            process.daemon = False
+            process.start()
+            self._provisioning_processes[instance.id] = process
             logger.info(
-                f"Creating cache service workload {deployment_metadata.name} "
-                f"with image {image} on port {port}"
+                f"Provisioning cache service instance {instance.id} "
+                f"(service id={instance.cache_service_id}) on port {port}"
             )
-            create_workload(
-                transform_workload_plan(self._config, workload_plan, fallback_registry)
-            )
-
-            if self._update_cache_service_instance(
-                instance.id,
-                state=CacheServiceStateEnum.STARTING,
-                port=port,
-                metrics_port=metrics_port,
-                state_message="",
-            ):
-                logger.info(
-                    f"Started cache service {cache_service.name} instance "
-                    f"(id={instance.id}) on port {port}"
-                )
-            else:
-                # The container is up but the server still sees the instance
-                # as PENDING; the sync pass re-drives the start rather than
-                # leaving a running cache server nothing points at.
-                logger.error(
-                    f"Started cache service workload {deployment_metadata.name} "
-                    f"but failed to mark instance {instance.id} as starting"
-                )
         except Exception as e:
             self._release_ports(instance.id)
             self._update_cache_service_instance(
@@ -409,206 +307,53 @@ class CacheServiceManager:
         finally:
             self._release_start(instance.id)
 
-    def _gpu_resources(self) -> ContainerResources:
-        """
-        Expose every local GPU to the cache server so the CUDA-IPC transfer
-        path (LMCache's lmcache_driven mode) can map the KV buffers of the
-        co-located engines: importing an IPC handle needs a CUDA context on
-        the same device, and a per-node server attaches to engines on any of
-        the node's GPUs. Empty on a worker with no detected accelerator, so
-        the server stays CPU-only there (auto mode falls back to a host-copy
-        transfer).
-        """
-        resources = ContainerResources()
-        backend = detect_backend()
-        if isinstance(backend, str) and backend:
-            key = GPUSTACK_RUNTIME_DETECT_BACKEND_MAP_RESOURCE_KEY.get(backend)
-            if key:
-                resources[key] = "all"
-        return resources
-
-    def _resolve_version_config(
-        self,
-        cache_service: CacheServicePublic,
-        provider: CacheProvider,
-    ) -> Tuple[CacheProviderVersionConfig, Optional[str], str]:
-        """
-        Resolve the (version config, version identifier, container image)
-        the instance runs with. The reserved "custom" version keeps the
-        default version's run command and env templates but takes the
-        image from the service config, so the image must be
-        command-compatible with the default declaration. Raises ValueError
-        when the catalog or the service config cannot serve the request.
-        """
-        if cache_service.provider_version == CUSTOM_VERSION:
-            if not provider.custom_version:
-                raise ValueError(
-                    f"Cache provider {cache_service.provider_name} does not "
-                    f"allow the custom version"
-                )
-            version_config, _ = provider.get_version_config(None)
-            if version_config is None:
-                raise ValueError(
-                    f"Cache provider {cache_service.provider_name} has no "
-                    f"default version to template the custom version"
-                )
-            image = cache_service.config.image if cache_service.config else None
-            if not image:
-                raise ValueError(
-                    f"config.image is required when provider_version is "
-                    f"'{CUSTOM_VERSION}'"
-                )
-            return version_config, CUSTOM_VERSION, image
-
-        version_config, resolved_version = provider.get_version_config(
-            cache_service.provider_version
-        )
-        if version_config is None:
-            raise ValueError(
-                f"Unknown version '{resolved_version}' for cache provider "
-                f"{cache_service.provider_name}"
-            )
-        backend, runtime_version = self._detect_runtime()
-        # Fail fast on an unsupported accelerator: falling back to the
-        # plain image (built for another accelerator family) would only
-        # crash-loop the container without ever naming the real cause.
-        if not version_config.supports_runtime(backend):
-            raise ValueError(
-                f"Cache provider {cache_service.provider_name} "
-                f"({resolved_version}) has no image for {backend} workers; "
-                f"scope the service to supported workers via the worker "
-                f"selector"
-            )
-        return (
-            version_config,
-            resolved_version,
-            version_config.resolve_image(backend, runtime_version),
-        )
-
-    def _detect_runtime(self) -> Tuple[Optional[str], Optional[str]]:
-        """
-        This node's (accelerator backend, runtime version), e.g.
-        ("cuda", "13.0") — the key into a version's runtime_images.
-        (None, None) on accelerator-less workers, where the plain image
-        serves.
-        """
-        backend = detect_backend()
-        if not (isinstance(backend, str) and backend):
-            return None, None
-        version = None
-        try:
-            version = next(
-                (
-                    device.runtime_version
-                    for device in detect_devices()
-                    if device.runtime_version
-                ),
-                None,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to detect accelerator runtime version: {e}")
-        return backend, version
-
     @staticmethod
-    def _host_ipc_enabled(cache_service: CacheServicePublic) -> bool:
-        """Host IPC defaults on for cache servers (the CUDA-IPC transfer
-        path needs it) but stays overridable: the service's env, then the
-        worker-global GPUSTACK_HOST_IPC, wins over the default."""
-        service_env = (cache_service.config.env if cache_service.config else None) or {}
-        if envs.HOST_IPC_ENV in service_env:
-            return to_bool(service_env[envs.HOST_IPC_ENV])
-        if envs.HOST_IPC is not None:
-            return to_bool(envs.HOST_IPC)
-        return True
-
-    @staticmethod
-    def _build_template_params(
-        cache_service: CacheServicePublic,
-        provider: CacheProvider,
+    def _provision_cache_service_instance(
+        instance: CacheServiceInstance,
         port: int,
         metrics_port: int,
-    ) -> Dict[str, Any]:
+        client_headers: dict,
+        log_file_path: str,
+        cfg: Config,
+        fallback_registry: Optional[str] = None,
+    ):
         """
-        Build the placeholder namespace the version templates render
-        against: the reserved platform keys, extended by the provider's
-        declared fields carrying configured values (falling back to
-        declared defaults). The platform keys win over a same-named field.
-        """
-        params: Dict[str, Any] = {
-            "host": "0.0.0.0",
-            "port": port,
-            "metrics_port": metrics_port,
-            "ram_size": (
-                cache_service.config.ram_size if cache_service.config else None
-            ),
-            "chunk_size": (
-                cache_service.config.chunk_size if cache_service.config else None
-            ),
-        }
-        field_values = (
-            cache_service.config.fields if cache_service.config else None
-        ) or {}
-        for field in provider.managed_fields:
-            value = field_values.get(field.name, field.default)
-            if isinstance(value, bool):
-                value = str(value).lower()
-            params.setdefault(field.name, value)
-        return params
+        Provision a cache service instance in a subprocess.
+        Exits the subprocess once the workload has been created.
 
-    def _apply_l2_storage(
-        self,
-        cache_service: CacheServicePublic,
-        provider: CacheProvider,
-        argv: Optional[List[str]],
-    ) -> Tuple[Optional[List[str]], Dict[str, str]]:
+        Args:
+            instance: The cache service instance to provision.
+            port: The service port allocated for the instance.
+            metrics_port: The metrics port allocated for the instance.
+            client_headers: The headers for the clientset.
+            log_file_path: The path to the provisioning log file.
+            cfg: The configuration.
+            fallback_registry: The container registry to fall back to when a
+                provider image carries none.
         """
-        Attach the service's L2 storage config to the cache server argument
-        vector: each entry renders as one occurrence of the provider-declared
-        flag carrying its adapter JSON, appended in declared order — the cache
-        server prefers the earliest tier for reads and writes to all of them.
-        A version running the image's own entrypoint has no vector of its
-        own; the flags become its arguments.
-        Secret-bearing fields go to the returned env; because env vars are
-        process-global, two entries delivering a value through the same env
-        var cannot coexist. Hand-written occurrences of the flag in the
-        user parameters stay usable as an escape hatch for adapter types
-        the declaration doesn't cover: they re-append after the structured
-        entries, so the UI-visible order keeps the higher read priority.
-        Raises ValueError when the provider can't serve the config.
-        """
-        l2_storages = cache_service.config.l2_storages if cache_service.config else None
-        if not l2_storages:
-            return argv, {}
+        setproctitle.setproctitle(f"gpustack_cache_service_instance_{instance.id}")
+        add_signal_handlers()
 
-        l2_args: List[str] = []
-        l2_env: Dict[str, str] = {}
-        env_sources: Dict[str, str] = {}
-        for l2_storage in l2_storages:
-            entry_args, entry_env = render_l2_adapter(
-                provider, l2_storage.backend, l2_storage.params or {}
-            )
-            for env_name, value in entry_env.items():
-                if env_name in env_sources:
-                    raise ValueError(
-                        f"L2 storage entries '{env_sources[env_name]}' and "
-                        f"'{l2_storage.backend}' both deliver the env var "
-                        f"'{env_name}'; only one entry may set it"
-                    )
-                env_sources[env_name] = l2_storage.backend
-                l2_env[env_name] = value
-            l2_args.extend(entry_args)
-
-        remaining, hand_written = extract_flag_arguments(
-            argv or [], provider.l2_adapter_flag
+        clientset = ClientSet(
+            base_url=cfg.get_server_url(),
+            headers=client_headers,
         )
-        if hand_written:
-            logger.info(
-                f"Cache service {cache_service.name}"
-                f"(id={cache_service.id}) also passes "
-                f"{provider.l2_adapter_flag} via parameters; appending those "
-                f"adapters after the structured entries"
-            )
-        return remaining + l2_args + hand_written, l2_env
+
+        with open(log_file_path, "w", buffering=1, encoding="utf-8") as log_file:
+            with RedirectStdoutStderr(log_file):
+                # The container runtime logs the image pull through its own
+                # logger; without this it has no handler and the pull — the
+                # slowest part of a start — leaves no trace at all.
+                setup_logging(debug=cfg.debug)
+                setup_runtime_logging()
+                CacheServiceProvisioner(
+                    clientset=clientset,
+                    instance=instance,
+                    cfg=cfg,
+                    port=port,
+                    metrics_port=metrics_port,
+                    fallback_registry=fallback_registry,
+                ).start()
 
     def _allocate_ports(self, instance: CacheServiceInstance) -> Tuple[int, int]:
         """
@@ -700,6 +445,10 @@ class CacheServiceManager:
         with CacheServiceManager._start_lock:
             for stale_id in set(self._last_start_attempt) - listed_ids:
                 self._last_start_attempt.pop(stale_id, None)
+        for stale_id in set(self._provisioning_processes) - listed_ids:
+            process = self._provisioning_processes.pop(stale_id, None)
+            if process is not None and process.is_alive():
+                terminate_process_tree(process.pid)
         if not instances_page.items:
             return
 
@@ -717,6 +466,11 @@ class CacheServiceManager:
                 CacheServiceStateEnum.RUNNING,
                 CacheServiceStateEnum.UNREACHABLE,
             ):
+                continue
+            if self._is_provisioning(instance.id):
+                # A restart is re-creating the workload; the gap between the
+                # old one being deleted and the new one existing must not read
+                # as a crash.
                 continue
             try:
                 cache_service = self._get_parent_service(
@@ -759,9 +513,10 @@ class CacheServiceManager:
         ):
             return
 
+        if self._is_provisioning(instance.id):
+            return
+
         with CacheServiceManager._start_lock:
-            if instance.id in self._starting:
-                return
             last_attempt = self._last_start_attempt.get(instance.id)
         if (
             last_attempt is not None
@@ -799,11 +554,12 @@ class CacheServiceManager:
         deployment_metadata = instance.get_deployment_metadata()
         workload = get_workload(deployment_metadata.name)
 
-        if not workload or workload.state in [
-            WorkloadStatusStateEnum.FAILED,
-            WorkloadStatusStateEnum.UNHEALTHY,
-            WorkloadStatusStateEnum.INACTIVE,
-        ]:
+        # A cache server is a service: it has no successful end, so a clean
+        # exit counts as a crash alongside a failure or a vanished workload.
+        if classify_workload(workload) not in (
+            WorkloadPhase.LAUNCHING,
+            WorkloadPhase.RUNNING,
+        ):
             self._restart_crashed_cache_service_instance(
                 instance, cache_service, deployment_metadata.name
             )
@@ -970,6 +726,12 @@ class CacheServiceManager:
         Args:
             instance: The cache service instance to stop.
         """
+        # Tear down the provisioning subprocess first: one that is mid-pull
+        # would otherwise create the workload again right after it is deleted.
+        process = self._provisioning_processes.pop(instance.id, None)
+        if process is not None and process.is_alive():
+            terminate_process_tree(process.pid)
+
         deployment_metadata = instance.get_deployment_metadata()
         try:
             delete_workload(deployment_metadata.name)
@@ -981,10 +743,22 @@ class CacheServiceManager:
             )
         self._release_ports(instance.id)
         self._forget_start(instance.id)
+        self._purge_provision_log(instance.id)
         logger.info(
             f"Stopped cache service instance {instance.id} "
             f"(service id={instance.cache_service_id})"
         )
+
+    def _purge_provision_log(self, instance_id: int):
+        """Remove the instance's provisioning log. Only on teardown: a
+        restart keeps it so the log viewer can still show the failed start."""
+        try:
+            Path(self._provision_log_path(instance_id)).unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(
+                f"Failed to remove provisioning log of cache service "
+                f"instance {instance_id}: {e}"
+            )
 
     def _update_cache_service_instance(self, id: int, **kwargs) -> bool:
         """
@@ -995,26 +769,6 @@ class CacheServiceManager:
             **kwargs: The fields to update, group by field name and value.
 
         Returns:
-            Whether the update was applied. A failed write-back is reported
-            rather than raised: callers run on the watch event loop or the
-            sync thread, where an exception would be dropped, and the sync
-            pass re-drives what the lost update would have set.
+            Whether the update was applied.
         """
-        try:
-            instance_public = self._clientset.cache_service_instances.get(id=id)
-
-            instance = CacheServiceInstanceUpdate(**instance_public.model_dump())
-            for key, value in kwargs.items():
-                set_attr(instance, key, value)
-
-            self._clientset.cache_service_instances.update(id=id, model_update=instance)
-            return True
-        except NotFoundException:
-            logger.warning(
-                f"Cache service instance with ID {id} not found when trying "
-                "to update."
-            )
-            return False
-        except Exception as e:
-            logger.error(f"Failed to update cache service instance {id}: {e}")
-            return False
+        return update_cache_service_instance(self._clientset, id, **kwargs)
