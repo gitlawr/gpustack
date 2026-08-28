@@ -9,10 +9,9 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, Request, Query
 from fastapi.responses import StreamingResponse
 
-from gpustack_runtime.deployer import logs_workload
 
 from gpustack.api.exceptions import NotFoundException
-from gpustack.schemas.cache_services import cache_service_instance_workload_name
+from gpustack.utils import file
 from gpustack.schemas.models import (
     ModelInstanceLogRestartEntry,
     ServeLogOptionsResponse,
@@ -612,29 +611,28 @@ async def get_serve_logs(
     )
 
 
-def _cache_service_provision_log(
+def _cache_service_log_generation(
     log_dir: Path, instance_id: int, previous: bool
-) -> Optional[Path]:
-    """The provisioning log of the current start, or of the one before it.
+) -> Optional[int]:
+    """Which start's logs to read: the current one, or the one before it.
 
-    Generations are numbered like a model instance's ({id}.{restart_count}.log)
-    and the worker keeps the last two, so ``previous`` is the second highest
-    number present. None when the instance has never been provisioned here.
+    Generations are numbered like a model instance's ({id}.{n}.log for the
+    provisioning log, {id}.container.{n}.log for the container's own output)
+    and the worker keeps the last two. None when nothing has been written for
+    this instance here.
     """
-    counts = []
+    generations = set()
     for path in log_dir.glob(f"{instance_id}.*.log"):
         try:
-            counts.append(int(path.stem.rsplit(".", 1)[-1]))
+            generations.add(int(path.stem.rsplit(".", 1)[-1]))
         except ValueError:
             continue
-    if not counts:
+    if not generations:
         return None
-    counts.sort()
+    ordered = sorted(generations)
     if previous:
-        if len(counts) < 2:
-            return None
-        return log_dir / f"{instance_id}.{counts[-2]}.log"
-    return log_dir / f"{instance_id}.{counts[-1]}.log"
+        return ordered[-2] if len(ordered) >= 2 else None
+    return ordered[-1]
 
 
 @router.get("/cacheServiceInstanceLogs/{instance_id}")
@@ -642,62 +640,62 @@ async def get_cache_service_instance_logs(
     request: Request,
     instance_id: int,
     log_options: LogOptionsDep,
+    # Unused now that the logs come from files rather than the runtime, but
+    # kept so the server-side proxy's URL does not have to change.
     cache_service_id: int = Query(),
 ):
-    """Stream a managed cache service instance's logs as two chained sources:
-    the provisioning log the worker's subprocess wrote — provider resolution
-    and image pull, everything that happens before a container exists —
-    followed by the container's own logs read live from the container runtime.
+    """Stream a managed cache service instance's logs for one start: the
+    provisioning log the worker's subprocess wrote — provider resolution and
+    image pull, everything that happens before a container exists — followed
+    by the container's own output, which the worker persists as it arrives.
 
-    ``previous`` selects the log of the start before the current one. It
-    reaches the provisioning log only: a restart deletes the workload before
-    recreating it, so the previous container's output is gone from the
-    runtime by the time anyone asks for it.
+    ``previous`` selects the start before the current one, which is where a
+    crash-looping cache server's cause is. Reading persisted files rather than
+    the runtime is what makes that possible: a restart deletes the workload,
+    taking the previous container's output with it.
     """
-    log_dir = request.app.state.config.log_dir
-    provision_log_dir = Path(log_dir) / "cache-services"
-    provision_log_path = _cache_service_provision_log(
-        provision_log_dir, instance_id, log_options.previous
+    log_dir = Path(request.app.state.config.log_dir) / "cache-services"
+    generation = _cache_service_log_generation(
+        log_dir, instance_id, log_options.previous
     )
-    workload_name = cache_service_instance_workload_name(cache_service_id, instance_id)
 
-    def iter_logs():
-        # The provisioning log covers a single start and is short, so it
-        # streams whole; ``tail`` applies to the container logs, which is
-        # where a caller asking for the last N lines means it.
-        try:
-            if provision_log_path is not None and provision_log_path.exists():
-                with open(
-                    provision_log_path, "r", encoding="utf-8", errors="ignore"
-                ) as provision_log:
-                    yield from provision_log
-        except Exception as e:
-            logger.warning(
-                f"Failed to read provisioning logs of cache service instance "
-                f"{instance_id}: {e}"
-            )
-
-        if log_options.previous:
+    async def iter_logs():
+        if generation is None:
             return
 
-        try:
-            logs = logs_workload(
-                name=workload_name,
-                tail=log_options.tail,
-                follow=log_options.follow,
-            )
-        except Exception as e:
-            # Before the container exists — image still pulling, or a start
-            # that failed early — the provisioning log above is the whole
-            # story, so this is a note rather than the only output.
-            yield f"Cache service container logs are not available yet: {e}\n"
-            return
-        if isinstance(logs, (bytes, str)):
-            yield logs
-            return
-        yield from logs
+        # The provisioning log covers one start and is short, so it streams
+        # whole; ``tail`` applies to the container logs, which is where a
+        # caller asking for the last N lines means it.
+        async for line in log_generator(
+            str(log_dir / f"{instance_id}.{generation}.log"),
+            LogOptions(tail=-1, follow=False),
+        ):
+            yield line
+
+        container_log = log_dir / f"{instance_id}.container.{generation}.log"
+        follow = log_options.follow and not log_options.previous
+        if follow and not container_log.exists():
+            # Still pulling the image: the file appears when the container
+            # produces its first line.
+            try:
+                await file.check_with_retries(
+                    lambda: _require_file(container_log), timeout=300
+                )
+            except Exception:
+                return
+        async for line in log_generator(
+            str(container_log),
+            LogOptions(tail=log_options.tail, follow=follow),
+        ):
+            yield line
 
     return StreamingResponse(iter_logs(), media_type="application/octet-stream")
+
+
+def _require_file(path: Path) -> Path:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return path
 
 
 @router.get("/benchmark_logs/{id}")

@@ -2085,16 +2085,24 @@ def test_restart_count_only_ever_increases():
     assert manager._restart_attempts[instance.id] == 2
 
 
-def test_provisioning_logs_keep_the_current_and_previous_generation():
+def test_logs_keep_the_current_and_previous_generation():
+    """Provisioning and container logs of one start are numbered together, so
+    pruning by generation keeps a matched pair."""
     manager, _ = _build_manager(worker_id=1)
     log_dir = Path(manager._provision_log_dir)
     for count in range(5):
         (log_dir / f"77.{count}.log").write_text(f"run {count}")
+        (log_dir / f"77.container.{count}.log").write_text(f"container {count}")
     (log_dir / "78.0.log").write_text("another instance")
 
-    manager._cleanup_old_provision_logs(77, 4)
+    manager._cleanup_old_logs(77, 4)
 
-    assert sorted(p.name for p in log_dir.glob("77.*.log")) == ["77.3.log", "77.4.log"]
+    assert sorted(p.name for p in log_dir.glob("77.*.log")) == [
+        "77.3.log",
+        "77.4.log",
+        "77.container.3.log",
+        "77.container.4.log",
+    ]
     assert (log_dir / "78.0.log").exists()
 
 
@@ -2168,3 +2176,39 @@ def test_a_closing_loop_releases_the_claim():
     thread.join()
 
     assert instance.id not in manager._starting
+
+
+def test_launch_starts_container_log_persistence():
+    """Started with the launch, not once the container exists: the stream loop
+    retries until it does, so a container that dies seconds after starting
+    still leaves its output behind."""
+    manager, _ = _build_manager(worker_id=1)
+    instance = _new_instance(restart_count=2)
+
+    with (
+        patch(
+            "gpustack.worker.cache_service_manager.network.get_free_port",
+            side_effect=[40001, 40002],
+        ),
+        patch("gpustack.worker.cache_service_manager.multiprocessing.Process"),
+        patch.object(manager._container_logs, "start") as start,
+    ):
+        manager._start_cache_service_instance(instance)
+
+    key, workload_name, log_path = start.call_args[0]
+    assert key == instance.id
+    assert workload_name == INSTANCE_WORKLOAD_NAME
+    assert log_path.endswith(f"/{instance.id}.container.2.log")
+
+
+def test_stop_stops_container_log_persistence():
+    manager, _ = _build_manager(worker_id=1)
+    instance = _new_instance()
+
+    with (
+        patch("gpustack.worker.cache_service_manager.delete_workload"),
+        patch.object(manager._container_logs, "stop") as stop,
+    ):
+        manager._stop_cache_service_instance(instance)
+
+    stop.assert_called_once_with(instance.id)

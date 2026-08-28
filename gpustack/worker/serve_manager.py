@@ -1,5 +1,4 @@
 import asyncio
-from collections import deque
 import contextlib
 from datetime import datetime, timezone
 import json
@@ -17,9 +16,7 @@ import logging
 
 from gpustack_runtime.deployer import (
     get_workload,
-    WorkloadStatusStateEnum,
     delete_workload,
-    logs_workload,
 )
 from gpustack_runtime.deployer.__utils__ import compare_versions
 
@@ -65,6 +62,7 @@ from gpustack.schemas.models import (
 )
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.controlloop import (
+    ContainerLogPersistence,
     RestartActionEnum,
     RestartBudget,
     WorkloadPhase,
@@ -223,8 +221,7 @@ class ServeManager:
         self._clientset_getter = clientset_getter
 
         self._provisioning_processes = {}
-        self._log_persistence_threads = {}
-        self._log_persistence_stop_events = {}
+        self._container_logs = ContainerLogPersistence(LOG_RECONNECT_GRACE_SECONDS)
         self._error_model_instances = {}
         self._model_cache_by_instance = {}
         self._model_instance_by_instance_id = {}
@@ -1089,300 +1086,30 @@ class ServeManager:
         restart_count = mi.restart_count or 0
         return f"{self._serve_log_dir}/{mi.id}.{restart_count}.log"
 
-    def _persist_container_logs(
-        self,
-        workload_name: str,
-        log_path: str,
-        stop_event: threading.Event,
-        token: Optional[str] = None,
-    ):
-        """Persist container logs to local file (runs in a separate thread).
-
-        Reconnects on stream EOF while the workload is still alive, resuming by
-        skipping already-written history (matched by an anchor window of the
-        last lines written). A manual/runtime restart briefly looks terminated
-        at EOF, so it waits a grace window for the container to return before
-        giving up. Exits only if the container stays terminated for that whole
-        window or the thread is asked to stop.
-
-        Args:
-            workload_name: Name of the container workload
-            log_path: Path to save container logs
-            stop_event: Event to signal thread to stop
-            token: Operation token identifying a specific container in the workload.
-                If None, logs from the default (index=0) container are fetched.
-        """
-        retry_count = 0
-        first_connect = True
-        # Anchor: a window of the last lines written. Matching a run of lines
-        # (not one) avoids false-matching a repeated line during replay.
-        anchor_window = deque(maxlen=5)
-
-        while not stop_event.is_set():
-            try:
-                log_stream = logs_workload(
-                    name=workload_name,
-                    token=token,
-                    tail=-1,
-                    follow=True,
-                )
-
-                if hasattr(log_stream, '__iter__'):
-                    # On reconnect the runtime replays history from the start;
-                    # skip it until the anchor window matches.
-                    anchor = list(anchor_window)
-                    skip_until_anchor = not first_connect and bool(anchor)
-                    replayed = deque(maxlen=len(anchor)) if anchor else None
-                    received_lines = False
-                    with open(
-                        log_path,
-                        'w' if first_connect else 'a',
-                        buffering=1,
-                        encoding='utf-8',
-                    ) as f:
-                        first_connect = False
-                        for line in log_stream:
-                            received_lines = True
-                            if stop_event.is_set():
-                                break
-
-                            if isinstance(line, bytes):
-                                line = line.decode('utf-8', errors='replace')
-                            else:
-                                line = str(line)
-
-                            if skip_until_anchor:
-                                replayed.append(line)
-                                if list(replayed) == anchor:
-                                    skip_until_anchor = False
-                                continue
-
-                            f.write(line)
-                            f.flush()
-                            anchor_window.append(line)
-                    retry_count = 0
-
-                    # Anchor never matched -> rotated out; restart fresh. An
-                    # empty reconnect must NOT reset, or the next round reopens
-                    # in 'w' and truncates the saved log.
-                    if skip_until_anchor and received_lines:
-                        first_connect = True
-                        anchor_window.clear()
-
-                # A restart briefly looks terminated at EOF; wait for the
-                # container to return before giving up, so logs aren't dropped.
-                if stop_event.is_set() or not self._wait_for_container_recovery(
-                    workload_name, stop_event
-                ):
-                    break
-                logger.debug(
-                    f"Log stream for {workload_name} ended while workload still "
-                    f"running; reconnecting"
-                )
-                stop_event.wait(timeout=1)
-
-            except Exception as e:
-                if stop_event.is_set():
-                    break
-                retry_count += 1
-                logger.debug(
-                    f"Container not ready for {workload_name}, retrying "
-                    f"(attempt {retry_count}): {e}"
-                )
-                stop_event.wait(timeout=2)
-
-        logger.debug(f"Log persistence thread for {workload_name} exiting")
-
-    def _container_still_running(self, workload_name: str) -> bool:
-        """Whether the workload is still alive (a dead stream should reconnect
-        rather than exit)."""
-        try:
-            workload = get_workload(workload_name)
-        except Exception:
-            return True  # transient query failure: reconnect, don't drop logs
-        return bool(workload) and workload.state in (
-            WorkloadStatusStateEnum.PENDING,
-            WorkloadStatusStateEnum.INITIALIZING,
-            WorkloadStatusStateEnum.RUNNING,
-        )
-
-    def _wait_for_container_recovery(
-        self,
-        workload_name: str,
-        stop_event: threading.Event,
-        grace_seconds: float = LOG_RECONNECT_GRACE_SECONDS,
-        poll_interval: float = 1.0,
-    ) -> bool:
-        """Poll until the workload is alive again (True -> reconnect) or the
-        grace window elapses / stop_event fires (False -> give up). A restart
-        momentarily looks terminated at EOF, which a single check can't tell
-        apart from a real termination.
-        """
-        attempts = max(1, int(grace_seconds / poll_interval))
-        for _ in range(attempts):
-            if stop_event.is_set():
-                return False
-            if self._container_still_running(workload_name):
-                return True
-            stop_event.wait(timeout=poll_interval)
-        return False
-
-    def _discover_sidecar_logs(
-        self,
-        mi_id: int,
-        workload_name: str,
-        restart_count: int,
-        stop_event: threading.Event,
-    ):
-        """Background thread that waits for sidecar containers to appear.
-
-        Polls get_workload() until sidecar containers are found in the
-        loggable list, then starts log persistence threads for each.
-        Exits when sidecars are found or stop_event is set.
-
-        Args:
-            mi_id: Model instance ID
-            workload_name: Workload name
-            restart_count: Current restart count for log file naming
-            stop_event: Event to signal thread to stop
-        """
-        while not stop_event.is_set():
-            try:
-                workload = get_workload(workload_name)
-                if workload and workload.loggable:
-                    sidecars = [op for op in workload.loggable if op.name != "default"]
-                    if sidecars:
-                        self._start_sidecar_log_threads(
-                            mi_id,
-                            workload_name,
-                            workload.loggable,
-                            restart_count,
-                        )
-                        logger.debug(f"Sidecar discovery for {workload_name} complete")
-                        return
-            except Exception:
-                pass
-            stop_event.wait(timeout=2)
-
-    def _start_sidecar_log_threads(
-        self,
-        mi_id: int,
-        workload_name: str,
-        loggable_ops: list,
-        restart_count: int,
-    ):
-        """Start additional log persistence threads for sidecar containers.
-
-        Called from the main log persistence thread once the workload is available
-        and multiple loggable containers are discovered.
-
-        Args:
-            mi_id: Model instance ID
-            workload_name: Workload name
-            loggable_ops: List of WorkloadStatusOperation from workload.loggable
-            restart_count: Current restart count for log file naming
-        """
-        names = []
-        for op in loggable_ops:
-            if op.name == "default":
-                continue  # Main container handled by caller thread
-
-            log_path = (
-                f"{self._serve_log_dir}/{mi_id}.container."
-                f"{op.name}.{restart_count}.log"
-            )
-            stop_event = threading.Event()
-
-            thread = threading.Thread(
-                target=self._persist_container_logs,
-                args=(workload_name, log_path, stop_event, op.token),
-                daemon=True,
-                name=f"log-persist-{workload_name}-{op.name}",
-            )
-            thread.start()
-
-            # Append to existing tracking lists.
-            self._log_persistence_threads.setdefault(mi_id, []).append(thread)
-            self._log_persistence_stop_events.setdefault(mi_id, []).append(stop_event)
-            names.append(op.name)
-
-        if names:
-            logger.debug(
-                f"Started sidecar log persistence threads for {workload_name}: "
-                f"{names}"
-            )
-
     def _start_container_log_persistence(self, mi: ModelInstance):
-        """Start a background thread to persist container logs.
-
-        Starts a single "main" log persistence thread. The thread will
-        automatically discover sidecar containers (e.g., Ray head) once
-        the workload is created, and spawn additional threads for each.
+        """Persist this instance's container logs, sidecars included.
 
         Args:
             mi: The model instance.
         """
-
-        # Stop and clean up existing threads if any
-        self._stop_container_log_persistence(mi.id)
-
-        # Use deployment metadata name for the actual workload name,
-        # which differs for subordinate workers (e.g., "model-f0").
+        # The workload name differs for subordinate workers (e.g. "model-f0").
         deployment_metadata = mi.get_deployment_metadata(self._worker_id)
         workload_name = deployment_metadata.name if deployment_metadata else mi.name
-
         restart_count = mi.restart_count or 0
-        log_path = f"{self._serve_log_dir}/{mi.id}.container.{restart_count}.log"
 
-        stop_event = threading.Event()
-
-        # Main container log thread.
-        thread = threading.Thread(
-            target=self._persist_container_logs,
-            args=(workload_name, log_path, stop_event),
-            daemon=True,
-            name=f"log-persist-{workload_name}",
+        self._container_logs.start(
+            mi.id,
+            workload_name,
+            f"{self._serve_log_dir}/{mi.id}.container.{restart_count}.log",
+            sidecar_log_path=lambda name: (
+                f"{self._serve_log_dir}/{mi.id}.container.{name}.{restart_count}.log"
+            ),
         )
-        thread.start()
-
-        # Sidecar discovery thread — polls until sidecar containers appear,
-        # then starts additional log threads for each.
-        discovery_thread = threading.Thread(
-            target=self._discover_sidecar_logs,
-            args=(mi.id, workload_name, restart_count, stop_event),
-            daemon=True,
-            name=f"log-discover-{workload_name}",
-        )
-        discovery_thread.start()
-
-        self._log_persistence_threads[mi.id] = [thread, discovery_thread]
-        self._log_persistence_stop_events[mi.id] = [stop_event]
-        logger.debug(f"Started container log persistence thread for {mi.name}")
 
     def _stop_container_log_persistence(
         self, model_instance_id: int, timeout: float = 2.0
     ):
-        """Stop all container log persistence threads for a model instance.
-
-        Args:
-            model_instance_id: The model instance ID
-            timeout: Maximum time to wait for each thread to stop (seconds)
-        """
-        # Signal all threads to stop
-        stop_events = self._log_persistence_stop_events.pop(model_instance_id, [])
-        for stop_event in stop_events:
-            stop_event.set()
-
-        # Wait for all threads to finish
-        threads = self._log_persistence_threads.pop(model_instance_id, [])
-        for thread in threads:
-            if thread and thread.is_alive():
-                thread.join(timeout=timeout)
-                if thread.is_alive():
-                    logger.warning(
-                        f"Log persistence thread {thread.name} for model instance "
-                        f"{model_instance_id} did not stop within {timeout}s"
-                    )
+        self._container_logs.stop(model_instance_id, timeout=timeout)
 
     def _cleanup_old_logs(self, model_instance_id: int, current_restart_count: int):
         """Keep serve logs for restart_count in {R, R-1}.

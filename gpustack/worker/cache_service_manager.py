@@ -37,6 +37,7 @@ from gpustack.worker.cache_service.provisioner import (
 )
 from gpustack.worker.cache_service.state import update_cache_service_instance
 from gpustack.worker.controlloop import (
+    ContainerLogPersistence,
     RestartActionEnum,
     RestartBudget,
     WorkloadPhase,
@@ -67,6 +68,11 @@ RESTART_BUDGET = RestartBudget(
 """A cache server is a service with no successful end, so its first crash is
 already backed off; the count lives on the instance row and is forgiven once
 it has stayed healthy for the reset window."""
+
+LOG_RECONNECT_GRACE_SECONDS = 17
+"""How long a container log stream that hit EOF waits for its container to
+come back before the thread gives up. A restart looks briefly the same as a
+termination."""
 
 PENDING_START_GRACE_SECONDS = 60
 """How long an instance may stay PENDING before the sync pass re-drives its
@@ -176,6 +182,7 @@ class CacheServiceManager:
         self._last_start_attempt = {}
         self._provisioning_processes = {}
         self._loop = None
+        self._container_logs = ContainerLogPersistence(LOG_RECONNECT_GRACE_SECONDS)
 
         # Consecutive crashes per instance, which drives the backoff and the
         # give-up budget. Kept out of the row because restart_count is the
@@ -302,7 +309,12 @@ class CacheServiceManager:
         next one and the log viewer can offer it."""
         return f"{self._provision_log_dir}/{instance_id}.{restart_count}.log"
 
-    def _cleanup_old_provision_logs(self, instance_id: int, restart_count: int):
+    def _container_log_path(self, instance_id: int, restart_count: int) -> str:
+        """The container's own output for one start, numbered alongside that
+        start's provisioning log."""
+        return f"{self._provision_log_dir}/{instance_id}.container.{restart_count}.log"
+
+    def _cleanup_old_logs(self, instance_id: int, restart_count: int):
         """Keep the current and previous start's logs, drop the rest.
 
         restart_count 0 is a fresh lifecycle, so anything present belongs to a
@@ -318,7 +330,7 @@ class CacheServiceManager:
                 if int(path.stem.rsplit(".", 1)[-1]) not in keep:
                     path.unlink(missing_ok=True)
             except (ValueError, OSError) as e:
-                logger.debug(f"Skipped pruning provisioning log {path}: {e}")
+                logger.debug(f"Skipped pruning log {path}: {e}")
 
     def _start_cache_service_instance(self, instance: CacheServiceInstance):
         """
@@ -345,7 +357,7 @@ class CacheServiceManager:
             port, metrics_port = self._allocate_ports(instance)
 
             restart_count = instance.restart_count or 0
-            self._cleanup_old_provision_logs(instance.id, restart_count)
+            self._cleanup_old_logs(instance.id, restart_count)
             log_file_path = self._provision_log_path(instance.id, restart_count)
             process = multiprocessing.Process(
                 target=CacheServiceManager._provision_cache_service_instance,
@@ -364,6 +376,15 @@ class CacheServiceManager:
             process.daemon = False
             process.start()
             self._provisioning_processes[instance.id] = process
+
+            # Started now rather than once the container exists: the stream
+            # loop retries until it does, so a container that dies seconds
+            # after starting still leaves its output behind.
+            self._container_logs.start(
+                instance.id,
+                instance.get_deployment_metadata().name,
+                self._container_log_path(instance.id, restart_count),
+            )
             logger.info(
                 f"Provisioning cache service instance {instance.id} "
                 f"(service id={instance.cache_service_id}) on port {port}"
@@ -798,6 +819,8 @@ class CacheServiceManager:
         """
         # Tear down the provisioning subprocess first: one that is mid-pull
         # would otherwise create the workload again right after it is deleted.
+        self._container_logs.stop(instance.id)
+
         process = self._provisioning_processes.pop(instance.id, None)
         if process is not None and process.is_alive():
             terminate_process_tree(process.pid)
