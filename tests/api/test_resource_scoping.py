@@ -569,7 +569,7 @@ async def test_cache_service_delete_allows_owner(monkeypatch):
         cache_services_route.Model, "all_by_fields", AsyncMock(return_value=[])
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "all_by_fields",
         AsyncMock(return_value=[]),
     )

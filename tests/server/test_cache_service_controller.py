@@ -1,6 +1,6 @@
 """Managed cache-service reconciliation.
 
-The controller drives each managed service's CacheServiceInstance rows to
+The controller drives each managed service's Workload rows to
 the desired worker set (singleton: the user-picked worker; per_node: every
 active worker of the service's cluster, narrowed by the service's
 worker_selector labels when set) and folds instance states back into the
@@ -20,6 +20,10 @@ from gpustack.schemas.cache_services import (
     CacheServiceStateEnum,
 )
 from gpustack.schemas.models import ModelInstanceStateEnum
+from gpustack.schemas.workloads import (
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.server.controllers import CacheServiceController
 
 
@@ -46,6 +50,9 @@ def _service(**overrides):
         state_message=None,
         healthy=None,
         deleted_at=None,
+        # Copied onto each workload it compiles into, which is what lets
+        # tenant scoping work without a join back to this table.
+        owner_principal_id=42,
         update=AsyncMock(),
     )
     fields.update(overrides)
@@ -53,13 +60,15 @@ def _service(**overrides):
 
 
 def _instance(**overrides):
+    """A cache service's workload, as the controller reads it."""
     fields = dict(
         id=21,
-        name="svc-abcde",
-        cache_service_id=9,
+        name="cache-svc-9-w5",
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=9,
         worker_id=5,
         cluster_id=1,
-        state=CacheServiceStateEnum.PENDING,
+        state=WorkloadStateEnum.PENDING,
         spec_digest=None,
         delete=AsyncMock(),
     )
@@ -81,7 +90,7 @@ def _patch_reconcile(
     instance_lists=None,
 ):
     """Back the reconcile lookups. ``instance_lists`` are consecutive
-    CacheServiceInstance.all_by_fields results (reconcile pass, then
+    Workload.all_by_fields results (reconcile pass, then
     aggregate pass)."""
     monkeypatch.setattr(
         "gpustack.server.controllers.get_cache_provider", lambda name: provider
@@ -95,13 +104,11 @@ def _patch_reconcile(
         AsyncMock(return_value=worker),
     )
     monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(side_effect=list(instance_lists or [[], []])),
     )
     create = AsyncMock()
-    monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.create", create
-    )
+    monkeypatch.setattr("gpustack.server.controllers.Workload.create", create)
     return create
 
 
@@ -121,14 +128,14 @@ async def test_singleton_creates_one_instance_on_picked_worker(monkeypatch):
 
     create.assert_awaited_once()
     created = create.await_args.args[1]
-    assert created.cache_service_id == 9
+    assert created.owner_id == 9
     assert created.worker_id == 5
     assert created.cluster_id == 1
-    assert created.state == CacheServiceStateEnum.PENDING
-    # Display name: parent service's name plus a short random suffix,
-    # following the model-instance convention.
-    assert created.name.startswith("svc-")
-    assert len(created.name) == len("svc-") + 5
+    assert created.state == WorkloadStateEnum.PENDING
+    # The container name, derived from (service, worker) rather than
+    # generated: it has to be computable before the row exists, and that pair
+    # is the identity anyway.
+    assert created.name == "cache-svc-9-w5"
     # The one PENDING instance keeps the aggregate at PENDING (no write:
     # the service already is PENDING).
     service.update.assert_not_called()
@@ -150,9 +157,9 @@ async def test_per_node_creates_instance_per_active_worker(monkeypatch):
     assert create.await_count == 3
     assert [call.args[1].worker_id for call in create.await_args_list] == [5, 6, 7]
     assert all(call.args[1].cluster_id == 1 for call in create.await_args_list)
-    # Each instance gets its own service-name-prefixed display name.
+    # One container name per worker, deterministic.
     names = [call.args[1].name for call in create.await_args_list]
-    assert all(name.startswith("svc-") for name in names)
+    assert names == ["cache-svc-9-w5", "cache-svc-9-w6", "cache-svc-9-w7"]
     assert len(set(names)) == 3
 
 
@@ -178,8 +185,8 @@ async def test_per_node_only_fills_missing_workers(monkeypatch):
 @pytest.mark.asyncio
 async def test_per_node_deletes_instance_of_departed_worker(monkeypatch):
     service = _service(worker_id=None)
-    kept = _instance(id=21, worker_id=5, state=CacheServiceStateEnum.RUNNING)
-    orphan = _instance(id=22, worker_id=6, state=CacheServiceStateEnum.RUNNING)
+    kept = _instance(id=21, worker_id=5, state=WorkloadStateEnum.RUNNING)
+    orphan = _instance(id=22, worker_id=6, state=WorkloadStateEnum.RUNNING)
     create = _patch_reconcile(
         monkeypatch,
         _provider("per_node"),
@@ -268,7 +275,7 @@ async def test_per_node_selector_change_moves_instances(monkeypatch):
     now-unmatched worker's instance is deleted and the newly matched
     worker gets one."""
     service = _service(worker_id=None, worker_selector={"gpu": "h100"})
-    outdated = _instance(id=21, worker_id=5, state=CacheServiceStateEnum.RUNNING)
+    outdated = _instance(id=21, worker_id=5, state=WorkloadStateEnum.RUNNING)
     create = _patch_reconcile(
         monkeypatch,
         _provider("per_node"),
@@ -292,7 +299,7 @@ async def test_per_node_selector_matching_no_worker_parks_service_in_error(
     monkeypatch,
 ):
     service = _service(worker_id=None, worker_selector={"gpu": "b200"})
-    orphan = _instance(worker_id=5, state=CacheServiceStateEnum.RUNNING)
+    orphan = _instance(worker_id=5, state=WorkloadStateEnum.RUNNING)
     create = _patch_reconcile(
         monkeypatch,
         _provider("per_node"),
@@ -360,7 +367,7 @@ async def test_singleton_rejects_worker_from_other_cluster(monkeypatch):
 
 def _patch_aggregate_instances(monkeypatch, instances):
     monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(return_value=instances),
     )
 
@@ -439,7 +446,7 @@ async def test_aggregate_writes_only_on_change(monkeypatch):
         state=CacheServiceStateEnum.RUNNING, state_message=None, healthy=True
     )
     _patch_aggregate_instances(
-        monkeypatch, [_instance(state=CacheServiceStateEnum.RUNNING)]
+        monkeypatch, [_instance(state=WorkloadStateEnum.RUNNING)]
     )
 
     controller = CacheServiceController(MagicMock())
@@ -481,7 +488,7 @@ async def _run_instance_event(monkeypatch, service, event_type):
         yield Event(type=event_type, data=_instance())
 
     with patch(
-        "gpustack.server.controllers.CacheServiceInstance.subscribe",
+        "gpustack.server.controllers.Workload.subscribe",
         side_effect=lambda **kwargs: fake_subscribe(**kwargs),
     ):
         await controller._watch_instances()
@@ -798,9 +805,9 @@ async def test_aggregate_flags_spec_drift():
     from gpustack.schemas.cache_services import cache_service_spec_digest
 
     service = _service(update=AsyncMock())
-    stale = _instance(state=CacheServiceStateEnum.RUNNING, spec_digest="0" * 16)
+    stale = _instance(state=WorkloadStateEnum.RUNNING, spec_digest="0" * 16)
     with patch(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(return_value=[stale]),
     ):
         controller = CacheServiceController(MagicMock())
@@ -820,7 +827,7 @@ async def test_aggregate_flags_spec_drift():
         id=22, worker_id=6, state=CacheServiceStateEnum.RUNNING, spec_digest=None
     )
     with patch(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(return_value=[current, legacy]),
     ):
         controller = CacheServiceController(MagicMock())
@@ -841,11 +848,11 @@ async def test_resync_deletes_instances_whose_parent_is_gone(monkeypatch):
     key. It converges nothing while the cascade is there, which is the point of
     running it now: it is exercised rather than written and trusted."""
     live = SimpleNamespace(id=1, deleted_at=None)
-    kept = SimpleNamespace(id=10, cache_service_id=1, delete=AsyncMock())
-    orphan = SimpleNamespace(id=11, cache_service_id=99, delete=AsyncMock())
+    kept = SimpleNamespace(id=10, owner_id=1, delete=AsyncMock())
+    orphan = SimpleNamespace(id=11, owner_id=99, delete=AsyncMock())
 
     monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.all",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(return_value=[kept, orphan]),
     )
     monkeypatch.setattr(
@@ -863,10 +870,10 @@ async def test_resync_deletes_instances_whose_parent_is_gone(monkeypatch):
 @pytest.mark.asyncio
 async def test_resync_treats_a_soft_deleted_parent_as_gone(monkeypatch):
     soft_deleted = SimpleNamespace(id=1, deleted_at=datetime.now(timezone.utc))
-    instance = SimpleNamespace(id=10, cache_service_id=1, delete=AsyncMock())
+    instance = SimpleNamespace(id=10, owner_id=1, delete=AsyncMock())
 
     monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.all",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(return_value=[instance]),
     )
     monkeypatch.setattr(
@@ -884,10 +891,10 @@ async def test_resync_treats_a_soft_deleted_parent_as_gone(monkeypatch):
 async def test_resync_reaps_nothing_when_the_service_read_fails(monkeypatch):
     """The service table is the authority. A failed read must abort the pass,
     not read as "no services exist" and delete every live instance."""
-    instance = SimpleNamespace(id=10, cache_service_id=1, delete=AsyncMock())
+    instance = SimpleNamespace(id=10, owner_id=1, delete=AsyncMock())
 
     monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.all",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(return_value=[instance]),
     )
     monkeypatch.setattr(

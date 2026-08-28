@@ -44,10 +44,12 @@ from gpustack.schemas.cache_providers import (
     render_template,
 )
 from gpustack.schemas.cache_services import (
-    CacheServiceInstance,
+    CACHE_SERVICE_METRICS_PORT,
+    CACHE_SERVICE_PORT,
     CacheServicePublic,
-    CacheServiceStateEnum,
+    cache_service_workload_labels,
 )
+from gpustack.schemas.workloads import Workload, WorkloadStateEnum
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.utils.command import (
     drop_empty_flag_values,
@@ -74,7 +76,7 @@ class CacheServiceProvisioner:
     def __init__(
         self,
         clientset: ClientSet,
-        instance: CacheServiceInstance,
+        instance: Workload,
         cfg: Config,
         port: int,
         metrics_port: int,
@@ -102,28 +104,24 @@ class CacheServiceProvisioner:
             update_cache_service_instance(
                 self._clientset,
                 instance.id,
-                state=CacheServiceStateEnum.ERROR,
+                state=WorkloadStateEnum.ERROR,
                 state_message=str(e),
             )
             logger.error(
                 f"Failed to start cache service instance {instance.id} "
-                f"(service id={instance.cache_service_id}): {e}"
+                f"(service id={instance.owner_id}): {e}"
             )
 
     def _start(self):
         instance = self._instance
         try:
-            cache_service = self._clientset.cache_services.get(
-                id=instance.cache_service_id
-            )
+            cache_service = self._clientset.cache_services.get(id=instance.owner_id)
         except NotFoundException:
             update_cache_service_instance(
                 self._clientset,
                 instance.id,
-                state=CacheServiceStateEnum.ERROR,
-                state_message=(
-                    f"Parent cache service {instance.cache_service_id} not found."
-                ),
+                state=WorkloadStateEnum.ERROR,
+                state_message=(f"Parent cache service {instance.owner_id} not found."),
             )
             return
 
@@ -132,7 +130,7 @@ class CacheServiceProvisioner:
             update_cache_service_instance(
                 self._clientset,
                 instance.id,
-                state=CacheServiceStateEnum.ERROR,
+                state=WorkloadStateEnum.ERROR,
                 state_message=f"Unknown cache provider: {cache_service.provider_name}",
             )
             return
@@ -163,9 +161,11 @@ class CacheServiceProvisioner:
         if update_cache_service_instance(
             self._clientset,
             instance.id,
-            state=CacheServiceStateEnum.STARTING,
-            port=self._port,
-            metrics_port=self._metrics_port,
+            state=WorkloadStateEnum.STARTING,
+            ports={
+                CACHE_SERVICE_PORT: self._port,
+                CACHE_SERVICE_METRICS_PORT: self._metrics_port,
+            },
             state_message="",
         ):
             logger.info(
@@ -263,9 +263,8 @@ class CacheServiceProvisioner:
             envs=[ContainerEnv(name=name, value=value) for name, value in env.items()],
             resources=self._gpu_resources(),
         )
-        deployment_metadata = self._instance.get_deployment_metadata()
         workload_plan = WorkloadPlan(
-            name=deployment_metadata.name,
+            name=self._instance.name,
             host_network=True,
             # Shares the host IPC namespace with the engine containers so the
             # cache server can import their KV buffers by CUDA IPC handle (the
@@ -275,7 +274,9 @@ class CacheServiceProvisioner:
             # rejects hostIPC pods, and the CPU host-copy path works without it.
             host_ipc=self._host_ipc_enabled(cache_service),
             containers=[run_container],
-            labels=deployment_metadata.labels,
+            labels=cache_service_workload_labels(
+                self._instance.owner_id, self._instance.worker_id
+            ),
         )
         return workload_plan, image
 

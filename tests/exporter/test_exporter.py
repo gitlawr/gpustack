@@ -12,7 +12,9 @@ from gpustack.schemas.cache_providers import (
     CacheProviderL2Backend,
     CacheProviderL2Field,
 )
+from gpustack.schemas.workloads import WorkloadStateEnum
 from gpustack.schemas.cache_services import (
+    CACHE_SERVICE_METRICS_PORT,
     CacheServiceConfig,
     CacheServiceEndpoint,
     CacheServiceL2Storage,
@@ -341,13 +343,14 @@ def _cache_service(**overrides):
     return SimpleNamespace(**fields)
 
 
-def _instance(**overrides):
+def _instance(metrics_port=40011, **overrides):
+    """A cache service's workload, as the exporter reads it."""
     fields = dict(
         id=31,
-        cache_service_id=3,
+        owner_id=3,
         worker_id=2,
-        state=CacheServiceStateEnum.RUNNING,
-        metrics_port=40011,
+        state=WorkloadStateEnum.RUNNING,
+        ports={CACHE_SERVICE_METRICS_PORT: metrics_port} if metrics_port else {},
     )
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -366,7 +369,7 @@ def _patch_target_sources(
         "gpustack.exporter.exporter.CacheService.all_by_fields", services_mock
     )
     monkeypatch.setattr(
-        "gpustack.exporter.exporter.CacheServiceInstance.all_by_fields",
+        "gpustack.exporter.exporter.Workload.all_by_fields",
         AsyncMock(return_value=instances or []),
     )
     monkeypatch.setattr(

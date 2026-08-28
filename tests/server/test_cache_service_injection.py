@@ -10,11 +10,16 @@ from gpustack.schemas.cache_providers import (
     CacheProvider,
     CacheProviderHealthCheck,
 )
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.schemas.cache_services import (
+    CACHE_SERVICE_PORT,
     CacheService,
     CacheServiceConfig,
     CacheServiceEndpoint,
-    CacheServiceInstance,
     CacheServiceModeEnum,
     CacheServiceStateEnum,
 )
@@ -58,26 +63,27 @@ def managed_cache_service(**overrides):
     return CacheService(**fields)
 
 
-def cache_service_instance(**overrides):
+def cache_service_instance(port=9000, state=None, **overrides):
+    """The workload a managed cache server runs as."""
     fields = dict(
         id=11,
-        name="lmcache-svc-a1b2c",
-        cache_service_id=5,
+        name="cache-svc-5-w2",
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=5,
         worker_id=2,
         cluster_id=1,
-        port=9000,
-        state=CacheServiceStateEnum.RUNNING,
+        ports={CACHE_SERVICE_PORT: port} if port else None,
+        state=WorkloadStateEnum(state.value) if state else WorkloadStateEnum.RUNNING,
     )
     fields.update(overrides)
-    return CacheServiceInstance(**fields)
+    return Workload(**fields)
 
 
 @contextmanager
 def patch_lookups(service, worker=..., instances=...):
     """Back the service / cache-instance-worker / instance lookups the
     resolver performs. ``worker`` is the worker row returned for a cache
-    instance's worker_id; ``instances`` are the managed service's
-    CacheServiceInstance rows."""
+    instance's worker_id; ``instances`` are the managed service's workloads."""
     if worker is ...:
         worker = SimpleNamespace(id=2, ip="10.0.0.5", deleted_at=None)
     if instances is ...:
@@ -92,8 +98,20 @@ def patch_lookups(service, worker=..., instances=...):
             AsyncMock(return_value=worker),
         ),
         patch(
-            "gpustack.server.cache_services.CacheServiceInstance.all_by_fields",
-            AsyncMock(return_value=instances),
+            "gpustack.server.cache_services.Workload.all_by_fields",
+            # Honours the queried fields: the resolver filters on state in
+            # the query now, so a mock that ignored it would let a PENDING
+            # workload through and the degradation paths would go untested.
+            AsyncMock(
+                side_effect=lambda session, fields=None, **kwargs: [
+                    instance
+                    for instance in instances
+                    if all(
+                        getattr(instance, key) == value
+                        for key, value in (fields or {}).items()
+                    )
+                ]
+            ),
         ),
     ):
         yield
@@ -218,8 +236,20 @@ async def test_resolve_prefers_instance_on_model_worker():
             AsyncMock(side_effect=lambda session, id: workers.get(id)),
         ),
         patch(
-            "gpustack.server.cache_services.CacheServiceInstance.all_by_fields",
-            AsyncMock(return_value=instances),
+            "gpustack.server.cache_services.Workload.all_by_fields",
+            # Honours the queried fields: the resolver filters on state in
+            # the query now, so a mock that ignored it would let a PENDING
+            # workload through and the degradation paths would go untested.
+            AsyncMock(
+                side_effect=lambda session, fields=None, **kwargs: [
+                    instance
+                    for instance in instances
+                    if all(
+                        getattr(instance, key) == value
+                        for key, value in (fields or {}).items()
+                    )
+                ]
+            ),
         ),
     ):
         snapshot = await resolve_instance_cache_config(

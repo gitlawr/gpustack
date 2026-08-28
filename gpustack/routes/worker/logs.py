@@ -640,9 +640,6 @@ async def get_cache_service_instance_logs(
     request: Request,
     instance_id: int,
     log_options: LogOptionsDep,
-    # Unused now that the logs come from files rather than the runtime, but
-    # kept so the server-side proxy's URL does not have to change.
-    cache_service_id: int = Query(),
 ):
     """Stream a managed cache service instance's logs for one start: the
     provisioning log the worker's subprocess wrote — provider resolution and

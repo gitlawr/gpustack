@@ -6,7 +6,6 @@ from gpustack.routes import (
     api_keys,
     auth,
     cache_providers,
-    cache_service_instances,
     workloads,
     cache_services,
     cluster_access,
@@ -191,12 +190,6 @@ model_routers = [
         "router": cache_services.router,
         "prefix": "/cache-services",
         "tags": ["Cache Services"],
-        "dependencies": _org_owner_only,
-    },
-    {
-        "router": cache_service_instances.router,
-        "prefix": "/cache-service-instances",
-        "tags": ["Cache Service Instances"],
         "dependencies": _org_owner_only,
     },
     {

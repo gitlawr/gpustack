@@ -8,11 +8,16 @@ import aiohttp
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from gpustack.schemas.cache_providers import CacheProvider
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.schemas.cache_services import (
+    CACHE_SERVICE_PORT,
     CacheConfigSnapshot,
     CacheService,
     CacheServiceEndpoint,
-    CacheServiceInstance,
     CacheServiceModeEnum,
     CacheServiceStateEnum,
 )
@@ -145,14 +150,22 @@ async def _resolve_managed_endpoint(
     instead. Cluster-attachable providers serve any worker from any
     instance. Returns (None, reason) when no instance is usable.
     """
-    instances = await CacheServiceInstance.all_by_fields(
-        session, {"cache_service_id": service.id}
+    # Filtered in the query rather than in Python: this runs for every model
+    # instance scheduled, and the workloads table is indexed on
+    # (owner_kind, owner_id, state) for it.
+    instances = await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+            "owner_id": service.id,
+            "state": WorkloadStateEnum.RUNNING,
+        },
     )
     running = sorted(
         (
             instance
             for instance in instances
-            if instance.state == CacheServiceStateEnum.RUNNING and instance.port
+            if (instance.ports or {}).get(CACHE_SERVICE_PORT)
         ),
         key=lambda instance: instance.id,
     )
@@ -197,7 +210,7 @@ async def _resolve_managed_endpoint(
     return (
         CacheServiceEndpoint(
             host=service_worker.ip,
-            port=target.port,
+            port=(target.ports or {}).get(CACHE_SERVICE_PORT),
             params={"locality": "node_local" if node_local else "remote"},
         ),
         None,

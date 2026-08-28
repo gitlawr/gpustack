@@ -21,12 +21,33 @@ from gpustack.schemas.principals import _platform_principal_id
 CACHE_SERVICE_WORKLOAD_TYPE = "cache-service"
 
 
-def cache_service_instance_workload_name(
-    cache_service_id: int, instance_id: int
-) -> str:
-    """Name of the workload a managed cache service instance runs as on
-    its worker."""
-    return f"cache-svc-{cache_service_id}-i{instance_id}"
+CACHE_SERVICE_PORT = "service"
+CACHE_SERVICE_METRICS_PORT = "metrics"
+"""Names of the ports a cache server exposes. The provider declaration's
+health check target uses the same vocabulary."""
+
+
+def cache_service_instance_workload_name(cache_service_id: int, worker_id: int) -> str:
+    """
+    Container name of the cache server a service runs on a worker.
+
+    Keyed by worker rather than by row id so it can be computed before the row
+    exists, and because that is the identity anyway: one cache server per
+    service per worker, which is what the workload table's unique constraint
+    says.
+    """
+    return f"cache-svc-{cache_service_id}-w{worker_id}"
+
+
+def cache_service_workload_labels(
+    cache_service_id: int, worker_id: int
+) -> Dict[str, str]:
+    """Labels stamped on the container, for the worker's orphan cleanup."""
+    return {
+        "type": CACHE_SERVICE_WORKLOAD_TYPE,
+        "cache-service-id": str(cache_service_id),
+        "cache-service-worker-id": str(worker_id),
+    }
 
 
 class CacheServiceModeEnum(str, Enum):
@@ -219,103 +240,53 @@ class CacheServicePublic(CacheServiceBase):
 CacheServicesPublic = PaginatedList[CacheServicePublic]
 
 
-class CacheServiceInstanceBase(SQLModel):
-    """One cache server container of a managed cache service. The parent
-    service's provider topology dictates the desired set: singleton
-    providers get exactly one instance on the user-picked worker; per-node
-    providers get one instance per non-deleted worker of the service's
-    cluster (narrowed by the service's worker_selector when one is set);
-    rows on NOT_READY workers are kept — the worker restarts its
-    container when it comes back.
+class CacheServiceInstancePublic(BaseModel):
+    """
+    A managed cache server as the cache service API presents it.
+
+    A view over the Workload that actually runs it: the service's endpoints
+    keep this shape so the UI does not have to learn the workload model, and
+    the named ports come back apart into the two fields it reads.
     """
 
-    name: str = Field(index=True)
-    """Display identity: the parent service's name (as of instance
-    creation) plus a short random suffix, mirroring model instance
-    naming."""
-
-    cache_service_id: int = Field(
-        sa_column=Column(
-            Integer,
-            ForeignKey("cache_services.id", ondelete="CASCADE"),
-            nullable=False,
-            index=True,
-        )
-    )
-    worker_id: int
-    cluster_id: int
-    """Denormalized from the parent service so cluster-bound service
-    accounts' reads (list conditions, watch filter) scope without a join."""
-
-    port: Optional[int] = None
-    """Port allocated on the instance's worker."""
-
-    metrics_port: Optional[int] = None
-    """Port the cache server exposes Prometheus metrics on, allocated on
-    the instance's worker alongside ``port``."""
-
-    state: CacheServiceStateEnum = Field(
-        default=CacheServiceStateEnum.PENDING,
-        sa_column=Column(String(length=64), nullable=False),
-    )
-    state_message: Optional[str] = Field(
-        default=None, sa_column=Column(Text, nullable=True)
-    )
-    healthy: Optional[bool] = None
-    last_check_at: Optional[datetime] = Field(
-        sa_column=Column(UTCDateTime), default=None
-    )
-    restart_count: Optional[int] = 0
-    last_restart_time: Optional[datetime] = Field(
-        sa_column=Column(UTCDateTime), default=None
-    )
-
-    spec_digest: Optional[str] = None
-    """Digest of the container-shaping part of the parent service's spec
-    (provider_version + config) as of instance creation. The controller
-    reconciles the instance *set*, not the spec — a spec edit leaves
-    running containers untouched by design (recovery is
-    delete-to-recreate) — so this digest is how that drift is made
-    visible instead of silent: the aggregate flags the service when any
-    instance was created from an older spec. None on rows predating the
-    field (unknown, never flagged)."""
-
-    def get_deployment_metadata(self) -> CacheServiceDeploymentMetadata:
-        return CacheServiceDeploymentMetadata(
-            name=cache_service_instance_workload_name(self.cache_service_id, self.id),
-            labels={
-                "type": CACHE_SERVICE_WORKLOAD_TYPE,
-                "cache-service-id": str(self.cache_service_id),
-                "cache-service-instance-id": str(self.id),
-            },
-        )
-
-
-class CacheServiceInstance(CacheServiceInstanceBase, BaseModelMixin, table=True):
-    __tablename__ = "cache_service_instances"
-    __table_args__ = (
-        UniqueConstraint(
-            "cache_service_id",
-            "worker_id",
-            name="uix_cache_service_instances_service_worker",
-        ),
-    )
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-
-
-class CacheServiceInstanceCreate(CacheServiceInstanceBase):
-    pass
-
-
-class CacheServiceInstanceUpdate(CacheServiceInstanceBase):
-    pass
-
-
-class CacheServiceInstancePublic(CacheServiceInstanceBase):
     id: int
+    name: str
+    cache_service_id: int
+    worker_id: int
+    cluster_id: Optional[int] = None
+    port: Optional[int] = None
+    metrics_port: Optional[int] = None
+    state: CacheServiceStateEnum
+    state_message: Optional[str] = None
+    healthy: Optional[bool] = None
+    last_check_at: Optional[datetime] = None
+    restart_count: Optional[int] = 0
+    last_restart_time: Optional[datetime] = None
+    spec_digest: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+    @classmethod
+    def from_workload(cls, workload) -> "CacheServiceInstancePublic":
+        ports = workload.ports or {}
+        return cls(
+            id=workload.id,
+            name=workload.name,
+            cache_service_id=workload.owner_id,
+            worker_id=workload.worker_id,
+            cluster_id=workload.cluster_id,
+            port=ports.get(CACHE_SERVICE_PORT),
+            metrics_port=ports.get(CACHE_SERVICE_METRICS_PORT),
+            state=CacheServiceStateEnum(workload.state.value),
+            state_message=workload.state_message,
+            healthy=workload.healthy,
+            last_check_at=workload.last_check_at,
+            restart_count=workload.restart_count,
+            last_restart_time=workload.last_restart_time,
+            spec_digest=workload.spec_digest,
+            created_at=workload.created_at,
+            updated_at=workload.updated_at,
+        )
 
 
 CacheServiceInstancesPublic = PaginatedList[CacheServiceInstancePublic]

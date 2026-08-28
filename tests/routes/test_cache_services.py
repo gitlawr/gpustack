@@ -1304,13 +1304,35 @@ async def test_update_accepts_valid_l2_storage(monkeypatch):
 # ---- instance delete ----
 
 
-def _service_instance(**overrides):
+def _service_instance(port=40001, metrics_port=40002, **overrides):
+    """The workload a managed cache server runs as."""
+    from datetime import datetime, timezone
+
+    from gpustack.schemas.workloads import WorkloadOwnerKindEnum, WorkloadStateEnum
+
+    now = datetime.now(timezone.utc)
+    ports = {}
+    if port:
+        ports["service"] = port
+    if metrics_port:
+        ports["metrics"] = metrics_port
     fields = dict(
         id=21,
-        cache_service_id=9,
+        name="cache-svc-9-w5",
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=9,
         worker_id=5,
         cluster_id=1,
-        state=CacheServiceStateEnum.RUNNING,
+        ports=ports or None,
+        state=WorkloadStateEnum.RUNNING,
+        state_message=None,
+        healthy=None,
+        last_check_at=None,
+        restart_count=0,
+        last_restart_time=None,
+        spec_digest=None,
+        created_at=now,
+        updated_at=now,
         update=AsyncMock(),
         delete=AsyncMock(),
     )
@@ -1320,7 +1342,7 @@ def _service_instance(**overrides):
 
 def _patch_service_instances(monkeypatch, instances):
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "all_by_fields",
         AsyncMock(return_value=instances),
     )
@@ -1335,7 +1357,7 @@ async def test_delete_instance_leaves_siblings_untouched(monkeypatch):
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "one_by_id",
         AsyncMock(return_value=target),
     )
@@ -1392,12 +1414,12 @@ async def test_delete_instance_hidden_cross_tenant(monkeypatch):
 @pytest.mark.asyncio
 async def test_delete_instance_of_other_service_is_not_found(monkeypatch):
     service = _existing_service()
-    foreign = _service_instance(id=21, cache_service_id=8)
+    foreign = _service_instance(id=21, owner_id=8)
     monkeypatch.setattr(
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "one_by_id",
         AsyncMock(return_value=foreign),
     )
@@ -1517,7 +1539,7 @@ async def test_logs_proxies_single_instance_to_its_worker(monkeypatch):
     assert call_kwargs["params"] == {
         "tail": 100,
         "follow": False,
-        "cache_service_id": 9,
+        "previous": False,
     }
     assert response.status_code == 200
     assert response.body == b"cache server log line\n"
@@ -1533,7 +1555,7 @@ async def test_instance_logs_proxy_to_instance_worker(monkeypatch):
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "one_by_id",
         AsyncMock(return_value=instance),
     )
@@ -1559,7 +1581,7 @@ async def test_instance_logs_proxy_to_instance_worker(monkeypatch):
     assert call_kwargs["params"] == {
         "tail": 50,
         "follow": False,
-        "cache_service_id": 9,
+        "previous": False,
     }
     assert response.status_code == 200
 
@@ -1568,12 +1590,12 @@ async def test_instance_logs_proxy_to_instance_worker(monkeypatch):
 async def test_instance_logs_of_other_service_is_not_found(monkeypatch):
     _patch_logs_session(monkeypatch)
     service = _existing_service()
-    foreign = _service_instance(id=22, cache_service_id=8)
+    foreign = _service_instance(id=22, owner_id=8)
     monkeypatch.setattr(
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "one_by_id",
         AsyncMock(return_value=foreign),
     )
@@ -1600,29 +1622,27 @@ async def test_service_instances_listed_ordered_by_worker(monkeypatch):
     from datetime import datetime
 
     now = datetime(2026, 7, 1)
-    rows = [
-        dict(
+    from gpustack.schemas.workloads import WorkloadStateEnum
+
+    instances = [
+        _service_instance(
             id=22,
-            name="svc-f6g7h",
-            cache_service_id=9,
+            name="cache-svc-9-w6",
             worker_id=6,
-            cluster_id=1,
-            state=CacheServiceStateEnum.RUNNING,
+            state=WorkloadStateEnum.RUNNING,
             created_at=now,
             updated_at=now,
         ),
-        dict(
+        _service_instance(
             id=21,
-            name="svc-a1b2c",
-            cache_service_id=9,
+            name="cache-svc-9-w5",
             worker_id=5,
-            cluster_id=1,
-            state=CacheServiceStateEnum.PENDING,
+            state=WorkloadStateEnum.PENDING,
             created_at=now,
             updated_at=now,
         ),
     ]
-    _patch_service_instances(monkeypatch, [SimpleNamespace(**row) for row in rows])
+    _patch_service_instances(monkeypatch, instances)
 
     response = await cache_services_route.get_cache_service_instances_of_service(
         session=MagicMock(), ctx=_user_ctx(), id=9
@@ -1698,7 +1718,7 @@ async def test_delete_proceeds_without_shared_references(monkeypatch):
     )
 
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "all_by_fields",
         AsyncMock(return_value=[]),
     )
@@ -1726,7 +1746,7 @@ async def test_delete_takes_the_instances_down_with_the_service(monkeypatch):
     for instance in instances:
         instance.delete = AsyncMock()
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "all_by_fields",
         AsyncMock(return_value=instances),
     )

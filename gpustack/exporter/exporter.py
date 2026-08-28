@@ -14,11 +14,16 @@ from gpustack.config.config import Config
 from gpustack.exporter.bus_metrics import BusMetricsCollector
 from gpustack.logging import setup_logging
 from gpustack.schemas.cache_services import (
+    CACHE_SERVICE_METRICS_PORT,
     CacheService,
     CacheServiceEndpoint,
-    CacheServiceInstance,
     CacheServiceModeEnum,
     CacheServiceStateEnum,
+)
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
 )
 from gpustack.schemas.config import ModelInstanceProxyModeEnum
 from gpustack.schemas.clusters import Cluster
@@ -473,13 +478,17 @@ async def _cache_service_targets(
 
     instances_by_service: dict = {}
     if any(service.mode == CacheServiceModeEnum.MANAGED for service in services):
-        instances = await CacheServiceInstance.all_by_fields(
-            session, fields={"state": CacheServiceStateEnum.RUNNING}
+        # owner_kind is not optional here: without it this would also pick up
+        # the workloads of model instances and benchmarks.
+        instances = await Workload.all_by_fields(
+            session,
+            fields={
+                "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+                "state": WorkloadStateEnum.RUNNING,
+            },
         )
         for instance in instances:
-            instances_by_service.setdefault(instance.cache_service_id, []).append(
-                instance
-            )
+            instances_by_service.setdefault(instance.owner_id, []).append(instance)
 
     groups = []
     for service in services:
@@ -598,7 +607,7 @@ def _extra_metrics_target_groups(
 
 def _managed_cache_service_groups(
     service: CacheService,
-    instances: List[CacheServiceInstance],
+    instances: List[Workload],
     workers_by_id: dict,
     is_proxy: bool,
     provider_path: str,
@@ -609,7 +618,8 @@ def _managed_cache_service_groups(
     labels so per-instance series stay distinguishable."""
     groups = []
     for instance in instances:
-        if not instance.metrics_port or instance.metrics_port <= 0:
+        metrics_port = (instance.ports or {}).get(CACHE_SERVICE_METRICS_PORT)
+        if not metrics_port or metrics_port <= 0:
             continue
         worker = workers_by_id.get(instance.worker_id)
         if worker is None:
@@ -627,7 +637,7 @@ def _managed_cache_service_groups(
         groups.append(
             {
                 "labels": labels,
-                "targets": [f"{address}:{instance.metrics_port}"],
+                "targets": [f"{address}:{metrics_port}"],
             }
         )
     return groups

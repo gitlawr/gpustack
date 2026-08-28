@@ -13,17 +13,20 @@ from sqlmodel import select
 
 from gpustack.schemas.cache_services import (
     CacheService,
-    CacheServiceInstance,
     CacheServiceModeEnum,
     CacheServiceStateEnum,
 )
+from gpustack.schemas.workloads import Workload, WorkloadStateEnum
 
 
 def test_mode_and_state_columns_are_plain_strings():
     for column in (
         CacheService.__table__.c.mode,
         CacheService.__table__.c.state,
-        CacheServiceInstance.__table__.c.state,
+        Workload.__table__.c.state,
+        Workload.__table__.c.owner_kind,
+        Workload.__table__.c.restart_policy,
+        Workload.__table__.c.role,
     ):
         assert not isinstance(column.type, sa.Enum)
         assert isinstance(column.type, sa.String)
@@ -46,13 +49,13 @@ def test_enum_filters_compile_to_string_binds_on_postgresql():
 
 
 def test_instance_enum_filters_compile_to_string_binds_on_postgresql():
-    statement = select(CacheServiceInstance).where(
-        CacheServiceInstance.state == CacheServiceStateEnum.RUNNING,
+    statement = select(Workload).where(
+        Workload.state == WorkloadStateEnum.RUNNING,
     )
     compiled = statement.compile(
         dialect=postgresql.asyncpg.dialect(),
         compile_kwargs={"render_postcompile": True},
     )
 
-    assert "::cacheservicestateenum" not in str(compiled)
+    assert "::workloadstateenum" not in str(compiled)
     assert "running" in compiled.params.values()

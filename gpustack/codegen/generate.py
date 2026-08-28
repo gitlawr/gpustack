@@ -19,7 +19,6 @@ def main():
             "Benchmark",
             "ModelRouteTarget",
             "CacheService",
-            "CacheServiceInstance",
             "Workload",
         ]
     )

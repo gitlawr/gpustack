@@ -10,6 +10,7 @@ from gpustack import envs
 from gpustack.client.generated_clientset import ClientSet
 from gpustack.utils import network
 from gpustack.utils.datetimex import parse_iso8601_to_utc
+from gpustack.schemas.workloads import WorkloadOwnerKindEnum
 from gpustack.utils.runtime import is_benchmark_workload, is_cache_service_workload
 
 logger = logging.getLogger(__name__)
@@ -56,18 +57,17 @@ class WorkloadCleaner:
         return names
 
     def _current_cache_service_instance_names(self) -> set:
-        names = set()
-        instances_page = self._clientset.cache_service_instances.list(
+        instances_page = self._clientset.workloads.list(
             # page=-1 disables pagination: a truncated page would make the
             # cleaner treat live instances as orphans and delete their
             # running cache servers.
-            params={"worker_id": self._worker_id, "page": -1}
+            params={
+                "worker_id": self._worker_id,
+                "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE.value,
+                "page": -1,
+            }
         )
-        for instance in instances_page.items or []:
-            deployment_metadata = instance.get_deployment_metadata()
-            if deployment_metadata:
-                names.add(deployment_metadata.name)
-        return names
+        return {instance.name for instance in instances_page.items or []}
 
     def cleanup_orphan_workloads(self):
         current_instance_names = self._current_model_instance_names()

@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from gpustack.schemas.cache_services import CacheServiceInstance
+from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 from gpustack.worker.workload_cleaner import WorkloadCleaner
 from gpustack_runtime.deployer import WorkloadStatusStateEnum
 
@@ -10,7 +10,7 @@ def _build_cleaner(worker_id: int = 1):
     clientset = MagicMock()
     clientset.model_instances.list.return_value = SimpleNamespace(items=[])
     clientset.benchmarks.list.return_value = SimpleNamespace(items=[])
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[])
     cleaner = WorkloadCleaner(lambda: worker_id, lambda: clientset)
     return cleaner, clientset
 
@@ -29,16 +29,19 @@ def test_cleanup_keeps_workloads_of_this_workers_instances():
     """The live set of cache-service workload names comes from this
     worker's instance rows; only workloads outside it are orphans."""
     cleaner, clientset = _build_cleaner(worker_id=1)
-    instance = CacheServiceInstance(
-        id=11, name="svc-a1b2c", cache_service_id=5, worker_id=1, cluster_id=1
+    instance = Workload(
+        id=11,
+        name="cache-svc-5-w1",
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=5,
+        worker_id=1,
+        cluster_id=1,
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     workloads = [
-        _cache_workload("cache-svc-5-i11"),
-        _cache_workload("cache-svc-5-i99"),
+        _cache_workload("cache-svc-5-w1"),
+        _cache_workload("cache-svc-5-w99"),
     ]
     with (
         patch(
@@ -49,11 +52,12 @@ def test_cleanup_keeps_workloads_of_this_workers_instances():
     ):
         cleaner.cleanup_orphan_workloads()
 
-    assert clientset.cache_service_instances.list.call_args[1]["params"] == {
+    assert clientset.workloads.list.call_args[1]["params"] == {
         "worker_id": 1,
+        "owner_kind": "cache_service",
         "page": -1,
     }
-    delete.assert_called_once_with("cache-svc-5-i99")
+    delete.assert_called_once_with("cache-svc-5-w99")
 
 
 def test_cleanup_spares_recent_cache_service_workloads():

@@ -71,10 +71,17 @@ from gpustack.schemas.config import (
 from gpustack.schemas.cache_services import (
     cache_service_spec_digest,
     CacheService,
-    CacheServiceInstance,
-    CacheServiceInstanceCreate,
+    cache_service_instance_workload_name,
+    cache_service_workload_labels,
     CacheServiceModeEnum,
     CacheServiceStateEnum,
+)
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadCreate,
+    WorkloadOwnerKindEnum,
+    WorkloadRestartPolicyEnum,
+    WorkloadStateEnum,
 )
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.server.cache_services import resolve_instance_cache_config_safe
@@ -439,7 +446,7 @@ class CacheServiceController:
             await self._reconcile_cluster_services(cluster_id)
 
     async def _watch_instances(self):
-        async for event in CacheServiceInstance.subscribe(
+        async for event in Workload.subscribe(
             source="cache_service_controller_instances", replay_existing=False
         ):
             if event.type not in (
@@ -448,14 +455,14 @@ class CacheServiceController:
                 EventType.DELETED,
             ):
                 continue
-            instance: CacheServiceInstance = event.data
-            if instance is None or instance.cache_service_id is None:
+            instance: Workload = event.data
+            if instance is None or instance.owner_id is None:
+                continue
+            if instance.owner_kind != WorkloadOwnerKindEnum.CACHE_SERVICE:
                 continue
             try:
                 async with async_session() as session:
-                    service = await CacheService.one_by_id(
-                        session, instance.cache_service_id
-                    )
+                    service = await CacheService.one_by_id(session, instance.owner_id)
                     if (
                         service is None
                         or service.deleted_at is not None
@@ -485,7 +492,7 @@ class CacheServiceController:
             except Exception as e:
                 logger.error(
                     f"Failed to reconcile cache service "
-                    f"{instance.cache_service_id} on instance event: {e}"
+                    f"{instance.owner_id} on workload event: {e}"
                 )
 
     _PRE_START_STATES = frozenset(
@@ -631,6 +638,17 @@ class CacheServiceController:
             except Exception as e:
                 logger.error(f"Failed to resync cache services: {e}")
 
+    @staticmethod
+    async def _service_workloads(session: AsyncSession, service_id: int) -> list:
+        """The workloads a cache service runs, one per worker."""
+        return await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+                "owner_id": service_id,
+            },
+        )
+
     async def _reap_orphan_instances(self, session: AsyncSession):
         """Delete instances whose parent service is gone.
 
@@ -644,7 +662,9 @@ class CacheServiceController:
         the service read is the authority, so a failure to load it raises out
         of here and the pass is skipped rather than reaping live instances.
         """
-        instances = await CacheServiceInstance.all(session)
+        instances = await Workload.all_by_fields(
+            session, {"owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE}
+        )
         if not instances:
             return
 
@@ -654,12 +674,12 @@ class CacheServiceController:
             if service.deleted_at is None
         }
         for instance in instances:
-            if instance.cache_service_id in service_ids:
+            if instance.owner_id in service_ids:
                 continue
             await instance.delete(session)
             logger.info(
-                f"Deleted orphan cache service instance {instance.id}: "
-                f"parent service {instance.cache_service_id} no longer exists"
+                f"Deleted orphan cache service workload {instance.id}: "
+                f"parent service {instance.owner_id} no longer exists"
             )
 
     async def _reconcile_cluster_services(self, cluster_id: int):
@@ -710,15 +730,13 @@ class CacheServiceController:
             )
             return
 
-        instances = await CacheServiceInstance.all_by_fields(
-            session, {"cache_service_id": service.id}
-        )
+        instances = await self._service_workloads(session, service.id)
         existing_worker_ids = set()
         for instance in instances:
             if instance.worker_id not in desired_worker_ids:
                 await instance.delete(session)
                 logger.info(
-                    f"Deleted instance {instance.id} of cache service "
+                    f"Deleted workload {instance.id} of cache service "
                     f"{service.name}: worker {instance.worker_id} left "
                     "the desired set"
                 )
@@ -726,25 +744,27 @@ class CacheServiceController:
                 existing_worker_ids.add(instance.worker_id)
 
         for worker_id in sorted(desired_worker_ids - existing_worker_ids):
-            # Same display-name convention as model instances: the parent's
-            # name (as of instance creation; a later service rename does not
-            # rename instances) plus a short random suffix.
-            name_suffix = ''.join(
-                random.choices(string.ascii_lowercase + string.digits, k=5)
-            )
-            await CacheServiceInstance.create(
+            await Workload.create(
                 session,
-                CacheServiceInstanceCreate(
-                    name=f"{service.name}-{name_suffix}",
-                    cache_service_id=service.id,
-                    worker_id=worker_id,
+                WorkloadCreate(
+                    # The container name, derived from the identity rather
+                    # than generated: one cache server per service per worker.
+                    name=cache_service_instance_workload_name(service.id, worker_id),
+                    owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+                    owner_id=service.id,
+                    owner_principal_id=service.owner_principal_id,
                     cluster_id=service.cluster_id,
-                    state=CacheServiceStateEnum.PENDING,
+                    worker_id=worker_id,
+                    # A cache server has no successful end, so any stop is a
+                    # fault to recover from.
+                    restart_policy=WorkloadRestartPolicyEnum.ALWAYS,
+                    labels=cache_service_workload_labels(service.id, worker_id),
+                    state=WorkloadStateEnum.PENDING,
                     spec_digest=cache_service_spec_digest(service),
                 ),
             )
             logger.info(
-                f"Created instance of cache service {service.name} "
+                f"Created workload of cache service {service.name} "
                 f"on worker {worker_id}"
             )
 
@@ -818,20 +838,16 @@ class CacheServiceController:
         RUNNING/healthy; some RUNNING → RUNNING/unhealthy with an N/M
         breakdown; none RUNNING but a cache server already launching →
         STARTING; none launched yet → PENDING; otherwise ERROR."""
-        instances = await CacheServiceInstance.all_by_fields(
-            session, {"cache_service_id": service.id}
-        )
+        instances = await self._service_workloads(session, service.id)
         total = len(instances)
         running = sum(
-            1
-            for instance in instances
-            if instance.state == CacheServiceStateEnum.RUNNING
+            1 for instance in instances if instance.state == WorkloadStateEnum.RUNNING
         )
         starting = any(
-            instance.state == CacheServiceStateEnum.STARTING for instance in instances
+            instance.state == WorkloadStateEnum.STARTING for instance in instances
         )
         pending = any(
-            instance.state == CacheServiceStateEnum.PENDING for instance in instances
+            instance.state == WorkloadStateEnum.PENDING for instance in instances
         )
 
         if total and running == total:

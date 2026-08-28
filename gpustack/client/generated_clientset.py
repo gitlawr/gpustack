@@ -12,7 +12,6 @@ from .generated_inference_backend_client import InferenceBackendClient
 from .generated_benchmark_client import BenchmarkClient
 from .generated_model_route_target_client import ModelRouteTargetClient
 from .generated_cache_service_client import CacheServiceClient
-from .generated_cache_service_instance_client import CacheServiceInstanceClient
 from .generated_workload_client import WorkloadClient
 
 from gpustack.ssl_context import make_ssl_context
@@ -96,10 +95,6 @@ class ClientSet:
             enable_cache=enable_cache,
         )
         self.cache_services = CacheServiceClient(
-            http_client,
-            enable_cache=enable_cache,
-        )
-        self.cache_service_instances = CacheServiceInstanceClient(
             http_client,
             enable_cache=enable_cache,
         )

@@ -22,13 +22,13 @@ from gpustack.api.tenant import (
 )
 from gpustack.routes.models import assert_cluster_belongs_to_org
 from gpustack.schemas.cache_providers import CUSTOM_VERSION
+from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 from gpustack.schemas.cache_services import (
     CacheService,
     CacheServiceBase,
     CacheServiceConfig,
     CacheServiceCreate,
     CacheServiceEndpoint,
-    CacheServiceInstance,
     CacheServiceInstancePublic,
     CacheServiceInstancesPublic,
     CacheServiceModeEnum,
@@ -279,11 +279,26 @@ async def _fetch_managed_cache_service(session, ctx, id: int) -> CacheService:
     return cache_service
 
 
+async def _service_workloads(session, cache_service: CacheService) -> list:
+    """The workloads this service runs, one cache server per worker."""
+    return await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+            "owner_id": cache_service.id,
+        },
+    )
+
+
 async def _fetch_service_instance(
     session, cache_service: CacheService, instance_id: int
-) -> CacheServiceInstance:
-    instance = await CacheServiceInstance.one_by_id(session, instance_id)
-    if instance is None or instance.cache_service_id != cache_service.id:
+) -> Workload:
+    instance = await Workload.one_by_id(session, instance_id)
+    if (
+        instance is None
+        or instance.owner_kind != WorkloadOwnerKindEnum.CACHE_SERVICE
+        or instance.owner_id != cache_service.id
+    ):
         raise NotFoundException(message="Cache service instance not found")
     return instance
 
@@ -323,12 +338,10 @@ async def get_cache_service_instances_of_service(
         ctx, cache_service, not_found_message="Cache service not found"
     )
 
-    instances = await CacheServiceInstance.all_by_fields(
-        session, {"cache_service_id": cache_service.id}
-    )
+    instances = await _service_workloads(session, cache_service)
     instances = sorted(instances, key=lambda instance: instance.worker_id)
     items = [
-        CacheServiceInstancePublic.model_validate(instance) for instance in instances
+        CacheServiceInstancePublic.from_workload(instance) for instance in instances
     ]
     return CacheServiceInstancesPublic(
         items=items,
@@ -343,17 +356,17 @@ async def get_cache_service_instances_of_service(
 
 async def _proxy_instance_logs(
     request: Request,
-    instance: CacheServiceInstance,
+    instance: Workload,
     worker: Worker,
     log_options,
 ):
-    """Proxy the instance's container logs from its worker. The worker
-    resolves the workload name from the (service, instance) id pair."""
+    """Proxy the instance's container logs from its worker, which keys them by
+    workload id."""
     timeout = aiohttp.ClientTimeout(total=envs.PROXY_TIMEOUT, sock_connect=5)
     params = {
         "tail": log_options.tail,
         "follow": log_options.follow,
-        "cache_service_id": instance.cache_service_id,
+        "previous": log_options.previous,
     }
 
     if log_options.follow:
@@ -395,7 +408,7 @@ async def _proxy_instance_logs(
     )
 
 
-async def _fetch_instance_log_worker(session, instance: CacheServiceInstance) -> Worker:
+async def _fetch_instance_log_worker(session, instance: Workload) -> Worker:
     worker = await Worker.one_by_id(session, instance.worker_id)
     if not worker:
         raise NotFoundException(message="Cache service instance's worker not found")
@@ -417,9 +430,7 @@ async def get_cache_service_logs(
     async with async_session() as session:
         cache_service = await _fetch_managed_cache_service(session, ctx, id)
 
-        instances = await CacheServiceInstance.all_by_fields(
-            session, {"cache_service_id": cache_service.id}
-        )
+        instances = await _service_workloads(session, cache_service)
         if not instances:
             raise BadRequestException(message="Cache service has no instances yet")
         if len(instances) > 1:
@@ -1133,9 +1144,7 @@ async def delete_cache_service(session: SessionDep, ctx: TenantContextDep, id: i
         # is a database-level constraint: it emits nothing, and the cache
         # servers would keep holding GPU memory and ports until the worker's
         # orphan cleaner noticed, minutes later.
-        instances = await CacheServiceInstance.all_by_fields(
-            session, {"cache_service_id": cache_service.id}
-        )
+        instances = await _service_workloads(session, cache_service)
         for instance in instances:
             await instance.delete(session, auto_commit=False)
         await cache_service.delete(session)
