@@ -20,6 +20,7 @@ def main():
             "ModelRouteTarget",
             "CacheService",
             "CacheServiceInstance",
+            "Workload",
         ]
     )
 
