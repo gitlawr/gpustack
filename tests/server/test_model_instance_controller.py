@@ -19,7 +19,10 @@ from gpustack.schemas.workloads import (
     WorkloadStateEnum,
 )
 from gpustack.server.bus import Event, EventType
-from gpustack.server.controllers import ModelInstanceController
+from gpustack.server.controllers import (
+    ModelInstanceController,
+    ModelInstanceWorkloadStateController,
+)
 
 _ANY_INSTANCE = object()
 
@@ -164,3 +167,98 @@ async def test_sync_does_not_write_over_what_the_worker_reported(monkeypatch):
     assert "state_message" not in update.model_fields_set
     assert "ports" not in update.model_fields_set
     assert "pid" not in update.model_fields_set
+
+
+# ---------------------------------------------------------------------------
+# Folding workload state back onto the instance (stage 3 step 2b)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _fold(monkeypatch, instance, folded, authoritative=False):
+    monkeypatch.setattr(
+        "gpustack.server.controllers.async_session", lambda: _FakeSessionCtx()
+    )
+    monkeypatch.setattr(
+        "gpustack.server.controllers.ModelInstance.one_by_id",
+        AsyncMock(return_value=instance),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.controllers.Workload.all_by_fields",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.controllers.aggregate_instance_state", lambda workloads: folded
+    )
+    monkeypatch.setattr(
+        "gpustack.server.controllers.envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS",
+        authoritative,
+    )
+    yield
+
+
+def _instance(**overrides):
+    fields = dict(
+        id=3, name="mi", state="running", state_message="", update=AsyncMock()
+    )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+@pytest.mark.asyncio
+async def test_fold_writes_nothing_while_it_is_only_being_compared(monkeypatch, caplog):
+    """Off by default: the fold runs so it can be shown correct against real
+    instances, without being the thing that decides them."""
+    instance = _instance(state="starting")
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}):
+        with caplog.at_level(logging.INFO):
+            await ModelInstanceWorkloadStateController()._reconcile(3)
+
+    instance.update.assert_not_awaited()
+    assert "disagrees with model instance mi" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_agreement_is_silent(monkeypatch, caplog):
+    """Silence is the evidence that flipping is safe, so agreement must not
+    add noise to it."""
+    instance = _instance(state="running")
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}):
+        with caplog.at_level(logging.INFO):
+            await ModelInstanceWorkloadStateController()._reconcile(3)
+
+    assert "disagrees" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fold_writes_once_it_is_authoritative(monkeypatch):
+    instance = _instance(state="starting")
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}, authoritative=True):
+        await ModelInstanceWorkloadStateController()._reconcile(3)
+
+    instance.update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_authoritative_fold_that_changes_nothing_does_not_write(monkeypatch):
+    """The worker reports state on every health check; rewriting an unchanged
+    row would publish an event per check to everything watching instances."""
+    instance = _instance(state="running")
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}, authoritative=True):
+        await ModelInstanceWorkloadStateController()._reconcile(3)
+
+    instance.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_group_that_says_nothing_leaves_the_instance_alone(monkeypatch):
+    instance = _instance()
+
+    with _fold(monkeypatch, instance, folded=None, authoritative=True):
+        await ModelInstanceWorkloadStateController()._reconcile(3)
+
+    instance.update.assert_not_awaited()

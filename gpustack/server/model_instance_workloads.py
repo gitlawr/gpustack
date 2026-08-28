@@ -218,3 +218,79 @@ def workload_spec(workload: Workload) -> WorkloadUpdate:
             if hasattr(workload, name)
         }
     )
+
+
+def aggregate_instance_state(workloads: List[Workload]) -> Optional[dict]:
+    """
+    Fold a group's execution state back onto its model instance.
+
+    The leader reports the instance's own state; the followers can override it,
+    reproducing what the worker decides today in
+    ``ServeManager._get_main_worker_distributed_state``: the first follower in
+    ERROR wins, then the first UNREACHABLE, and anything short of
+    all-followers-RUNNING holds the instance where it is.
+
+    Returns the fields to write, or None when the group says nothing yet --
+    which is not the same as "nothing changed"; that comparison is the
+    caller's, since only it knows what the instance currently says.
+    """
+    leader = next((w for w in workloads if w.group_index == 0), None)
+    if leader is None:
+        return None
+
+    if leader.state == WorkloadStateEnum.PENDING:
+        # The mapping is not reversible here: scheduling, initializing and
+        # downloading all mirror onto a pending workload, so folding that back
+        # would replace the instance's richer state with the poorer one. Those
+        # states belong to the instance's own lifecycle; the workload has
+        # nothing to say until its container exists.
+        return None
+
+    followers = sorted(
+        (w for w in workloads if w.group_index != 0), key=lambda w: w.group_index
+    )
+    override = _distributed_override(followers)
+    if override is _HOLD:
+        return None
+
+    fields = dict(override) if override else {"state": leader.state.value}
+    if not override:
+        fields["state_message"] = leader.state_message
+    return fields
+
+
+_HOLD = object()
+"""A group that is still coming up: the instance keeps whatever it says."""
+
+
+def _distributed_override(followers: List[Workload]) -> Optional[dict]:
+    if not followers:
+        return None
+
+    error = next((w for w in followers if w.state == WorkloadStateEnum.ERROR), None)
+    if error:
+        return {
+            "state": ModelInstanceStateEnum.ERROR,
+            "state_message": (
+                f"Distributed serving error in subordinate worker "
+                f"{error.worker_id}: {error.state_message}."
+            ),
+        }
+
+    # A follower in ERROR outranks one merely unreachable, so this only runs
+    # once none of them errored.
+    unreachable = next(
+        (w for w in followers if w.state == WorkloadStateEnum.UNREACHABLE), None
+    )
+    if unreachable:
+        return {
+            "state": ModelInstanceStateEnum.UNREACHABLE,
+            "state_message": (
+                f"Distributed serving unreachable in subordinate worker "
+                f"{unreachable.worker_id}: {unreachable.state_message}."
+            ),
+        }
+
+    if not all(w.state == WorkloadStateEnum.RUNNING for w in followers):
+        return _HOLD
+    return None

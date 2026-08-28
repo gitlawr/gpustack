@@ -266,6 +266,18 @@ MODEL_INSTANCE_HEALTH_CHECK_INTERVAL = int(
 MODEL_INSTANCE_STATE_RECONCILE_INTERVAL = int(
     os.getenv("GPUSTACK_MODEL_INSTANCE_STATE_RECONCILE_INTERVAL", 0)
 )
+# Whether a model instance's execution state is taken from its workload rows
+# rather than written by the worker onto the instance.
+#
+# Off by default while stage 3 of docs/proposals/workload-resource.md is in
+# progress: the fold runs either way and logs where it disagrees with what the
+# worker wrote, so the mechanism can be shown correct against real instances
+# before it becomes the only source. Turn it on to flip; the setting goes away
+# with the duplicated fields.
+MODEL_INSTANCE_STATE_FROM_WORKLOADS = os.getenv(
+    "GPUSTACK_MODEL_INSTANCE_STATE_FROM_WORKLOADS", "false"
+).lower() in ["true", "1"]
+
 DISABLE_OS_FILELOCK = os.getenv("GPUSTACK_DISABLE_OS_FILELOCK", "false").lower() in [
     "true",
     "1",

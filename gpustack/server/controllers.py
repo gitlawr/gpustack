@@ -84,6 +84,7 @@ from gpustack.schemas.workloads import (
     WorkloadStateEnum,
 )
 from gpustack.server.model_instance_workloads import (
+    aggregate_instance_state,
     compile_model_instance,
     workload_spec,
 )
@@ -432,6 +433,86 @@ class ModelInstanceController:
             logger.error(
                 f"Failed to sync workloads of model instance {instance_id}: {e}"
             )
+
+
+class ModelInstanceWorkloadStateController:
+    """
+    Folds a model instance's workload states back onto the instance.
+
+    Stage 3 step 2b of docs/proposals/workload-resource.md. The worker mirrors
+    execution state onto the workload rows; this is the other direction, and
+    the thing that lets the worker stop writing the instance at all -- which
+    is what retires the write races, since two writers stop sharing a row.
+
+    Off by default. The fold runs regardless and logs where it disagrees with
+    what the worker wrote, so that it can be shown correct against real
+    instances -- including distributed ones -- before it becomes the only
+    source of an instance's state. If it were wrong and authoritative,
+    instances would simply never leave STARTING.
+    """
+
+    async def start(self):
+        async for event in Workload.subscribe(
+            source="model_instance_workload_state", replay_existing=False
+        ):
+            if event.type not in (EventType.CREATED, EventType.UPDATED):
+                continue
+            workload: Workload = event.data
+            if workload is None or workload.owner_id is None:
+                continue
+            if workload.owner_kind != WorkloadOwnerKindEnum.MODEL_INSTANCE:
+                continue
+            await self._reconcile(workload.owner_id)
+
+    async def _reconcile(self, instance_id: int):
+        try:
+            async with async_session() as session:
+                instance = await ModelInstance.one_by_id(session, instance_id)
+                if instance is None:
+                    return
+
+                workloads = await Workload.all_by_fields(
+                    session,
+                    {
+                        "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                        "owner_id": instance_id,
+                    },
+                )
+                folded = aggregate_instance_state(workloads)
+                if folded is None:
+                    return
+
+                if not envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS:
+                    self._report_disagreement(instance, folded)
+                    return
+
+                if all(
+                    getattr(instance, name, None) == value
+                    for name, value in folded.items()
+                ):
+                    return
+                await instance.update(session, folded)
+        except Exception as e:
+            logger.error(
+                f"Failed to fold workload state onto model instance "
+                f"{instance_id}: {e}"
+            )
+
+    @staticmethod
+    def _report_disagreement(instance: ModelInstance, folded: dict):
+        """Say where the fold would have written something else. Silence here
+        is the evidence that flipping is safe."""
+        differing = {
+            name: (getattr(instance, name, None), value)
+            for name, value in folded.items()
+            if getattr(instance, name, None) != value
+        }
+        if not differing:
+            return
+        logger.info(
+            f"Workload fold disagrees with model instance {instance.name} "
+            f"(id={instance.id}): {differing}"
+        )
 
 
 class CacheServiceController:

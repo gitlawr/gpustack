@@ -6,6 +6,8 @@ Asserted against the production code the mapping has to agree with:
 ``_assign_ports`` decides what the port list means.
 """
 
+import itertools
+
 import pytest
 
 from gpustack.schemas.models import (
@@ -17,13 +19,16 @@ from gpustack.schemas.models import (
     ModelInstanceSubordinateWorker,
 )
 from gpustack.schemas.workloads import (
+    Workload,
     WorkloadOwnerKindEnum,
     WorkloadRestartPolicyEnum,
     WorkloadRoleEnum,
     WorkloadStateEnum,
 )
+from gpustack.worker.serve_manager import ServeManager
 from gpustack.server.model_instance_workloads import (
     SERVICE_PORT,
+    aggregate_instance_state,
     compile_model_instance,
     named_ports,
 )
@@ -213,3 +218,139 @@ def test_ports_after_the_first_keep_their_position():
 def test_a_port_list_without_the_service_port_still_names_the_first():
     assert named_ports(None, [40000]) == {SERVICE_PORT: 40000}
     assert named_ports(None, None) == {}
+
+
+# ---------------------------------------------------------------------------
+# Folding workload state back onto the instance
+# ---------------------------------------------------------------------------
+
+
+def _workload(group_index, state, state_message=None, worker_id=None):
+    return Workload(
+        name=f"mi-{group_index}",
+        owner_kind=WorkloadOwnerKindEnum.MODEL_INSTANCE,
+        owner_id=1,
+        worker_id=worker_id if worker_id is not None else 100 + group_index,
+        group_index=group_index,
+        state=state,
+        state_message=state_message,
+    )
+
+
+def test_a_standalone_instance_takes_its_leaders_state():
+    folded = aggregate_instance_state(
+        [_workload(0, WorkloadStateEnum.RUNNING, state_message="")]
+    )
+
+    assert folded == {"state": "running", "state_message": ""}
+
+
+def test_a_pending_leader_says_nothing():
+    """The mapping is not reversible: scheduling, initializing and downloading
+    all mirror onto a pending workload, so folding it back would replace the
+    instance's richer state with the poorer one."""
+    assert aggregate_instance_state([_workload(0, WorkloadStateEnum.PENDING)]) is None
+
+
+def test_a_group_still_coming_up_holds_the_instance_where_it_is():
+    folded = aggregate_instance_state(
+        [
+            _workload(0, WorkloadStateEnum.RUNNING),
+            _workload(1, WorkloadStateEnum.STARTING),
+        ]
+    )
+
+    assert folded is None
+
+
+def test_a_failed_follower_takes_the_instance_down_with_it():
+    folded = aggregate_instance_state(
+        [
+            _workload(0, WorkloadStateEnum.RUNNING),
+            _workload(1, WorkloadStateEnum.ERROR, "boom", worker_id=2),
+        ]
+    )
+
+    assert folded["state"] == ModelInstanceStateEnum.ERROR
+    assert "subordinate worker 2" in folded["state_message"]
+    assert "boom" in folded["state_message"]
+
+
+def test_an_errored_follower_outranks_an_unreachable_one():
+    folded = aggregate_instance_state(
+        [
+            _workload(0, WorkloadStateEnum.RUNNING),
+            _workload(1, WorkloadStateEnum.UNREACHABLE, "gone"),
+            _workload(2, WorkloadStateEnum.ERROR, "boom"),
+        ]
+    )
+
+    assert folded["state"] == ModelInstanceStateEnum.ERROR
+
+
+def test_an_unreachable_follower_makes_the_instance_unreachable():
+    folded = aggregate_instance_state(
+        [
+            _workload(0, WorkloadStateEnum.RUNNING),
+            _workload(1, WorkloadStateEnum.UNREACHABLE, "gone", worker_id=3),
+        ]
+    )
+
+    assert folded["state"] == ModelInstanceStateEnum.UNREACHABLE
+    assert "subordinate worker 3" in folded["state_message"]
+
+
+def test_all_followers_running_leaves_the_leader_in_charge():
+    folded = aggregate_instance_state(
+        [
+            _workload(0, WorkloadStateEnum.RUNNING, state_message=""),
+            _workload(1, WorkloadStateEnum.RUNNING),
+            _workload(2, WorkloadStateEnum.RUNNING),
+        ]
+    )
+
+    assert folded == {"state": "running", "state_message": ""}
+
+
+def test_a_group_with_no_leader_says_nothing():
+    """Followers alone cannot decide the instance's state, and a group missing
+    its leader is a compile that has not finished rather than a verdict."""
+    assert aggregate_instance_state([_workload(1, WorkloadStateEnum.RUNNING)]) is None
+
+
+@pytest.mark.parametrize(
+    "states",
+    list(
+        itertools.product(
+            [
+                ModelInstanceStateEnum.RUNNING,
+                ModelInstanceStateEnum.ERROR,
+                ModelInstanceStateEnum.UNREACHABLE,
+                ModelInstanceStateEnum.STARTING,
+            ],
+            repeat=2,
+        )
+    ),
+)
+def test_the_fold_agrees_with_what_the_worker_decides_today(states):
+    """The fold replaces ServeManager._get_main_worker_distributed_state, so
+    every combination of two follower states has to come out the same. Only
+    the verdict is compared: the message names the worker by id here and by ip
+    there, since a workload carries the binding and not the address."""
+    mi = _instance(
+        mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER, followers=2
+    )
+    for sw, state in zip(mi.distributed_servers.subordinate_workers, states):
+        sw.state = state
+        sw.state_message = f"because {state}"
+
+    reference = ServeManager._get_main_worker_distributed_state(mi)
+    folded = aggregate_instance_state(compile_model_instance(mi))
+
+    if reference is None:
+        # The leader governs; the fold reports its state rather than nothing.
+        assert folded == {"state": "running", "state_message": None}
+    elif reference.get("state") is None:
+        assert folded is None  # hold
+    else:
+        assert folded["state"] == reference["state"]

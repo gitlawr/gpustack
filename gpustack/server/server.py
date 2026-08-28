@@ -55,6 +55,7 @@ from gpustack.server.controllers import (
     ModelController,
     ModelFileController,
     ModelInstanceController,
+    ModelInstanceWorkloadStateController,
     WorkerController,
     ClusterController,
     WorkerPoolController,
@@ -468,6 +469,9 @@ class Server:
 
         model_instance_controller = ModelInstanceController(self._config)
         tasks.append(asyncio.create_task(model_instance_controller.start()))
+
+        workload_state_controller = ModelInstanceWorkloadStateController()
+        tasks.append(asyncio.create_task(workload_state_controller.start()))
 
         worker_controller = WorkerController(self._config)
         tasks.append(asyncio.create_task(worker_controller.start()))
