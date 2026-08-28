@@ -570,6 +570,8 @@ def test_mooncake_provider_declaration():
     assert fields["engine_segment_size"].label == "Global Segment Size (GiB)"
     assert fields["store_segment_size"].label == "Global Segment Size (GiB)"
     assert fields["engine_segment_size"].visible_when == "embedded"
+    # while a standalone store owns the pool, the engine contributes 0
+    assert fields["engine_segment_size"].gated_default == 0
     assert fields["store_segment_size"].visible_when == "standalone-store"
     assert fields["store_replicas"].visible_when == "standalone-store"
     assert fields["device_name"].visible_by == "protocol"

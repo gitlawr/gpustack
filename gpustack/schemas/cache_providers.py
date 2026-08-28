@@ -350,8 +350,9 @@ class CacheProviderField(BaseModel):
     visible_by: Optional[str] = None
     """Name of another managed field this one's visibility follows; the
     field renders only while that field equals visible_when (e.g. the
-    RDMA device only matters on the rdma protocol). Purely a form hint:
-    a hidden field's default still renders into templates."""
+    RDMA device only matters on the rdma protocol). Value resolution
+    honors the gate only when gated_default is declared; a plain
+    default still renders while hidden."""
 
     def option_values(self) -> List[str]:
         return [
@@ -361,6 +362,12 @@ class CacheProviderField(BaseModel):
 
     visible_when: Optional[Any] = None
     """Value of the visible_by field that shows this one."""
+
+    gated_default: Optional[Any] = None
+    """Value the field resolves to while its visible_by gate does not
+    match. The form never submits a hidden field, but its plain default
+    would still render — e.g. the engine's segment contribution must
+    render 0 while a standalone store owns the pool."""
 
     min: Optional[float] = None
     max: Optional[float] = None
@@ -902,6 +909,28 @@ def render_l2_adapter(
 
     args = [provider.l2_adapter_flag, json.dumps(adapter, separators=(",", ":"))]
     return args, env
+
+
+def resolved_field_values(
+    managed_fields: List["CacheProviderField"], values: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Field values as the templates should see them: the configured
+    value falling back to the declared default — except that a field
+    whose visible_by gate does not match resolves to its gated_default
+    when one is declared."""
+    declared = {field.name: field for field in managed_fields}
+    resolved: Dict[str, Any] = {}
+    for field in managed_fields:
+        value = values.get(field.name, field.default)
+        if field.visible_by and field.gated_default is not None:
+            gate_field = declared.get(field.visible_by)
+            gate_value = values.get(field.visible_by)
+            if gate_value is None and gate_field is not None:
+                gate_value = gate_field.default
+            if gate_value != field.visible_when:
+                value = field.gated_default
+        resolved[field.name] = value
+    return resolved
 
 
 RESERVED_INJECTION_PLACEHOLDERS = frozenset(

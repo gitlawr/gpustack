@@ -440,6 +440,9 @@
       step: 1
       visible_by: pool_mode
       visible_when: embedded
+      # a standalone store owns the pool; the connector rejects any
+      # engine contribution, so the hidden field must render 0
+      gated_default: 0
     - name: store_replicas
       label: Store Replicas
       description: >-

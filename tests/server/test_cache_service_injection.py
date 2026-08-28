@@ -520,14 +520,14 @@ async def test_resolve_managed_mooncake_injects_store_connector():
 @pytest.mark.asyncio
 async def test_resolve_standalone_store_mooncake_engine_contributes_nothing():
     """standalone-store mode renders the engine a pure requester: the
-    store replicas own the pool."""
+    store replicas own the pool, and the hidden engine contribution
+    resolves through its gate (the form never submits it, and its
+    embedded-mode default of 20 would be rejected by the connector)."""
     model = shared_cache_model()
     instance_worker = SimpleNamespace(id=7, ip="10.0.0.7", deleted_at=None)
     master_worker = SimpleNamespace(id=9, ip="10.0.0.9", deleted_at=None)
     service = mooncake_cache_service(
-        config=CacheServiceConfig(
-            fields={"pool_mode": "standalone-store", "engine_segment_size": 0}
-        )
+        config=CacheServiceConfig(fields={"pool_mode": "standalone-store"})
     )
     with patch_lookups(
         service, worker=master_worker, instances=[mooncake_master_instance()]

@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import aiohttp
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from gpustack.schemas.cache_providers import CacheProvider
+from gpustack.schemas.cache_providers import CacheProvider, resolved_field_values
 from gpustack.schemas.cache_services import (
     CacheConfigSnapshot,
     CacheService,
@@ -367,9 +367,12 @@ async def resolve_instance_cache_config(
     for key, value in (endpoint.params or {}).items():
         render_params.setdefault(key, value)
     # Managed-mode field values feed the same namespace, so injection
-    # templates may reference provider-declared fields too.
-    for key, value in (
-        (service.config.fields if service.config else None) or {}
+    # templates may reference provider-declared fields too — resolved
+    # through their visibility gates (a hidden field must not leak its
+    # embedded-mode default into a standalone-store config).
+    for key, value in resolved_field_values(
+        provider.managed_fields,
+        (service.config.fields if service.config else None) or {},
     ).items():
         render_params.setdefault(key, value)
     # The instance worker's accelerator framework selects a

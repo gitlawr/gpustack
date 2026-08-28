@@ -38,6 +38,7 @@ from gpustack.schemas.cache_providers import (
     CacheProviderVersionConfig,
     render_l2_adapter,
     render_template,
+    resolved_field_values,
 )
 from gpustack.schemas.cache_services import (
     CacheServiceInstance,
@@ -595,11 +596,12 @@ class CacheServiceManager:
         field_values = (
             cache_service.config.fields if cache_service.config else None
         ) or {}
-        for field in provider.managed_fields:
-            value = field_values.get(field.name, field.default)
+        for name, value in resolved_field_values(
+            provider.managed_fields, field_values
+        ).items():
             if isinstance(value, bool):
                 value = str(value).lower()
-            params.setdefault(field.name, value)
+            params.setdefault(name, value)
         return params
 
     def _apply_l2_storage(
