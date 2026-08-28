@@ -612,6 +612,31 @@ async def get_serve_logs(
     )
 
 
+def _cache_service_provision_log(
+    log_dir: Path, instance_id: int, previous: bool
+) -> Optional[Path]:
+    """The provisioning log of the current start, or of the one before it.
+
+    Generations are numbered like a model instance's ({id}.{restart_count}.log)
+    and the worker keeps the last two, so ``previous`` is the second highest
+    number present. None when the instance has never been provisioned here.
+    """
+    counts = []
+    for path in log_dir.glob(f"{instance_id}.*.log"):
+        try:
+            counts.append(int(path.stem.rsplit(".", 1)[-1]))
+        except ValueError:
+            continue
+    if not counts:
+        return None
+    counts.sort()
+    if previous:
+        if len(counts) < 2:
+            return None
+        return log_dir / f"{instance_id}.{counts[-2]}.log"
+    return log_dir / f"{instance_id}.{counts[-1]}.log"
+
+
 @router.get("/cacheServiceInstanceLogs/{instance_id}")
 async def get_cache_service_instance_logs(
     request: Request,
@@ -624,11 +649,16 @@ async def get_cache_service_instance_logs(
     and image pull, everything that happens before a container exists —
     followed by the container's own logs read live from the container runtime.
 
-    Container logs are read live rather than from persisted files, so the
-    ``previous`` option has no effect here.
+    ``previous`` selects the log of the start before the current one. It
+    reaches the provisioning log only: a restart deletes the workload before
+    recreating it, so the previous container's output is gone from the
+    runtime by the time anyone asks for it.
     """
     log_dir = request.app.state.config.log_dir
-    provision_log_path = Path(log_dir) / "cache-services" / f"{instance_id}.log"
+    provision_log_dir = Path(log_dir) / "cache-services"
+    provision_log_path = _cache_service_provision_log(
+        provision_log_dir, instance_id, log_options.previous
+    )
     workload_name = cache_service_instance_workload_name(cache_service_id, instance_id)
 
     def iter_logs():
@@ -636,7 +666,7 @@ async def get_cache_service_instance_logs(
         # streams whole; ``tail`` applies to the container logs, which is
         # where a caller asking for the last N lines means it.
         try:
-            if provision_log_path.exists():
+            if provision_log_path is not None and provision_log_path.exists():
                 with open(
                     provision_log_path, "r", encoding="utf-8", errors="ignore"
                 ) as provision_log:
@@ -646,6 +676,9 @@ async def get_cache_service_instance_logs(
                 f"Failed to read provisioning logs of cache service instance "
                 f"{instance_id}: {e}"
             )
+
+        if log_options.previous:
+            return
 
         try:
             logs = logs_workload(

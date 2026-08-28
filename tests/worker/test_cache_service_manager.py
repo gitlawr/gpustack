@@ -1,5 +1,6 @@
 import logging
 import tempfile
+from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -1192,7 +1193,7 @@ def test_launch_spawns_provisioning_subprocess_with_allocated_ports():
     ]
     assert passed_instance.id == instance.id
     assert (port, metrics_port) == (40001, 40002)
-    assert log_path == f"{_LOG_DIR}/cache-services/{instance.id}.log"
+    assert log_path == f"{_LOG_DIR}/cache-services/{instance.id}.0.log"
     assert cfg is manager._config
 
     process_cls.return_value.start.assert_called_once()
@@ -1517,6 +1518,7 @@ def test_sync_crash_after_max_restarts_parks_in_error():
         restart_count=MAX_CONSECUTIVE_RESTARTS,
         last_restart_time=datetime.now(timezone.utc) - timedelta(hours=1),
     )
+    manager._restart_attempts[instance.id] = MAX_CONSECUTIVE_RESTARTS
     clientset.cache_service_instances.list.return_value = SimpleNamespace(
         items=[instance]
     )
@@ -1538,6 +1540,9 @@ def test_sync_crash_after_max_restarts_parks_in_error():
 
 
 def test_sync_ready_probe_resets_restart_count_after_stable_window():
+    """restart_count itself keeps increasing -- it numbers the provisioning
+    logs -- so what a stable window forgives is the consecutive-crash count
+    the backoff runs on."""
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance(
         state=CacheServiceStateEnum.RUNNING,
@@ -1546,38 +1551,7 @@ def test_sync_ready_probe_resets_restart_count_after_stable_window():
         restart_count=3,
         last_restart_time=datetime.now(timezone.utc) - timedelta(minutes=11),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
-
-    with (
-        patch(
-            "gpustack.worker.cache_service_manager.get_workload",
-            return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
-        ),
-        patch(
-            "gpustack.worker.cache_service_manager.get_cache_provider",
-            return_value=_new_provider(),
-        ),
-        patch("gpustack.worker.cache_service_manager.socket.create_connection"),
-        patch.object(manager, "_update_cache_service_instance") as update,
-    ):
-        manager.sync_cache_service_instances_state()
-
-    update.assert_called_once_with(instance.id, restart_count=0)
-
-
-def test_sync_ready_probe_keeps_restart_count_within_stable_window():
-    """The consecutive-restart budget must survive a crash-after-ready loop:
-    an instance that just came back must not have its count cleared yet."""
-    manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(
-        state=CacheServiceStateEnum.RUNNING,
-        port=40001,
-        healthy=True,
-        restart_count=3,
-        last_restart_time=datetime.now(timezone.utc) - timedelta(minutes=2),
-    )
+    manager._restart_attempts[instance.id] = 3
     clientset.cache_service_instances.list.return_value = SimpleNamespace(
         items=[instance]
     )
@@ -1597,6 +1571,41 @@ def test_sync_ready_probe_keeps_restart_count_within_stable_window():
         manager.sync_cache_service_instances_state()
 
     update.assert_not_called()
+    assert instance.id not in manager._restart_attempts
+
+
+def test_sync_ready_probe_keeps_restart_count_within_stable_window():
+    """The consecutive-restart budget must survive a crash-after-ready loop:
+    an instance that just came back must not have its count cleared yet."""
+    manager, clientset = _build_manager(worker_id=1)
+    instance = _new_instance(
+        state=CacheServiceStateEnum.RUNNING,
+        port=40001,
+        healthy=True,
+        restart_count=3,
+        last_restart_time=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+    manager._restart_attempts[instance.id] = 3
+    clientset.cache_service_instances.list.return_value = SimpleNamespace(
+        items=[instance]
+    )
+
+    with (
+        patch(
+            "gpustack.worker.cache_service_manager.get_workload",
+            return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
+        ),
+        patch(
+            "gpustack.worker.cache_service_manager.get_cache_provider",
+            return_value=_new_provider(),
+        ),
+        patch("gpustack.worker.cache_service_manager.socket.create_connection"),
+        patch.object(manager, "_update_cache_service_instance") as update,
+    ):
+        manager.sync_cache_service_instances_state()
+
+    update.assert_not_called()
+    assert manager._restart_attempts[instance.id] == 3
 
 
 def test_sync_ready_tcp_probe_marks_running_healthy():
@@ -2021,3 +2030,82 @@ def test_probe_targets_metrics_port_for_http_health_check(monkeypatch):
         assert manager._probe_ready(instance, "mooncake") is True
 
     assert http_get.call_args[0][0] == "http://127.0.0.1:40011/healthcheck"
+
+
+# ---------------------------------------------------------------------------
+# Provisioning log generations
+# ---------------------------------------------------------------------------
+
+
+def test_a_restart_numbers_a_fresh_provisioning_log():
+    """The previous start's log has to survive the next one, or the crash that
+    caused the restart is unreadable by the time anyone looks."""
+    manager, clientset = _build_manager(worker_id=1)
+    instance = _new_instance(restart_count=4)
+
+    with (
+        patch(
+            "gpustack.worker.cache_service_manager.network.get_free_port",
+            side_effect=[40001, 40002],
+        ),
+        patch(
+            "gpustack.worker.cache_service_manager.multiprocessing.Process"
+        ) as process_cls,
+    ):
+        manager._start_cache_service_instance(instance)
+
+    log_path = process_cls.call_args[1]["args"][4]
+    assert log_path.endswith(f"/{instance.id}.4.log")
+
+
+def test_restart_count_only_ever_increases():
+    """It numbers the provisioning logs, so resetting it would overwrite them.
+    The consecutive-crash count the backoff runs on is kept separately."""
+    manager, clientset = _build_manager(worker_id=1)
+    instance = _new_instance(
+        state=CacheServiceStateEnum.STARTING,
+        port=40001,
+        restart_count=7,
+        last_restart_time=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    manager._restart_attempts[instance.id] = 1
+    clientset.cache_service_instances.list.return_value = SimpleNamespace(
+        items=[instance]
+    )
+
+    with (
+        patch("gpustack.worker.cache_service_manager.get_workload", return_value=None),
+        patch("gpustack.worker.cache_service_manager.delete_workload"),
+        patch.object(manager, "_update_cache_service_instance") as update,
+    ):
+        manager.sync_cache_service_instances_state()
+
+    assert update.call_args[1]["restart_count"] == 8
+    assert manager._restart_attempts[instance.id] == 2
+
+
+def test_provisioning_logs_keep_the_current_and_previous_generation():
+    manager, _ = _build_manager(worker_id=1)
+    log_dir = Path(manager._provision_log_dir)
+    for count in range(5):
+        (log_dir / f"77.{count}.log").write_text(f"run {count}")
+    (log_dir / "78.0.log").write_text("another instance")
+
+    manager._cleanup_old_provision_logs(77, 4)
+
+    assert sorted(p.name for p in log_dir.glob("77.*.log")) == ["77.3.log", "77.4.log"]
+    assert (log_dir / "78.0.log").exists()
+
+
+def test_teardown_purges_every_generation():
+    manager, _ = _build_manager(worker_id=1)
+    log_dir = Path(manager._provision_log_dir)
+    for count in range(3):
+        (log_dir / f"79.{count}.log").write_text("x")
+    instance = _new_instance(id=79)
+
+    with patch("gpustack.worker.cache_service_manager.delete_workload"):
+        manager._stop_cache_service_instance(instance)
+
+    assert list(log_dir.glob("79.*.log")) == []
+

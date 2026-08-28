@@ -163,6 +163,15 @@ class CacheServiceManager:
         self._last_start_attempt = {}
         self._provisioning_processes = {}
 
+        # Consecutive crashes per instance, which drives the backoff and the
+        # give-up budget. Kept out of the row because restart_count is the
+        # provisioning log's generation number and has to keep increasing.
+        # In-process only, like the model instance manager's equivalent: a
+        # worker restart forgets the depth of a crash loop, but not the
+        # verdict -- an instance already parked in ERROR is skipped by the
+        # sync pass whatever this says.
+        self._restart_attempts: Dict[int, int] = {}
+
         os.makedirs(self._provision_log_dir, exist_ok=True)
 
     async def watch_cache_service_instances_event(self):
@@ -256,8 +265,29 @@ class CacheServiceManager:
         self._provisioning_processes.pop(instance_id, None)
         return False
 
-    def _provision_log_path(self, instance_id: int) -> str:
-        return f"{self._provision_log_dir}/{instance_id}.log"
+    def _provision_log_path(self, instance_id: int, restart_count: int) -> str:
+        """One provisioning log per start, numbered like a model instance's
+        ({id}.{restart_count}.log), so the previous start's log survives the
+        next one and the log viewer can offer it."""
+        return f"{self._provision_log_dir}/{instance_id}.{restart_count}.log"
+
+    def _cleanup_old_provision_logs(self, instance_id: int, restart_count: int):
+        """Keep the current and previous start's logs, drop the rest.
+
+        restart_count 0 is a fresh lifecycle, so anything present belongs to a
+        previous owner of a reused id.
+        """
+        keep = (
+            {restart_count}
+            if restart_count == 0
+            else {restart_count, restart_count - 1}
+        )
+        for path in Path(self._provision_log_dir).glob(f"{instance_id}.*.log"):
+            try:
+                if int(path.stem.rsplit(".", 1)[-1]) not in keep:
+                    path.unlink(missing_ok=True)
+            except (ValueError, OSError) as e:
+                logger.debug(f"Skipped pruning provisioning log {path}: {e}")
 
     def _start_cache_service_instance(self, instance: CacheServiceInstance):
         """
@@ -283,7 +313,9 @@ class CacheServiceManager:
             self._release_ports(instance.id)
             port, metrics_port = self._allocate_ports(instance)
 
-            log_file_path = self._provision_log_path(instance.id)
+            restart_count = instance.restart_count or 0
+            self._cleanup_old_provision_logs(instance.id, restart_count)
+            log_file_path = self._provision_log_path(instance.id, restart_count)
             process = multiprocessing.Process(
                 target=CacheServiceManager._provision_cache_service_instance,
                 args=(
@@ -595,9 +627,11 @@ class CacheServiceManager:
             # broken out of its crash loop; clear the consecutive-restart
             # budget so a much later crash gets a fresh set of attempts.
             if RESTART_BUDGET.should_forgive(
-                instance.restart_count or 0, instance.last_restart_time, now
+                self._restart_attempts.get(instance.id, 0),
+                instance.last_restart_time,
+                now,
             ):
-                updates["restart_count"] = 0
+                self._restart_attempts.pop(instance.id, None)
             if updates:
                 self._update_cache_service_instance(instance.id, **updates)
             return
@@ -640,9 +674,8 @@ class CacheServiceManager:
             return
 
         now = datetime.now(timezone.utc)
-        decision = RESTART_BUDGET.decide(
-            instance.restart_count or 0, instance.last_restart_time, now
-        )
+        attempts = self._restart_attempts.get(instance.id, 0)
+        decision = RESTART_BUDGET.decide(attempts, instance.last_restart_time, now)
         if decision.action == RestartActionEnum.GIVE_UP:
             self._update_cache_service_instance(
                 instance.id,
@@ -669,6 +702,7 @@ class CacheServiceManager:
             )
 
         attempt = decision.attempt
+        self._restart_attempts[instance.id] = attempt
         logger.info(
             f"Restarting crashed cache service {cache_service.name} instance "
             f"(id={instance.id}), attempt {attempt}/{MAX_CONSECUTIVE_RESTARTS}"
@@ -676,7 +710,10 @@ class CacheServiceManager:
         self._update_cache_service_instance(
             instance.id,
             state=CacheServiceStateEnum.PENDING,
-            restart_count=attempt,
+            # Monotonic: this numbers the provisioning log of the start it is
+            # about to trigger, so it must not be reset the way the
+            # consecutive-crash count above is.
+            restart_count=(instance.restart_count or 0) + 1,
             last_restart_time=now,
             state_message=(
                 f"Cache server exited; restarting "
@@ -745,20 +782,23 @@ class CacheServiceManager:
             )
         self._release_ports(instance.id)
         self._forget_start(instance.id)
-        self._purge_provision_log(instance.id)
+        self._restart_attempts.pop(instance.id, None)
+        self._purge_provision_logs(instance.id)
         logger.info(
             f"Stopped cache service instance {instance.id} "
             f"(service id={instance.cache_service_id})"
         )
 
-    def _purge_provision_log(self, instance_id: int):
-        """Remove the instance's provisioning log. Only on teardown: a
-        restart keeps it so the log viewer can still show the failed start."""
+    def _purge_provision_logs(self, instance_id: int):
+        """Remove every generation of the instance's provisioning log. Only on
+        teardown: a restart keeps them so the log viewer can still show the
+        start that failed."""
         try:
-            Path(self._provision_log_path(instance_id)).unlink(missing_ok=True)
+            for path in Path(self._provision_log_dir).glob(f"{instance_id}.*.log"):
+                path.unlink(missing_ok=True)
         except Exception as e:
             logger.warning(
-                f"Failed to remove provisioning log of cache service "
+                f"Failed to remove provisioning logs of cache service "
                 f"instance {instance_id}: {e}"
             )
 
