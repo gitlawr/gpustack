@@ -238,6 +238,17 @@ class CacheServiceInstanceBase(SQLModel):
     providers — a real value, not NULL, so it participates in the
     (service, worker, component) uniqueness on every database."""
 
+    component_addresses: Optional[Dict[str, str]] = Field(
+        sa_column=Column(JSON), default=None
+    )
+    """Dependency addresses resolved by the controller at creation
+    (component name -> host:port), rendered into this instance's
+    templates as {{component.<name>.address}}. Stamped rather than
+    looked up on the worker: the server knows the dependency's placement,
+    and a stamp that stops matching the current address marks the
+    instance for recreation (the address is baked into the running
+    process's config)."""
+
     name: str = Field(index=True)
     """Display identity: the parent service's name (as of instance
     creation) plus a short random suffix, mirroring model instance

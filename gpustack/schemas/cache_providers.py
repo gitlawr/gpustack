@@ -410,6 +410,17 @@ class CacheProviderComponent(BaseModel):
     from these instances only — e.g. the Mooncake master, not the
     stores)."""
 
+    attach_endpoint: bool = False
+    """Whether engines attach to this component's address (exactly one
+    component of a multi-component provider declares it — e.g. the
+    Mooncake master; stores are internal). It must be a single-replica
+    component and cannot be gated by enabled_by."""
+
+    enabled_by: Optional[str] = None
+    """Name of a boolean managed field that turns this component on;
+    None means always on. A disabled component keeps no instances —
+    e.g. Mooncake's optional standalone stores."""
+
     gpu_access: bool = True
     """Whether this component's container mounts the node's GPUs. LMCache
     needs a CUDA context for its IPC transport; a pure-RAM component
@@ -578,7 +589,63 @@ class CacheProvider(BaseModel):
                     f"component '{name}' depends on '{dep_name}', which has "
                     "its own dependency: chains are not supported"
                 )
+        if self.components:
+            attach = [
+                name
+                for name, component in self.components.items()
+                if component.attach_endpoint
+            ]
+            if len(attach) != 1:
+                raise ValueError(
+                    "a multi-component provider declares exactly one "
+                    "attach_endpoint component; engines need one address"
+                )
+            spec = self.components[attach[0]]
+            if spec.topology != "replicas" or spec.replicas != 1:
+                raise ValueError(
+                    f"attach_endpoint component '{attach[0]}' must be a "
+                    "single-replica component"
+                )
+            if spec.enabled_by:
+                raise ValueError(
+                    f"attach_endpoint component '{attach[0]}' cannot be "
+                    "gated by enabled_by: the attach address must always "
+                    "exist"
+                )
+            declared_fields = {field.name for field in self.managed_fields}
+            for name, component in self.components.items():
+                if component.enabled_by and component.enabled_by not in declared_fields:
+                    raise ValueError(
+                        f"component '{name}' is enabled by undeclared "
+                        f"managed field '{component.enabled_by}'"
+                    )
         return self
+
+    def attach_component(self) -> str:
+        """Name of the component engines attach to ("" for
+        single-component providers)."""
+        for name, component in self.components.items():
+            if component.attach_endpoint:
+                return name
+        return ""
+
+    def component_enabled(
+        self, name: str, config_fields: Optional[Dict[str, Any]]
+    ) -> bool:
+        """Whether the component should have instances for a service
+        configured with ``config_fields`` (the managed field values;
+        the field declaration's default fills an unset value)."""
+        spec = self.get_component(name)
+        if spec is None or not spec.enabled_by:
+            return True
+        fields = config_fields or {}
+        if spec.enabled_by in fields:
+            return bool(fields[spec.enabled_by])
+        declared = next(
+            (field for field in self.managed_fields if field.name == spec.enabled_by),
+            None,
+        )
+        return bool(declared.default) if declared else False
 
     def metrics_for(self, version: Optional[str]) -> Optional[CacheProviderMetrics]:
         """The effective metrics declaration for a service pinned to
@@ -679,7 +746,8 @@ class CacheProvider(BaseModel):
         return matches[0] if matches else None
 
 
-_TEMPLATE_PATTERN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
+# Dots namespace cross-component placeholders (component.master.address).
+_TEMPLATE_PATTERN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_.]*)\}\}")
 
 
 def render_template(value: str, params: Dict[str, Any]) -> str:

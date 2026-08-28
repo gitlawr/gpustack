@@ -40,6 +40,10 @@ def upgrade() -> None:
             server_default="",
         ),
     )
+    op.add_column(
+        _TABLE,
+        sa.Column("component_addresses", sa.JSON(), nullable=True),
+    )
     op.drop_constraint(_OLD_UNIQUE, _TABLE, type_="unique")
     op.create_unique_constraint(
         _NEW_UNIQUE,
@@ -55,4 +59,5 @@ def downgrade() -> None:
         _TABLE,
         ["cache_service_id", "worker_id"],
     )
+    op.drop_column(_TABLE, "component_addresses")
     op.drop_column(_TABLE, "component")

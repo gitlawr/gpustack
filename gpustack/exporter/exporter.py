@@ -497,10 +497,23 @@ async def _cache_service_targets(
         provider_path = _normalize_metrics_path(metrics.path)
 
         if service.mode == CacheServiceModeEnum.MANAGED:
+            # Only the component that exposes the declared exposition is
+            # scraped (e.g. the Mooncake master; its stores serve no
+            # Prometheus endpoint). Single-component providers scrape
+            # their sole ("") component.
+            scraped = {
+                name
+                for name, component in (provider.components.items() if provider else [])
+                if component.serves_metrics
+            } or {""}
             groups.extend(
                 _managed_cache_service_groups(
                     service,
-                    instances_by_service.get(service.id, []),
+                    [
+                        instance
+                        for instance in instances_by_service.get(service.id, [])
+                        if (instance.component or "") in scraped
+                    ],
                     workers_by_id,
                     is_proxy,
                     provider_path,

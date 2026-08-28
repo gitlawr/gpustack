@@ -282,51 +282,24 @@ class CacheServiceManager:
             params = self._build_template_params(
                 cache_service, provider, port, metrics_port
             )
+            # Dependency addresses the controller stamped at creation
+            # (e.g. the Mooncake master's host:port for a store).
+            for name, address in (instance.component_addresses or {}).items():
+                params[f"component.{name}.address"] = address
 
-            # A declared run command is the whole argument vector and takes
-            # the image's ENTRYPOINT slot; run_args instead keeps the
-            # image's own entrypoint and rides as the CMD arguments
-            # appended to it (container semantics: args alone append, a
-            # command replaces). The user parameters and L2 flags below
-            # join whichever vector the version declared.
-            overrides_entrypoint = bool(version_config.run_command)
-            launch_template = version_config.run_command or version_config.run_args
-            argv: Optional[List[str]] = None
-            if launch_template:
-                # Render per token so an optional placeholder resolving to
-                # None yields an empty token that is dropped together with
-                # the flag it belongs to.
-                rendered_tokens = [
-                    render_template(token, params)
-                    for token in shlex.split(launch_template)
-                ]
-                argv = drop_empty_flag_values(rendered_tokens)
-            user_parameters = (
-                cache_service.config.parameters if cache_service.config else None
+            component_spec = provider.get_component(instance.component or "")
+
+            argv, overrides_entrypoint = self._build_launch_argv(
+                cache_service, version_config, component_spec, params
             )
-            if user_parameters:
-                argv = (
-                    merge_flag_arguments(argv, user_parameters)
-                    if argv
-                    else list(user_parameters)
-                )
 
             # L2 storage config renders after the user-parameters merge so
             # the structured config always wins over a hand-written flag.
             argv, l2_env = self._apply_l2_storage(cache_service, provider, argv)
 
-            # Provider env templates render first; entries rendering empty are
-            # dropped so unset optional parameters don't produce invalid
-            # config. Service-level env overrides provider defaults, and the
-            # L2 storage credentials override both.
-            env: Dict[str, str] = {}
-            for key, value in (version_config.env or {}).items():
-                rendered = render_template(value, params)
-                if rendered:
-                    env[key] = rendered
-            if cache_service.config and cache_service.config.env:
-                env.update(cache_service.config.env)
-            env.update(l2_env)
+            env = self._build_env(
+                cache_service, version_config, component_spec, params, l2_env
+            )
 
             fallback_registry = registration.determine_default_registry(
                 self._config.system_default_container_registry
@@ -352,7 +325,11 @@ class CacheServiceManager:
                 envs=[
                     ContainerEnv(name=name, value=value) for name, value in env.items()
                 ],
-                resources=self._gpu_resources(),
+                resources=(
+                    self._gpu_resources()
+                    if component_spec is None or component_spec.gpu_access
+                    else None
+                ),
             )
             workload_plan = WorkloadPlan(
                 name=deployment_metadata.name,
@@ -520,6 +497,73 @@ class CacheServiceManager:
         if envs.HOST_IPC is not None:
             return to_bool(envs.HOST_IPC)
         return True
+
+    @staticmethod
+    def _build_launch_argv(
+        cache_service: CacheServicePublic,
+        version_config,
+        component_spec,
+        params: Dict[str, Any],
+    ) -> Tuple[Optional[List[str]], bool]:
+        """The instance's rendered argument vector and whether it takes
+        the image's ENTRYPOINT slot. A declared run command is the whole
+        vector and replaces the entrypoint; run_args instead rides as the
+        CMD arguments appended to the image's own. A declared component
+        owns its launch (one version template cannot serve two roles);
+        the version launch serves single-component providers. The user
+        parameters join whichever vector applies."""
+        if component_spec is not None:
+            overrides_entrypoint = bool(component_spec.run_command)
+            launch_template = component_spec.run_command or component_spec.run_args
+        else:
+            overrides_entrypoint = bool(version_config.run_command)
+            launch_template = version_config.run_command or version_config.run_args
+        argv: Optional[List[str]] = None
+        if launch_template:
+            # Render per token so an optional placeholder resolving to
+            # None yields an empty token that is dropped together with
+            # the flag it belongs to.
+            rendered_tokens = [
+                render_template(token, params) for token in shlex.split(launch_template)
+            ]
+            argv = drop_empty_flag_values(rendered_tokens)
+        user_parameters = (
+            cache_service.config.parameters if cache_service.config else None
+        )
+        if user_parameters:
+            argv = (
+                merge_flag_arguments(argv, user_parameters)
+                if argv
+                else list(user_parameters)
+            )
+        return argv, overrides_entrypoint
+
+    @staticmethod
+    def _build_env(
+        cache_service: CacheServicePublic,
+        version_config,
+        component_spec,
+        params: Dict[str, Any],
+        l2_env: Dict[str, str],
+    ) -> Dict[str, str]:
+        """Provider env templates render first (the component's over the
+        version's); entries rendering empty are dropped so unset optional
+        parameters don't produce invalid config. Service-level env
+        overrides provider defaults, and the L2 storage credentials
+        override both."""
+        env: Dict[str, str] = {}
+        component_env = component_spec.env if component_spec else {}
+        for key, value in {
+            **(version_config.env or {}),
+            **component_env,
+        }.items():
+            rendered = render_template(value, params)
+            if rendered:
+                env[key] = rendered
+        if cache_service.config and cache_service.config.env:
+            env.update(cache_service.config.env)
+        env.update(l2_env)
+        return env
 
     @staticmethod
     def _build_template_params(
@@ -935,6 +979,14 @@ class CacheServiceManager:
         """
         provider = get_cache_provider(provider_name)
         health_check = provider.health_check if provider else CacheProviderHealthCheck()
+        # A declared component may probe differently from the provider
+        # default (e.g. the Mooncake master's HTTP metrics endpoint vs
+        # the store's plain TCP port).
+        component_spec = (
+            provider.get_component(instance.component or "") if provider else None
+        )
+        if component_spec is not None and component_spec.health_check is not None:
+            health_check = component_spec.health_check
         host = "127.0.0.1"
         port = (
             instance.metrics_port if health_check.target == "metrics" else instance.port

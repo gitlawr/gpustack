@@ -347,6 +347,7 @@ def _instance(**overrides):
         id=31,
         cache_service_id=3,
         worker_id=2,
+        component="",
         state=CacheServiceStateEnum.RUNNING,
         metrics_port=40011,
     )

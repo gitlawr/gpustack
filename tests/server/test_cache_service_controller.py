@@ -58,6 +58,7 @@ def _instance(**overrides):
         worker_id=5,
         cluster_id=1,
         component="",
+        component_addresses=None,
         state=CacheServiceStateEnum.PENDING,
         spec_digest=None,
         delete=AsyncMock(),
@@ -66,9 +67,13 @@ def _instance(**overrides):
     return SimpleNamespace(**fields)
 
 
-def _worker(id, cluster_id=1, deleted_at=None, labels=None):
+def _worker(id, cluster_id=1, deleted_at=None, labels=None, ip=None):
     return SimpleNamespace(
-        id=id, cluster_id=cluster_id, deleted_at=deleted_at, labels=labels or {}
+        id=id,
+        cluster_id=cluster_id,
+        deleted_at=deleted_at,
+        labels=labels or {},
+        ip=ip or f"10.0.0.{id}",
     )
 
 
@@ -172,6 +177,100 @@ async def test_per_node_only_fills_missing_workers(monkeypatch):
     create.assert_awaited_once()
     assert create.await_args.args[1].worker_id == 6
     existing.delete.assert_not_called()
+
+
+def _pool_provider() -> CacheProvider:
+    from gpustack.schemas.cache_providers import CacheProviderComponent
+
+    return CacheProvider(
+        name="Pool",
+        supported_modes=["managed"],
+        default_image="repo/pool:{{version}}",
+        versions={"v1.0": {}},
+        components={
+            "master": CacheProviderComponent(
+                run_command="pool-master --port {{port}}",
+                attach_endpoint=True,
+                serves_metrics=True,
+                gpu_access=False,
+            ),
+            "store": CacheProviderComponent(
+                topology="per_node",
+                depends_on="master",
+                run_command="pool-store --port {{port}}",
+                gpu_access=False,
+            ),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_dependent_component_gets_stamped_dependency_address(monkeypatch):
+    """Stores are created only once the master runs with a known port,
+    and carry its resolved host:port — the running process bakes the
+    address into its config, so the controller stamps it at creation."""
+    service = _service(worker_id=None)
+    master = _instance(
+        id=21,
+        worker_id=5,
+        component="master",
+        state=CacheServiceStateEnum.RUNNING,
+        port=50051,
+    )
+    create = _patch_reconcile(
+        monkeypatch,
+        _pool_provider(),
+        workers=[_worker(5), _worker(6)],
+        worker=_worker(5),
+        instance_lists=[[master], [master]],
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reconcile_service(MagicMock(), service)
+
+    created = [call.args[1] for call in create.await_args_list]
+    stores = [row for row in created if row.component == "store"]
+    assert {row.worker_id for row in stores} == {5, 6}
+    assert all(
+        row.component_addresses == {"master": "10.0.0.5:50051"} for row in stores
+    )
+
+
+@pytest.mark.asyncio
+async def test_dependent_instance_recreates_when_dependency_address_moves(
+    monkeypatch,
+):
+    """A store whose stamped master address no longer matches the
+    current one is deleted; the replacement stamps the fresh address."""
+    service = _service(worker_id=None)
+    master = _instance(
+        id=21,
+        worker_id=5,
+        component="master",
+        state=CacheServiceStateEnum.RUNNING,
+        port=50051,
+    )
+    stale_store = _instance(
+        id=22,
+        worker_id=5,
+        component="store",
+        component_addresses={"master": "10.0.0.9:40000"},
+        state=CacheServiceStateEnum.RUNNING,
+        port=8080,
+    )
+    _patch_reconcile(
+        monkeypatch,
+        _pool_provider(),
+        workers=[_worker(5)],
+        worker=_worker(5),
+        instance_lists=[[master, stale_store], [master]],
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reconcile_service(MagicMock(), service)
+
+    stale_store.delete.assert_awaited_once()
+    master.delete.assert_not_called()
 
 
 @pytest.mark.asyncio

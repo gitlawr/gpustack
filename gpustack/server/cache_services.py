@@ -148,11 +148,17 @@ async def _resolve_managed_endpoint(
     instances = await CacheServiceInstance.all_by_fields(
         session, {"cache_service_id": service.id}
     )
+    # Engines attach to one declared component's address (the Mooncake
+    # master, not its stores); single-component providers attach to
+    # their sole ("") component.
+    attach_component = provider.attach_component()
     running = sorted(
         (
             instance
             for instance in instances
-            if instance.state == CacheServiceStateEnum.RUNNING and instance.port
+            if (instance.component or "") == attach_component
+            and instance.state == CacheServiceStateEnum.RUNNING
+            and instance.port
         ),
         key=lambda instance: instance.id,
     )

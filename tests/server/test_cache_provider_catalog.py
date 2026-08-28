@@ -172,21 +172,32 @@ def test_component_declarations_validate():
                 topology="replicas",
                 run_command="pool-master --port {{port}}",
                 serves_metrics=True,
+                attach_endpoint=True,
                 gpu_access=False,
             ),
             "store": CacheProviderComponent(
                 topology="per_node",
                 depends_on="master",
                 run_command="pool-store --port {{port}}",
+                enabled_by="standalone_store",
                 gpu_access=False,
             ),
         },
+        managed_fields=[
+            {"name": "standalone_store", "type": "boolean", "default": False}
+        ],
     )
     assert provider.component_layouts() == {
         "master": "replicas",
         "store": "per_node",
     }
     assert provider.get_component("store").depends_on == "master"
+    assert provider.attach_component() == "master"
+    # enabled_by gates on the field value, falling back to its declared
+    # default
+    assert provider.component_enabled("master", None) is True
+    assert provider.component_enabled("store", None) is False
+    assert provider.component_enabled("store", {"standalone_store": True}) is True
 
     # single-component providers map the "" component — the stored
     # column value of their instance rows
@@ -205,7 +216,10 @@ def test_component_declarations_validate():
             default_image="repo/x:{{version}}",
             versions={"v1.0": {}},
             components={
-                "store": CacheProviderComponent(topology="per_node", depends_on="ghost")
+                "store": CacheProviderComponent(
+                    topology="per_node", depends_on="ghost"
+                ),
+                "master": CacheProviderComponent(attach_endpoint=True),
             },
         )
     with pytest.raises(ValidationError):
@@ -216,7 +230,9 @@ def test_component_declarations_validate():
             versions={"v1.0": {}},
             components={
                 "a": CacheProviderComponent(topology="per_node"),
-                "b": CacheProviderComponent(topology="replicas", depends_on="a"),
+                "b": CacheProviderComponent(
+                    topology="replicas", depends_on="a", attach_endpoint=True
+                ),
             },
         )
     with pytest.raises(ValidationError):
@@ -228,7 +244,9 @@ def test_component_declarations_validate():
             versions={"v1.0": {}},
             components={
                 "a": CacheProviderComponent(topology="replicas", replicas=3),
-                "b": CacheProviderComponent(topology="replicas", depends_on="a"),
+                "b": CacheProviderComponent(
+                    topology="replicas", depends_on="a", attach_endpoint=True
+                ),
             },
         )
     with pytest.raises(ValidationError):

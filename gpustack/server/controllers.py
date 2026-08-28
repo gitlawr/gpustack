@@ -695,16 +695,43 @@ class CacheServiceController:
             )
             return
 
+        # Dependency addresses stamp into dependent instances at creation
+        # (the running process bakes them into its config), so they are
+        # resolved once per pass: the dependency's RUNNING instance plus
+        # its worker's IP.
+        addresses = await self._component_addresses(session, provider, instances)
+
         surviving: List[CacheServiceInstance] = []
         existing_keys: Set[Tuple[str, int]] = set()
         for instance in instances:
             component = instance.component or ""
-            if instance.worker_id not in desired_by_component.get(component, set()):
+            spec = provider.get_component(component) if provider else None
+            stale_address = False
+            if spec is not None and spec.depends_on:
+                expected = {
+                    name: address
+                    for name, address in addresses.items()
+                    if name == spec.depends_on
+                }
+                stale_address = bool(expected) and (
+                    (instance.component_addresses or {}) != expected
+                )
+            if (
+                instance.worker_id not in desired_by_component.get(component, set())
+                or stale_address
+            ):
                 await instance.delete(session)
+                reason = (
+                    "its dependency's address changed"
+                    if stale_address
+                    else (
+                        f"worker {instance.worker_id} left the desired "
+                        f"set of component '{component}'"
+                    )
+                )
                 logger.info(
                     f"Deleted instance {instance.id} of cache service "
-                    f"{service.name}: worker {instance.worker_id} left "
-                    f"the desired set of component '{component}'"
+                    f"{service.name}: {reason}"
                 )
             else:
                 surviving.append(instance)
@@ -712,15 +739,12 @@ class CacheServiceController:
 
         for component, desired_worker_ids in desired_by_component.items():
             spec = provider.get_component(component) if provider else None
+            instance_addresses: Optional[Dict[str, str]] = None
             if spec is not None and spec.depends_on:
-                dependency_ready = any(
-                    (instance.component or "") == spec.depends_on
-                    and instance.state == CacheServiceStateEnum.RUNNING
-                    and instance.port
-                    for instance in surviving
-                )
-                if not dependency_ready:
+                if spec.depends_on not in addresses:
+                    # Converges on the dependency's RUNNING event.
                     continue
+                instance_addresses = {spec.depends_on: addresses[spec.depends_on]}
             missing = desired_worker_ids - {
                 worker_id
                 for existing_component, worker_id in existing_keys
@@ -743,6 +767,7 @@ class CacheServiceController:
                         worker_id=worker_id,
                         cluster_id=service.cluster_id,
                         component=component,
+                        component_addresses=instance_addresses,
                         state=CacheServiceStateEnum.PENDING,
                         spec_digest=cache_service_spec_digest(service),
                     ),
@@ -762,6 +787,39 @@ class CacheServiceController:
             )
             return
         await self._sync_service_aggregate(session, service)
+
+    async def _component_addresses(
+        self,
+        session: AsyncSession,
+        provider,
+        instances: List[CacheServiceInstance],
+    ) -> Dict[str, str]:
+        """host:port of every depended-on component with a RUNNING
+        instance (single-replica by validation, so one address each)."""
+        if provider is None or not provider.components:
+            return {}
+        depended = {
+            spec.depends_on for spec in provider.components.values() if spec.depends_on
+        }
+        addresses: Dict[str, str] = {}
+        for name in depended:
+            instance = next(
+                (
+                    candidate
+                    for candidate in instances
+                    if (candidate.component or "") == name
+                    and candidate.state == CacheServiceStateEnum.RUNNING
+                    and candidate.port
+                ),
+                None,
+            )
+            if instance is None:
+                continue
+            worker = await Worker.one_by_id(session, instance.worker_id)
+            if worker is None or not worker.ip:
+                continue
+            addresses[name] = f"{worker.ip}:{instance.port}"
+        return addresses
 
     async def _desired_component_workers(
         self,
@@ -801,8 +859,15 @@ class CacheServiceController:
         ]
         matching_ids = {worker.id for worker in matching}
 
+        config_fields = service.config.fields if service.config else None
         desired: Dict[str, Set[int]] = {}
         for component, topology in layouts.items():
+            # A component turned off by its managed field keeps no
+            # instances: its desired set is empty, and the diff below
+            # deletes any leftovers from before the toggle.
+            if provider and not provider.component_enabled(component, config_fields):
+                desired[component] = set()
+                continue
             if topology == "per_node":
                 if not workers:
                     return (
@@ -881,7 +946,16 @@ class CacheServiceController:
         )
 
         provider = get_cache_provider(service.provider_name)
-        components = list(provider.components) if provider else []
+        config_fields = service.config.fields if service.config else None
+        components = (
+            [
+                name
+                for name in provider.components
+                if provider.component_enabled(name, config_fields)
+            ]
+            if provider
+            else []
+        )
         if components:
             # Multi-component service: available means every component
             # has at least one RUNNING instance (a Mooncake pool serves
