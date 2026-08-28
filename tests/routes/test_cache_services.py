@@ -75,7 +75,7 @@ def _system_ctx() -> TenantContext:
 
 
 def _provider(
-    supported_modes=None, topology="singleton", custom_version=False
+    supported_modes=None, topology="replicas", custom_version=False
 ) -> CacheProvider:
     return CacheProvider(
         name="LMCache",
@@ -341,18 +341,24 @@ async def test_create_rejects_custom_version_for_external_mode(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_create_managed_requires_worker_id(monkeypatch):
+async def test_create_managed_without_worker_id_auto_places(monkeypatch):
+    """A replicas service without a pinned worker leaves placement to
+    the controller; creation must not demand one."""
     _patch_create_prereqs(monkeypatch)
     _patch_provider(monkeypatch, _provider())
+    monkeypatch.setattr(
+        cache_services_route.CacheService,
+        "create",
+        AsyncMock(side_effect=lambda session, source: SimpleNamespace(**source)),
+    )
 
-    with pytest.raises(BadRequestException) as exc_info:
-        await cache_services_route.create_cache_service(
-            session=MagicMock(),
-            ctx=_user_ctx(),
-            cache_service_in=_managed_create(worker_id=None),
-        )
+    created = await cache_services_route.create_cache_service(
+        session=MagicMock(),
+        ctx=_user_ctx(),
+        cache_service_in=_managed_create(worker_id=None),
+    )
 
-    assert "worker_id" in exc_info.value.message
+    assert created.worker_id is None
 
 
 @pytest.mark.asyncio
@@ -443,22 +449,25 @@ async def test_create_external_rejects_worker_selector(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_create_singleton_rejects_worker_selector(monkeypatch):
-    """Singleton providers place on the explicitly picked worker_id, so a
-    selector would never be consulted."""
+async def test_create_replicas_accepts_worker_selector(monkeypatch):
+    """Replicas components pick their workers from the selector's
+    matching set, so a selector applies to every managed topology."""
     worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
     _patch_create_prereqs(monkeypatch, worker=worker)
-    _patch_provider(monkeypatch, _provider(topology="singleton"))
+    _patch_provider(monkeypatch, _provider(topology="replicas"))
+    monkeypatch.setattr(
+        cache_services_route.CacheService,
+        "create",
+        AsyncMock(side_effect=lambda session, source: SimpleNamespace(**source)),
+    )
 
-    with pytest.raises(BadRequestException) as exc_info:
-        await cache_services_route.create_cache_service(
-            session=MagicMock(),
-            ctx=_user_ctx(),
-            cache_service_in=_managed_create(worker_selector={"gpu": "a100"}),
-        )
+    created = await cache_services_route.create_cache_service(
+        session=MagicMock(),
+        ctx=_user_ctx(),
+        cache_service_in=_managed_create(worker_selector={"gpu": "a100"}),
+    )
 
-    assert "worker_selector is not applicable" in exc_info.value.message
-    assert "per worker node" in exc_info.value.message
+    assert created.worker_selector == {"gpu": "a100"}
 
 
 @pytest.mark.asyncio
@@ -484,11 +493,11 @@ async def test_create_per_node_accepts_worker_selector(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_normalizes_empty_worker_selector(monkeypatch):
-    """An empty selector means "every worker" and is stored as None, on any
-    service shape (here: a singleton provider that rejects real selectors)."""
+    """An empty selector means "every worker" and is stored as None, on
+    any service shape."""
     worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
     _patch_create_prereqs(monkeypatch, worker=worker)
-    _patch_provider(monkeypatch, _provider(topology="singleton"))
+    _patch_provider(monkeypatch, _provider(topology="replicas"))
     monkeypatch.setattr(
         cache_services_route.CacheService,
         "create",
@@ -669,7 +678,7 @@ def _existing_service(**overrides):
 
 def _update_in(**overrides) -> CacheServiceUpdate:
     # Update runs the create validation set, so the default payload is a
-    # valid managed singleton shape (worker + capacity).
+    # valid managed replicas shape (worker + capacity).
     fields = dict(
         name="svc",
         provider_name="LMCache",
@@ -800,23 +809,21 @@ async def test_update_accepts_external_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_update_rejects_worker_selector_for_singleton(monkeypatch):
+async def test_update_accepts_worker_selector_for_replicas(monkeypatch):
     service = _existing_service()
     monkeypatch.setattr(
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
-    _patch_provider(monkeypatch, _provider(topology="singleton"))
+    _patch_provider(monkeypatch, _provider(topology="replicas"))
+    _patch_worker_lookup(monkeypatch)
 
-    with pytest.raises(BadRequestException) as exc_info:
-        await cache_services_route.update_cache_service(
-            session=MagicMock(),
-            ctx=_user_ctx(),
-            id=9,
-            cache_service_in=_update_in(worker_selector={"gpu": "a100"}),
-        )
-
-    assert "worker_selector is not applicable" in exc_info.value.message
-    service.update.assert_not_called()
+    await cache_services_route.update_cache_service(
+        session=MagicMock(),
+        ctx=_user_ctx(),
+        id=9,
+        cache_service_in=_update_in(worker_selector={"gpu": "a100"}),
+    )
+    service.update.assert_awaited_once()
 
 
 @pytest.mark.asyncio

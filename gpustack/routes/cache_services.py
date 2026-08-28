@@ -834,11 +834,11 @@ def _validate_cache_service_l2_storage(cache_service_in: CacheServiceBase) -> No
 def _validate_cache_service_worker_selector(
     cache_service_in: CacheServiceBase,
 ) -> None:
-    """worker_selector narrows which cluster workers a managed per-node
-    service places instances on. On any other service shape it would be
-    silently ignored, so it is rejected up front: external services have
-    no server-driven placement, and singleton providers place on the
-    explicitly picked worker_id."""
+    """worker_selector narrows which cluster workers a managed service
+    may place instances on — per-node components follow it, replicas
+    components pick their workers from it. External services have no
+    server-driven placement, so a selector there would be silently
+    ignored and is rejected up front."""
     selector = cache_service_in.worker_selector
     if not selector:
         # An empty selector means "every worker"; store the canonical form.
@@ -849,20 +849,8 @@ def _validate_cache_service_worker_selector(
         raise BadRequestException(
             message=(
                 "worker_selector is not applicable for external cache "
-                "services; it scopes managed cache services whose provider "
-                "runs one instance per worker node"
-            )
-        )
-
-    provider = get_cache_provider(cache_service_in.provider_name)
-    topology = provider.topology if provider else "singleton"
-    if topology != "per_node":
-        raise BadRequestException(
-            message=(
-                f"worker_selector is not applicable for cache provider "
-                f"'{cache_service_in.provider_name}': it scopes providers "
-                "that run one instance per worker node, while this provider "
-                "runs a single instance on the picked worker_id"
+                "services; it scopes managed cache services' instance "
+                "placement"
             )
         )
 
@@ -872,26 +860,31 @@ async def _validate_cache_service_mode(
 ) -> None:
     """Enforce the mode-specific field contract.
 
-    Managed services with a singleton-topology provider run on one worker
-    the server deploys to, so a worker in the service's cluster must be
-    chosen up front. Per-node providers derive their placement from the
-    cluster's workers, so a worker pick would be meaningless. External
-    services are reached at a caller-supplied endpoint, so worker_id must
-    stay empty — the health checker would otherwise treat the service as
-    managed.
+    A replicas-topology managed service may pin one instance to an
+    explicitly chosen worker (worker_id, validated against the cluster);
+    without a pin the controller places instances itself. Per-node
+    providers derive their placement from the cluster's workers, so a
+    worker pick would be meaningless. External services are reached at a
+    caller-supplied endpoint, so worker_id must stay empty — the health
+    checker would otherwise treat the service as managed.
     """
     if cache_service_in.mode == CacheServiceModeEnum.MANAGED:
+        provider = get_cache_provider(cache_service_in.provider_name)
         # An explicit capacity keeps the cache server's memory footprint
         # deliberate instead of falling through to an engine-internal
-        # default the platform can't see.
-        if cache_service_in.config is None or not cache_service_in.config.ram_size:
+        # default the platform can't see. Multi-component providers state
+        # capacity through their own declared fields (a Mooncake master
+        # takes no capacity at all), so the built-in field is theirs to
+        # skip.
+        if not (provider and provider.components) and (
+            cache_service_in.config is None or not cache_service_in.config.ram_size
+        ):
             raise BadRequestException(
                 message="config.ram_size is required for managed cache services"
             )
 
-        provider = get_cache_provider(cache_service_in.provider_name)
-        topology = provider.topology if provider else "singleton"
-        if topology == "per_node":
+        layouts = provider.component_layouts() if provider else {"": "replicas"}
+        if all(topology == "per_node" for topology in layouts.values()):
             if cache_service_in.worker_id is not None:
                 raise BadRequestException(
                     message=(
@@ -902,20 +895,16 @@ async def _validate_cache_service_mode(
                     )
                 )
             return
-
-        if not cache_service_in.worker_id:
-            raise BadRequestException(
-                message="worker_id is required for managed cache services"
-            )
-        worker = await Worker.one_by_id(session, cache_service_in.worker_id)
-        if worker is None or worker.deleted_at is not None:
-            raise BadRequestException(
-                message=f"Worker {cache_service_in.worker_id} not found"
-            )
-        if worker.cluster_id != cache_service_in.cluster_id:
-            raise BadRequestException(
-                message="The selected worker does not belong to the selected cluster"
-            )
+        if cache_service_in.worker_id:
+            worker = await Worker.one_by_id(session, cache_service_in.worker_id)
+            if worker is None or worker.deleted_at is not None:
+                raise BadRequestException(
+                    message=f"Worker {cache_service_in.worker_id} not found"
+                )
+            if worker.cluster_id != cache_service_in.cluster_id:
+                raise BadRequestException(
+                    message="The selected worker does not belong to the selected cluster"
+                )
     else:
         _validate_external_endpoint(cache_service_in.endpoint)
         if cache_service_in.worker_id is not None:

@@ -159,8 +159,8 @@ def test_version_declaring_both_launch_slots_is_rejected():
 
 def test_component_declarations_validate():
     """Multi-component providers declare per-role topology and launch;
-    dependencies must point at singleton components (the only ones with
-    one addressable endpoint) and cannot chain."""
+    dependencies must point at single-replica components (the only ones
+    with one addressable endpoint) and cannot chain."""
     from gpustack.schemas.cache_providers import CacheProviderComponent
 
     provider = CacheProvider(
@@ -169,7 +169,7 @@ def test_component_declarations_validate():
         versions={"v1.0": {}},
         components={
             "master": CacheProviderComponent(
-                topology="singleton",
+                topology="replicas",
                 run_command="pool-master --port {{port}}",
                 serves_metrics=True,
                 gpu_access=False,
@@ -183,7 +183,7 @@ def test_component_declarations_validate():
         },
     )
     assert provider.component_layouts() == {
-        "master": "singleton",
+        "master": "replicas",
         "store": "per_node",
     }
     assert provider.get_component("store").depends_on == "master"
@@ -216,7 +216,19 @@ def test_component_declarations_validate():
             versions={"v1.0": {}},
             components={
                 "a": CacheProviderComponent(topology="per_node"),
-                "b": CacheProviderComponent(topology="singleton", depends_on="a"),
+                "b": CacheProviderComponent(topology="replicas", depends_on="a"),
+            },
+        )
+    with pytest.raises(ValidationError):
+        # neither does a multi-replica one (HA addresses the leader
+        # through the backend URI instead)
+        CacheProvider(
+            name="WideDep",
+            default_image="repo/x:{{version}}",
+            versions={"v1.0": {}},
+            components={
+                "a": CacheProviderComponent(topology="replicas", replicas=3),
+                "b": CacheProviderComponent(topology="replicas", depends_on="a"),
             },
         )
     with pytest.raises(ValidationError):

@@ -369,16 +369,23 @@ class CacheProviderComponent(BaseModel):
     provider-level topology and the version launch templates describe
     its one process, and nothing changes for it."""
 
-    topology: str = "singleton"
-    """Instance layout of this component: "singleton" runs one instance
-    (on a scheduler-picked worker when the service pins none), "per_node"
-    runs one per matching cluster worker."""
+    topology: str = "replicas"
+    """Instance layout of this component: "replicas" runs ``replicas``
+    scheduler-placed instances spread across matching workers (sticky to
+    the workers they already run on), "per_node" runs one per matching
+    cluster worker."""
+
+    replicas: int = 1
+    """Instance count for the "replicas" topology. Fewer matching
+    workers than replicas deploys what fits (a smaller pool beats
+    parking the service). Ignored by "per_node"."""
 
     depends_on: Optional[str] = None
     """Name of a component whose instances must be RUNNING (with ports
     known) before this component's instances are created — e.g. stores
-    need the master's address. Only singleton components can be depended
-    on: they are the only ones with one addressable endpoint."""
+    need the master's address. The dependency must be a single-replica
+    component, the only kind with one addressable endpoint (HA lifts
+    this by addressing the leader through the HA backend URI instead)."""
 
     run_command: Optional[str] = None
     run_args: Optional[str] = None
@@ -386,8 +393,8 @@ class CacheProviderComponent(BaseModel):
     slots (a command takes the entrypoint, args ride the image's own).
     Components own their launch: version-level launch templates apply
     only to single-component providers, since one template cannot serve
-    two roles. {{component.<name>.address}} resolves to a singleton
-    component's host:port."""
+    two roles. {{component.<name>.address}} resolves to a
+    single-replica component's host:port."""
 
     env: Dict[str, str] = {}
     """Env template for this component's container; values support
@@ -434,11 +441,13 @@ class CacheProvider(BaseModel):
     supported_modes: List[str] = []
     """Deployment modes the provider supports: "managed" and/or "external"."""
 
-    topology: str = "singleton"
-    """Managed-mode instance layout: "singleton" runs exactly one instance
-    on the worker picked at service creation; "per_node" runs one instance
-    per active worker of the service's cluster, following workers as they
-    join and leave."""
+    topology: str = "replicas"
+    """Managed-mode instance layout of a single-component provider:
+    "replicas" runs one scheduler-placed instance (pinned when the
+    service names a worker_id); "per_node" runs one instance per active
+    worker of the service's cluster, following workers as they join and
+    leave. Multi-component providers declare topology per component
+    instead."""
 
     attach_locality: str = "cluster"
     """Where an engine may attach from: "node_local" means the connector
@@ -540,10 +549,15 @@ class CacheProvider(BaseModel):
     @model_validator(mode="after")
     def _validate_components(self) -> "CacheProvider":
         for name, component in self.components.items():
-            if component.topology not in ("singleton", "per_node"):
+            if component.topology not in ("replicas", "per_node"):
                 raise ValueError(
                     f"component '{name}' declares unknown topology "
                     f"'{component.topology}'"
+                )
+            if component.replicas < 1:
+                raise ValueError(
+                    f"component '{name}' declares replicas "
+                    f"{component.replicas}; at least one is required"
                 )
             dep_name = component.depends_on
             if dep_name is None:
@@ -553,10 +567,10 @@ class CacheProvider(BaseModel):
                 raise ValueError(
                     f"component '{name}' depends on unknown component " f"'{dep_name}'"
                 )
-            if dependency.topology != "singleton":
+            if dependency.topology != "replicas" or dependency.replicas != 1:
                 raise ValueError(
                     f"component '{name}' depends on '{dep_name}', which is "
-                    "not a singleton: only singleton components have one "
+                    "not a single-replica component: only those have one "
                     "addressable endpoint"
                 )
             if dependency.depends_on:

@@ -497,7 +497,7 @@ async def test_resolve_external_mooncake_injects_store_connector():
 async def test_resolve_external_provider_attaches_spanning_instances():
     """Node-locality is the per_node providers' contract, not a
     shared-cache property: a cross-host pool (Mooncake, external mode,
-    singleton topology) serves multi-worker instances by design — every
+    replicas topology) serves multi-worker instances by design — every
     subordinate worker's engine reaches the master over the network."""
     model = shared_cache_model()
     instance_worker = SimpleNamespace(id=7, ip="10.0.0.7", deleted_at=None)

@@ -1,7 +1,7 @@
 """Managed cache-service reconciliation.
 
 The controller drives each managed service's CacheServiceInstance rows to
-the desired worker set (singleton: the user-picked worker; per_node: every
+the desired worker set (replicas: pinned or scheduler-placed; per_node: every
 active worker of the service's cluster, narrowed by the service's
 worker_selector labels when set) and folds instance states back into the
 service-level aggregate.
@@ -21,7 +21,7 @@ from gpustack.schemas.models import ModelInstanceStateEnum
 from gpustack.server.controllers import CacheServiceController
 
 
-def _provider(topology="singleton") -> CacheProvider:
+def _provider(topology="replicas") -> CacheProvider:
     return CacheProvider(
         name="LMCache",
         supported_modes=["managed"],
@@ -105,12 +105,12 @@ def _patch_reconcile(
 
 
 @pytest.mark.asyncio
-async def test_singleton_creates_one_instance_on_picked_worker(monkeypatch):
+async def test_replicas_pins_one_instance_on_picked_worker(monkeypatch):
     service = _service(worker_id=5)
     created_instance = _instance(worker_id=5)
     create = _patch_reconcile(
         monkeypatch,
-        _provider("singleton"),
+        _provider("replicas"),
         workers=[_worker(5)],
         instance_lists=[[], [created_instance]],
     )
@@ -315,12 +315,12 @@ async def test_per_node_selector_matching_no_worker_parks_service_in_error(
 
 
 @pytest.mark.asyncio
-async def test_singleton_missing_worker_parks_service_in_error(monkeypatch):
+async def test_replicas_missing_pinned_worker_parks_service_in_error(monkeypatch):
     service = _service(worker_id=5)
     orphan = _instance(worker_id=5)
     _patch_reconcile(
         monkeypatch,
-        _provider("singleton"),
+        _provider("replicas"),
         worker=None,
         instance_lists=[[orphan], []],
     )
@@ -338,11 +338,11 @@ async def test_singleton_missing_worker_parks_service_in_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_singleton_rejects_worker_from_other_cluster(monkeypatch):
+async def test_replicas_rejects_worker_from_other_cluster(monkeypatch):
     service = _service(worker_id=5, cluster_id=1)
     _patch_reconcile(
         monkeypatch,
-        _provider("singleton"),
+        _provider("replicas"),
         worker=_worker(5, cluster_id=2),
         instance_lists=[[], []],
     )

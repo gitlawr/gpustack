@@ -142,9 +142,10 @@ class CacheServiceBase(SQLModel):
     )
     cluster_id: int = Field(foreign_key="clusters.id", nullable=False)
     worker_id: Optional[int] = None
-    """Managed mode with singleton topology only: the worker the cache
-    server runs on, picked at creation. Per-node providers derive their
-    placement from the cluster's workers instead."""
+    """Managed replicas topology only: pins one instance to an
+    explicitly chosen worker; empty leaves placement to the controller.
+    Per-node providers derive their placement from the cluster's workers
+    instead."""
 
     worker_selector: Optional[Dict[str, str]] = Field(
         sa_column=Column(JSON), default=None
@@ -221,7 +222,7 @@ CacheServicesPublic = PaginatedList[CacheServicePublic]
 
 class CacheServiceInstanceBase(SQLModel):
     """One cache server container of a managed cache service. The parent
-    service's provider topology dictates the desired set: singleton
+    service's provider topology dictates the desired set: replicas
     providers get exactly one instance on the user-picked worker; per-node
     providers get one instance per non-deleted worker of the service's
     cluster (narrowed by the service's worker_selector when one is set);

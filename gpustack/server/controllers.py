@@ -370,7 +370,7 @@ class CacheServiceController:
     Reconciles managed cache services onto their desired CacheServiceInstance
     set and aggregates instance states back onto the service row.
 
-    The provider declaration's topology dictates the desired set: singleton
+    The provider declaration's topology dictates the desired set: replicas
     services run exactly one instance on the user-picked worker; per_node
     services run one instance per non-deleted worker of the service's cluster
     (narrowed to workers matching the service's worker_selector labels when
@@ -678,8 +678,12 @@ class CacheServiceController:
         address) only gets instances once a dependency instance is
         RUNNING with its port known; the dependency's RUNNING event
         re-runs this reconcile, so the gate converges without polling."""
+        provider = get_cache_provider(service.provider_name)
+        instances = await CacheServiceInstance.all_by_fields(
+            session, {"cache_service_id": service.id}
+        )
         desired_by_component, error_message, reconcile = (
-            await self._desired_component_workers(session, service)
+            await self._desired_component_workers(session, service, instances)
         )
         if error_message is not None and not reconcile:
             await self._set_service_state(
@@ -691,10 +695,6 @@ class CacheServiceController:
             )
             return
 
-        provider = get_cache_provider(service.provider_name)
-        instances = await CacheServiceInstance.all_by_fields(
-            session, {"cache_service_id": service.id}
-        )
         surviving: List[CacheServiceInstance] = []
         existing_keys: Set[Tuple[str, int]] = set()
         for instance in instances:
@@ -764,7 +764,10 @@ class CacheServiceController:
         await self._sync_service_aggregate(session, service)
 
     async def _desired_component_workers(
-        self, session: AsyncSession, service: CacheService
+        self,
+        session: AsyncSession,
+        service: CacheService,
+        instances: List[CacheServiceInstance],
     ) -> Tuple[Dict[str, Set[int]], Optional[str], bool]:
         """The workers each provider component should have instances on
         ("" keys the sole component of single-component providers), an
@@ -773,15 +776,16 @@ class CacheServiceController:
         matching nothing is an authoritative empty set — labels change
         only by explicit edits, so the instances follow (the selector can
         scale the service to zero) and the service parks in ERROR to say
-        why. A single-component singleton keeps its original contract:
-        the user picked the worker, and that worker vanishing is a fault
-        that parks the service without touching its rows. A declared
-        singleton component is scheduler-placed instead: sticky to the
-        worker its instance already runs on, moving (pool reset — the
-        provider self-heals by remounting) only when that worker leaves
-        the matching set."""
+        why. A replicas component is scheduler-placed: an explicit
+        service worker_id pins one replica, the rest stay sticky to the
+        workers they already run on and top up from the lowest-id
+        matching workers. A pinned worker vanishing is a fault that
+        parks the service without touching its rows (the user chose it);
+        an auto-placed replica just moves (pool reset — the provider
+        self-heals by remounting). Fewer matching workers than replicas
+        deploys what fits: a smaller pool beats parking the service."""
         provider = get_cache_provider(service.provider_name)
-        layouts = provider.component_layouts() if provider else {"": "singleton"}
+        layouts = provider.component_layouts() if provider else {"": "replicas"}
         multi_component = bool(provider and provider.components)
 
         workers = await Worker.all_by_fields(
@@ -815,42 +819,42 @@ class CacheServiceController:
                 desired[component] = set(matching_ids)
                 continue
 
-            if not multi_component:
-                if not service.worker_id:
-                    return {}, "No worker assigned.", False
-                if service.worker_id not in {worker.id for worker in workers}:
-                    return {}, "Assigned worker no longer exists.", False
-                desired[component] = {service.worker_id}
-                continue
+            spec = provider.get_component(component) if provider else None
+            count = spec.replicas if spec else 1
 
-            # Declared singleton component: an explicit service worker
-            # wins when it qualifies; otherwise stick to the worker the
-            # component already runs on, and only then pick fresh.
-            if service.worker_id and service.worker_id in matching_ids:
-                desired[component] = {service.worker_id}
-                continue
-            placed = await CacheServiceInstance.all_by_fields(
-                session,
-                {"cache_service_id": service.id, "component": component},
-            )
-            current = next(
-                (
-                    instance.worker_id
-                    for instance in placed
-                    if instance.worker_id in matching_ids
-                ),
-                None,
-            )
-            if current is not None:
-                desired[component] = {current}
-                continue
+            pinned: Set[int] = set()
+            if service.worker_id:
+                if service.worker_id in matching_ids:
+                    pinned = {service.worker_id}
+                elif not multi_component:
+                    # The user chose this worker; its vanishing is a
+                    # fault, not a narrowing.
+                    return {}, "Assigned worker no longer exists.", False
+
             if not matching_ids:
+                label = component or "cache"
                 return (
                     {},
-                    f"No workers available to place the '{component}' " "component.",
+                    f"No workers available to place the '{label}' component.",
                     True,
                 )
-            desired[component] = {min(matching_ids)}
+
+            current = {
+                instance.worker_id
+                for instance in instances
+                if (instance.component or "") == component
+                and instance.worker_id in matching_ids
+            }
+            chosen: Set[int] = set()
+            for worker_id in (
+                sorted(pinned)
+                + sorted(current - pinned)
+                + sorted(matching_ids - pinned - current)
+            ):
+                if len(chosen) >= count:
+                    break
+                chosen.add(worker_id)
+            desired[component] = chosen
         return desired, None, True
 
     async def _sync_service_aggregate(
