@@ -229,6 +229,14 @@ class CacheServiceInstanceBase(SQLModel):
     container when it comes back.
     """
 
+    component: str = Field(
+        default="", sa_column=Column(String(length=64), nullable=False)
+    )
+    """Which of the provider's declared components this instance runs
+    (e.g. Mooncake's "master" / "store"). Empty for single-component
+    providers — a real value, not NULL, so it participates in the
+    (service, worker, component) uniqueness on every database."""
+
     name: str = Field(index=True)
     """Display identity: the parent service's name (as of instance
     creation) plus a short random suffix, mirroring model instance
@@ -294,10 +302,14 @@ class CacheServiceInstanceBase(SQLModel):
 class CacheServiceInstance(CacheServiceInstanceBase, BaseModelMixin, table=True):
     __tablename__ = "cache_service_instances"
     __table_args__ = (
+        # Components of one service may share a worker (Mooncake's
+        # master rides a worker its store also runs on), so uniqueness
+        # is per component.
         UniqueConstraint(
             "cache_service_id",
             "worker_id",
-            name="uix_cache_service_instances_service_worker",
+            "component",
+            name="uix_cache_service_instances_service_worker_component",
         ),
     )
 

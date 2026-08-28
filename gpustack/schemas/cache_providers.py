@@ -522,16 +522,18 @@ class CacheProvider(BaseModel):
     """Adapter type identifier (the "type" value in the adapter JSON)
     -> backend declaration."""
 
-    def component_layouts(self) -> Dict[Optional[str], str]:
+    def component_layouts(self) -> Dict[str, str]:
         """Component name -> topology. A single-component provider maps
-        {None: topology}: instance rows of such providers carry a None
-        component, so legacy rows keep matching without migration."""
+        {"": topology} — the empty string is the stored component value
+        of its instance rows (a real column value, not NULL, so the
+        (service, worker, component) uniqueness holds on every database:
+        NULLs compare distinct inside unique constraints)."""
         if self.components:
             return {name: c.topology for name, c in self.components.items()}
-        return {None: self.topology}
+        return {"": self.topology}
 
-    def get_component(self, name: Optional[str]) -> Optional[CacheProviderComponent]:
-        if name is None:
+    def get_component(self, name: str) -> Optional[CacheProviderComponent]:
+        if not name:
             return None
         return self.components.get(name)
 

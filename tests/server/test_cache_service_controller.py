@@ -57,6 +57,7 @@ def _instance(**overrides):
         cache_service_id=9,
         worker_id=5,
         cluster_id=1,
+        component="",
         state=CacheServiceStateEnum.PENDING,
         spec_digest=None,
         delete=AsyncMock(),
@@ -110,7 +111,7 @@ async def test_singleton_creates_one_instance_on_picked_worker(monkeypatch):
     create = _patch_reconcile(
         monkeypatch,
         _provider("singleton"),
-        worker=_worker(5),
+        workers=[_worker(5)],
         instance_lists=[[], [created_instance]],
     )
 

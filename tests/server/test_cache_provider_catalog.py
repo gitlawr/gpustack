@@ -188,16 +188,16 @@ def test_component_declarations_validate():
     }
     assert provider.get_component("store").depends_on == "master"
 
-    # single-component providers map the None component, so legacy
-    # instance rows (component=None) keep matching
+    # single-component providers map the "" component — the stored
+    # column value of their instance rows
     single = CacheProvider(
         name="Solo",
         topology="per_node",
         default_image="repo/solo:{{version}}",
         versions={"v1.0": {}},
     )
-    assert single.component_layouts() == {None: "per_node"}
-    assert single.get_component(None) is None
+    assert single.component_layouts() == {"": "per_node"}
+    assert single.get_component("") is None
 
     with pytest.raises(ValidationError):
         CacheProvider(
