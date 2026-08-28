@@ -1697,8 +1697,52 @@ async def test_delete_proceeds_without_shared_references(monkeypatch):
         AsyncMock(return_value=[other, local, removed]),
     )
 
+    monkeypatch.setattr(
+        cache_services_route.CacheServiceInstance,
+        "all_by_fields",
+        AsyncMock(return_value=[]),
+    )
+
     await cache_services_route.delete_cache_service(
         session=MagicMock(), ctx=_user_ctx(), id=9
+    )
+    service.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_takes_the_instances_down_with_the_service(monkeypatch):
+    """Each instance is deleted through the ORM so it publishes a DELETED
+    event and its worker stops the cache server. The table's ON DELETE CASCADE
+    drops the same rows, but emits nothing, leaving the containers holding GPU
+    memory and ports until the worker's orphan cleaner notices minutes later."""
+    service = _existing_service()
+    monkeypatch.setattr(
+        cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
+    )
+    monkeypatch.setattr(
+        cache_services_route.Model, "all_by_fields", AsyncMock(return_value=[])
+    )
+    instances = [MagicMock(id=1), MagicMock(id=2)]
+    for instance in instances:
+        instance.delete = AsyncMock()
+    monkeypatch.setattr(
+        cache_services_route.CacheServiceInstance,
+        "all_by_fields",
+        AsyncMock(return_value=instances),
+    )
+
+    await cache_services_route.delete_cache_service(
+        session=MagicMock(), ctx=_user_ctx(), id=9
+    )
+
+    for instance in instances:
+        instance.delete.assert_awaited_once()
+    # One commit, at the end: the instance rows and the service row go
+    # together or not at all.
+    assert all(
+        call.kwargs.get("auto_commit") is False
+        for instance in instances
+        for call in instance.delete.await_args_list
     )
     service.delete.assert_awaited_once()
 

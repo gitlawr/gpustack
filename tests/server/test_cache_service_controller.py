@@ -10,6 +10,8 @@ service-level aggregate.
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from datetime import datetime, timezone
+
 import pytest
 
 from gpustack.schemas.cache_providers import CacheProvider
@@ -826,3 +828,75 @@ async def test_aggregate_flags_spec_drift():
 
     args = service2.update.await_args.args[1]
     assert args["state_message"] is None
+
+
+# ---------------------------------------------------------------------------
+# Orphan instance reconciliation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resync_deletes_instances_whose_parent_is_gone(monkeypatch):
+    """The layer that carries the weight once ownership stops being a foreign
+    key. It converges nothing while the cascade is there, which is the point of
+    running it now: it is exercised rather than written and trusted."""
+    live = SimpleNamespace(id=1, deleted_at=None)
+    kept = SimpleNamespace(id=10, cache_service_id=1, delete=AsyncMock())
+    orphan = SimpleNamespace(id=11, cache_service_id=99, delete=AsyncMock())
+
+    monkeypatch.setattr(
+        "gpustack.server.controllers.CacheServiceInstance.all",
+        AsyncMock(return_value=[kept, orphan]),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.controllers.CacheService.all",
+        AsyncMock(return_value=[live]),
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reap_orphan_instances(MagicMock())
+
+    kept.delete.assert_not_awaited()
+    orphan.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resync_treats_a_soft_deleted_parent_as_gone(monkeypatch):
+    soft_deleted = SimpleNamespace(id=1, deleted_at=datetime.now(timezone.utc))
+    instance = SimpleNamespace(id=10, cache_service_id=1, delete=AsyncMock())
+
+    monkeypatch.setattr(
+        "gpustack.server.controllers.CacheServiceInstance.all",
+        AsyncMock(return_value=[instance]),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.controllers.CacheService.all",
+        AsyncMock(return_value=[soft_deleted]),
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reap_orphan_instances(MagicMock())
+
+    instance.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resync_reaps_nothing_when_the_service_read_fails(monkeypatch):
+    """The service table is the authority. A failed read must abort the pass,
+    not read as "no services exist" and delete every live instance."""
+    instance = SimpleNamespace(id=10, cache_service_id=1, delete=AsyncMock())
+
+    monkeypatch.setattr(
+        "gpustack.server.controllers.CacheServiceInstance.all",
+        AsyncMock(return_value=[instance]),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.controllers.CacheService.all",
+        AsyncMock(side_effect=RuntimeError("db down")),
+    )
+
+    controller = CacheServiceController(MagicMock())
+    with pytest.raises(RuntimeError):
+        await controller._reap_orphan_instances(MagicMock())
+
+    instance.delete.assert_not_awaited()

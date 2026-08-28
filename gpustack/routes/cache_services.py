@@ -1127,6 +1127,17 @@ async def delete_cache_service(session: SessionDep, ctx: TenantContextDep, id: i
         )
 
     try:
+        # Delete the instances first, through the ORM, so each one publishes a
+        # DELETED event and its worker stops the container right away. The
+        # instances table's ON DELETE CASCADE would drop the rows too, but it
+        # is a database-level constraint: it emits nothing, and the cache
+        # servers would keep holding GPU memory and ports until the worker's
+        # orphan cleaner noticed, minutes later.
+        instances = await CacheServiceInstance.all_by_fields(
+            session, {"cache_service_id": cache_service.id}
+        )
+        for instance in instances:
+            await instance.delete(session, auto_commit=False)
         await cache_service.delete(session)
     except Exception as e:
         raise InternalServerErrorException(

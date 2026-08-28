@@ -2193,3 +2193,89 @@ def test_stop_stops_container_log_persistence():
         manager._stop_cache_service_instance(instance)
 
     stop.assert_called_once_with(instance.id)
+
+
+# ---------------------------------------------------------------------------
+# Reclaiming a deleted instance
+# ---------------------------------------------------------------------------
+
+
+def test_sync_reaps_an_instance_the_server_no_longer_reports():
+    """Deleting a cache service drops its instance rows. When the DELETED
+    event is missed, this is what stops the cache server still holding GPU
+    memory and its ports, instead of waiting for the orphan cleaner."""
+    manager, clientset = _build_manager(worker_id=1)
+    started = _new_instance()
+    manager._workload_name_by_instance[started.id] = INSTANCE_WORKLOAD_NAME
+    manager._assigned_ports[started.id] = (40001, 40002)
+    manager._restart_attempts[started.id] = 2
+    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+
+    with (
+        patch("gpustack.worker.cache_service_manager.delete_workload") as delete,
+        patch.object(manager._container_logs, "stop") as stop_logs,
+        patch.object(manager._provisioning, "terminate") as terminate,
+    ):
+        manager.sync_cache_service_instances_state()
+
+    delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME)
+    stop_logs.assert_called_once_with(started.id)
+    terminate.assert_called_once_with(started.id)
+    assert started.id not in manager._assigned_ports
+    assert started.id not in manager._restart_attempts
+    assert started.id not in manager._workload_name_by_instance
+
+
+def test_sync_leaves_instances_it_never_started_alone():
+    """Only instances this process started are reapable: nothing else proves
+    the container belongs to us."""
+    manager, clientset = _build_manager(worker_id=1)
+    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+
+    with patch("gpustack.worker.cache_service_manager.delete_workload") as delete:
+        manager.sync_cache_service_instances_state()
+
+    delete.assert_not_called()
+
+
+def test_sync_does_not_reap_a_listed_instance():
+    manager, clientset = _build_manager(worker_id=1)
+    instance = _new_instance(state=CacheServiceStateEnum.RUNNING, port=40001)
+    manager._workload_name_by_instance[instance.id] = INSTANCE_WORKLOAD_NAME
+    clientset.cache_service_instances.list.return_value = SimpleNamespace(
+        items=[instance]
+    )
+
+    with (
+        patch(
+            "gpustack.worker.cache_service_manager.get_workload",
+            return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
+        ),
+        patch(
+            "gpustack.worker.cache_service_manager.get_cache_provider",
+            return_value=_new_provider(),
+        ),
+        patch("gpustack.worker.cache_service_manager.socket.create_connection"),
+        patch("gpustack.worker.cache_service_manager.delete_workload") as delete,
+        patch.object(manager, "_update_cache_service_instance"),
+    ):
+        manager.sync_cache_service_instances_state()
+
+    delete.assert_not_called()
+    assert instance.id in manager._workload_name_by_instance
+
+
+def test_launch_records_the_workload_name_for_reaping():
+    manager, _ = _build_manager(worker_id=1)
+    instance = _new_instance()
+
+    with (
+        patch(
+            "gpustack.worker.cache_service_manager.network.get_free_port",
+            side_effect=[40001, 40002],
+        ),
+        patch.object(manager._provisioning, "start"),
+    ):
+        manager._start_cache_service_instance(instance)
+
+    assert manager._workload_name_by_instance[instance.id] == INSTANCE_WORKLOAD_NAME

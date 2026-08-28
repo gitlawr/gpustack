@@ -618,6 +618,7 @@ class CacheServiceController:
                         fields={"mode": CacheServiceModeEnum.MANAGED},
                         extra_conditions=[CacheService.deleted_at.is_(None)],
                     )
+                    await self._reap_orphan_instances(session)
                 for service in services:
                     await self._reconcile_service_by_id(service.id)
                     # The snapshot convergence path is event-driven; the
@@ -629,6 +630,37 @@ class CacheServiceController:
                             await self._refresh_attached_snapshots(session, refreshed)
             except Exception as e:
                 logger.error(f"Failed to resync cache services: {e}")
+
+    async def _reap_orphan_instances(self, session: AsyncSession):
+        """Delete instances whose parent service is gone.
+
+        The foreign key's ON DELETE CASCADE means orphan rows should not exist
+        while it is there, so this converges nothing today. It is the layer
+        that has to carry the weight once ownership stops being expressible as
+        a foreign key, and running it now means it is exercised rather than
+        written and trusted.
+
+        Deliberately not a "delete anything whose parent I could not read":
+        the service read is the authority, so a failure to load it raises out
+        of here and the pass is skipped rather than reaping live instances.
+        """
+        instances = await CacheServiceInstance.all(session)
+        if not instances:
+            return
+
+        service_ids = {
+            service.id
+            for service in await CacheService.all(session)
+            if service.deleted_at is None
+        }
+        for instance in instances:
+            if instance.cache_service_id in service_ids:
+                continue
+            await instance.delete(session)
+            logger.info(
+                f"Deleted orphan cache service instance {instance.id}: "
+                f"parent service {instance.cache_service_id} no longer exists"
+            )
 
     async def _reconcile_cluster_services(self, cluster_id: int):
         try:

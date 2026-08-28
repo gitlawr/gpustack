@@ -197,6 +197,11 @@ class CacheServiceManager:
         self._loop = None
         self._container_logs = ContainerLogPersistence(LOG_RECONNECT_GRACE_SECONDS)
 
+        # Workload name per instance this worker has started, so an instance
+        # that disappears can still have its container torn down: the name is
+        # derived from the parent service id, which is gone with the row.
+        self._workload_name_by_instance: Dict[int, str] = {}
+
         # Consecutive crashes per instance, which drives the backoff and the
         # give-up budget. Kept out of the row because restart_count is the
         # provisioning log's generation number and has to keep increasing.
@@ -361,6 +366,9 @@ class CacheServiceManager:
             port, metrics_port = self._allocate_ports(instance)
 
             restart_count = instance.restart_count or 0
+            self._workload_name_by_instance[instance.id] = (
+                instance.get_deployment_metadata().name
+            )
             self._cleanup_old_logs(instance.id, restart_count)
             log_file_path = self._provision_log_path(instance.id, restart_count)
             self._provisioning.start(
@@ -500,6 +508,7 @@ class CacheServiceManager:
                 self._last_start_attempt.pop(stale_id, None)
         for stale_id in self._provisioning.keys() - listed_ids:
             self._provisioning.terminate(stale_id)
+        self._reap_stale_instances(listed_ids)
         if not instances_page.items:
             return
 
@@ -541,6 +550,44 @@ class CacheServiceManager:
                     f"Failed to sync cache service instance {instance.id} "
                     f"(service id={instance.cache_service_id}) state: {e}"
                 )
+
+    def _reap_stale_instances(self, listed_ids: Set[int]):
+        """
+        Tear down containers of instances this worker started that the server
+        no longer reports.
+
+        Deleting a cache service drops its instance rows, and a DELETED event
+        for each of them is what normally tells this worker to stop the
+        container. When one is missed -- a watch disconnect, a row dropped by
+        a database-level cascade that emits nothing -- the cache server would
+        otherwise keep holding GPU memory and its ports until the worker's
+        orphan cleaner noticed, minutes later. This closes that to one sync
+        pass.
+
+        Reaping tears down live containers, so it acts only on instances this
+        process started, against a list that was fetched successfully: list()
+        raises rather than returning empty on an API failure, so an empty
+        result really does mean there is nothing left.
+        """
+        for stale_id in set(self._workload_name_by_instance) - listed_ids:
+            workload_name = self._workload_name_by_instance.pop(stale_id)
+            logger.info(
+                f"Reaping cache service instance {stale_id}; the server no "
+                f"longer reports it on this worker"
+            )
+            self._container_logs.stop(stale_id)
+            self._provisioning.terminate(stale_id)
+            try:
+                delete_workload(workload_name)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to delete workload {workload_name} of reaped "
+                    f"cache service instance {stale_id}: {e}"
+                )
+            self._release_ports(stale_id)
+            self._forget_start(stale_id)
+            self._restart_attempts.pop(stale_id, None)
+            self._purge_provision_logs(stale_id)
 
     def _start_stale_pending_instance(self, instance: CacheServiceInstance):
         """
@@ -790,6 +837,7 @@ class CacheServiceManager:
         self._release_ports(instance.id)
         self._forget_start(instance.id)
         self._restart_attempts.pop(instance.id, None)
+        self._workload_name_by_instance.pop(instance.id, None)
         self._purge_provision_logs(instance.id)
         logger.info(
             f"Stopped cache service instance {instance.id} "

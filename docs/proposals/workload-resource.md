@@ -47,9 +47,9 @@ state, state_message
 | `worker_id` | ✓（主/从各一） | ✓ | ✓ |
 | `role` / `group_key` / `group_index` | **需要**（leader / worker） | — | — |
 | `start_after` | **需要**，两种门（见下） | — | — |
-| `managed` | **需要**（DELEGATED 只预留资源） | — | — |
 | `gpu_indexes` / `gpu_addresses` / `gpu_type` | **需要** | — | —（吃全部 GPU） |
 | `computed_resource_claim` | **需要**（调度器的资源决策） | — | — |
+| `reserved_claims` | **需要**（DELEGATED 的多节点预留，见 §2.5） | — | — |
 | `ports`（命名） | `port` + `ports: List[int]`，二者是同一个端口 | — | `port` + `metrics_port` |
 | `progress` | 模型文件下载进度 | — | — |
 | `pid` | ✓ | ✓ | **缺**（当前只在内存里） |
@@ -90,6 +90,14 @@ PENDING → ANALYZING → SCHEDULED → INITIALIZING → DOWNLOADING → STARTIN
 
 代价是一个需要接受的推论：**Workload 行在绑定时创建，不是在容器启动时创建**——下载发生在容器之前，行必须先于容器存在。这与 K8s 一致（Pod 先于其容器存在），也与 §2.3 自洽：实例处于 `DOWNLOADING` 时，它的 workload 处于 `pending`。
 
+### 2.5 DELEGATED 的资源预留并入 leader（已决定）
+
+阶段 0 的 POC 发现 `subordinate_workers[]` 混了两件事：**gpustack 要跑的容器**（INITIALIZE_LATER / RUN_FIRST），和**只做了资源预留**（DELEGATED，容器归别的框架管）。POC 里用 `managed: bool` 区分，同时保留了两种行。
+
+**决定不走这条**：一个 Workload 行就是一个 gpustack 要跑的容器，不留「存在但不跑」的行。DELEGATED 的从属节点不产生 Workload，它们的资源占用并入 leader workload 的 `reserved_claims`——一个「(worker_id, gpu_indexes, computed_resource_claim)」列表，表示这个 workload 替别的框架在别的节点上占住了什么。
+
+代价是资源核算要同时读 `computed_resource_claim`（本行自己的）和 `reserved_claims`（替别人占的），调度器那侧要一并改。换来的是 Workload 的语义不打折：**有行就有容器**，worker 不需要一个「这行你别管」的分支。
+
 ## 3. 表定义
 
 ```
@@ -106,6 +114,7 @@ workloads
   worker_id
   gpu_type, gpu_indexes, gpu_addresses          -- JSON
   computed_resource_claim                        -- JSON
+  reserved_claims                                -- JSON，见 §2.5
 
   -- 规格
   restart_policy                                 -- always | on_failure | never
@@ -124,7 +133,7 @@ workloads
 
 `ports` 是唯一的端口载体，**不要另设 `port` 列**：`_assign_ports` 里 `mi.ports = [mi.port]` 然后 extend，两者恒为同一个端口，拆成两列只会让它们漂移。第一个端口通用命名为 `service`，其余由各 backend 自己的 compiler 命名——`ports[1:]` 的布局取决于 backend 与 executor（vLLM/mp 是 DP-RPC + master-port + VLLM_PORT，vLLM/ray 仅 dp>1 时有 DP-RPC，其他 backend 没有），且 connecting port 恒在末位，通用层猜不了。
 
-`managed: bool` 区分「gpustack 要跑的容器」和「只做了资源预留」。见 §4 阶段 0 的结论 5。
+`reserved_claims` 承载 DELEGATED 的多节点资源预留，见 §2.5。
 
 ### 租户作用域
 
