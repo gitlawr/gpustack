@@ -12,7 +12,11 @@ from gpustack.schemas.models import (
     SourceEnum,
 )
 from gpustack.server.bus import Event, EventType
-from gpustack.worker.serve_manager import ServeManager, _describe_workload_failure
+from gpustack.worker.serve_manager import (
+    _WORKLOAD_FAILED_MESSAGE,
+    ServeManager,
+)
+from gpustack.worker.controlloop import describe_workload_failure
 from gpustack_runtime.deployer import WorkloadStatusStateEnum
 from tests.utils.model import new_model, new_model_instance
 
@@ -97,7 +101,7 @@ def test_sync_model_instances_state_marks_main_unreachable_when_subordinate_unre
     with (
         patch(
             "gpustack.worker.serve_manager.get_workload",
-            return_value=SimpleNamespace(state="running"),
+            return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
         ),
         patch.object(manager, "_is_provisioning", return_value=False),
         patch.object(manager, "_get_model", return_value=model),
@@ -900,7 +904,7 @@ def test_workload_failure_appends_the_exit_code():
     differently: Docker names the reason on state_message, Kubernetes leaves it
     empty and the exits are the only source."""
     assert (
-        _describe_workload_failure(
+        describe_workload_failure(
             SimpleNamespace(
                 state_message="OOMKilled",
                 exits=[_workload_exit(exit_code=137, reason="OOMKilled")],
@@ -909,7 +913,7 @@ def test_workload_failure_appends_the_exit_code():
         == "OOMKilled (exit code 137)"
     )
     assert (
-        _describe_workload_failure(
+        describe_workload_failure(
             SimpleNamespace(
                 state_message="",
                 exits=[_workload_exit(exit_code=1, reason="Error")],
@@ -930,7 +934,7 @@ def test_workload_failure_keeps_the_image_pull_diagnosis():
     )
 
     assert (
-        _describe_workload_failure(
+        describe_workload_failure(
             SimpleNamespace(
                 state_message=message,
                 exits=[_workload_exit(reason="ImagePullBackOff")],
@@ -942,7 +946,7 @@ def test_workload_failure_keeps_the_image_pull_diagnosis():
 
 def test_workload_failure_names_each_container_when_several_exit():
     assert (
-        _describe_workload_failure(
+        describe_workload_failure(
             SimpleNamespace(
                 state_message="",
                 exits=[
@@ -959,14 +963,20 @@ def test_workload_failure_falls_back_when_the_workload_explains_nothing():
     # A workload reaped out from under the sync, and one that failed without a
     # message or any exit entry (the pre-0.2.3 shape, which has no `exits` at
     # all) both land on the generic message.
-    assert _describe_workload_failure(None) == "Inference server exited or unhealthy."
     assert (
-        _describe_workload_failure(SimpleNamespace(state="Failed"))
+        describe_workload_failure(None, _WORKLOAD_FAILED_MESSAGE)
         == "Inference server exited or unhealthy."
     )
     assert (
-        _describe_workload_failure(
-            SimpleNamespace(state_message="", exits=[_workload_exit(exit_code=2)])
+        describe_workload_failure(
+            SimpleNamespace(state="Failed"), _WORKLOAD_FAILED_MESSAGE
+        )
+        == "Inference server exited or unhealthy."
+    )
+    assert (
+        describe_workload_failure(
+            SimpleNamespace(state_message="", exits=[_workload_exit(exit_code=2)]),
+            _WORKLOAD_FAILED_MESSAGE,
         )
         == "Inference server exited or unhealthy. (exit code 2)"
     )

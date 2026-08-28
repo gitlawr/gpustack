@@ -37,7 +37,6 @@ from gpustack.schemas.inference_backend import (
 )
 from gpustack.utils import network
 from gpustack.utils.convert import safe_int
-from gpustack.utils.attrs import set_attr
 from gpustack.utils.command import find_int_parameter
 from gpustack.utils.process import terminate_process_tree, add_signal_handlers
 from gpustack.worker.backends.ascend_mindie import AscendMindIEServer
@@ -65,6 +64,13 @@ from gpustack.schemas.models import (
     CategoryEnum,
 )
 from gpustack.server.bus import Event, EventType
+from gpustack.worker.controlloop import (
+    WorkloadPhase,
+    classify_workload,
+    describe_workload_failure,
+    update_resource,
+    watch_forever,
+)
 from gpustack.worker.inference_backend_manager import InferenceBackendManager
 
 logger = logging.getLogger(__name__)
@@ -131,54 +137,6 @@ def _parse_allocated_accelerators(annotations: Optional[Dict[str, str]]) -> List
                 if isinstance(accelerator, dict) and accelerator.get("id"):
                     accelerators.append(accelerator)
     return accelerators
-
-
-def _describe_workload_failure(workload) -> str:
-    """
-    Explain why a workload stopped serving, for the instance's state message.
-
-    The workload's `state_message` is the most specific text the runtime has --
-    a Pod's admission rejection, or an image-pull reason plus the registry error
-    behind it (gpustack/gpustack#5869) -- but it never carries an exit code, and
-    a container that merely crashed leaves it empty on Kubernetes. The
-    per-container `exits` carry both, so take the reason from there when there
-    is no message, and append the exit code either way
-    (gpustack/gpustack#4217).
-
-    Args:
-        workload: The runtime WorkloadStatus, None if the workload is gone.
-
-    Returns:
-        The failure message to surface on the model instance.
-    """
-    if not workload:
-        return _WORKLOAD_FAILED_MESSAGE
-
-    message = getattr(workload, "state_message", "") or ""
-    # A container blocked from starting reports no exit code, and its reason is
-    # already what the state message is built from, so it adds nothing here.
-    exits = [
-        exit_
-        for exit_ in (getattr(workload, "exits", None) or [])
-        if exit_.exit_code is not None
-    ]
-    if not exits:
-        return message or _WORKLOAD_FAILED_MESSAGE
-
-    if not message:
-        # Deduplicated but order-preserving: sidecars usually die of one cause.
-        message = ", ".join(
-            dict.fromkeys(exit_.reason for exit_ in exits if exit_.reason)
-        )
-    codes = ", ".join(
-        (
-            f"{exit_.name} exit code {exit_.exit_code}"
-            if len(exits) > 1
-            else f"exit code {exit_.exit_code}"
-        )
-        for exit_ in exits
-    )
-    return f"{message or _WORKLOAD_FAILED_MESSAGE} ({codes})"
 
 
 class ServeManager:
@@ -288,17 +246,8 @@ class ServeManager:
 
         """
 
-        logger.debug("Watching models.")
-
-        while True:
-            try:
-                # Watch models without callback to keep the cache updated.
-                await self._clientset.models.awatch(callback=None)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error watching models: {e}")
-                await asyncio.sleep(5)
+        # No callback: the stream is consumed only to keep the client cache warm.
+        await watch_forever("models", self._clientset.models.awatch)
 
     async def watch_model_instances_event(self):
         """
@@ -306,18 +255,11 @@ class ServeManager:
 
         """
 
-        logger.debug("Watching model instances event.")
-
-        while True:
-            try:
-                await self._clientset.model_instances.awatch(
-                    callback=self._handle_model_instance_event
-                )
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error watching model instances: {e}")
-                await asyncio.sleep(5)
+        await watch_forever(
+            "model instances",
+            self._clientset.model_instances.awatch,
+            callback=self._handle_model_instance_event,
+        )
 
     async def watch_model_instances(self):
         """
@@ -477,28 +419,22 @@ class ServeManager:
                 )
                 workload = get_workload(workload_name)
 
-            if workload and workload.state in [
-                WorkloadStatusStateEnum.PENDING,
-                WorkloadStatusStateEnum.INITIALIZING,
-            ]:
+            phase = classify_workload(workload)
+            if phase == WorkloadPhase.LAUNCHING:
                 logger.trace(
                     f"Model instance {model_instance.name} workload is still launching. Skipping sync."
                 )
                 continue
 
-            # Update model instance state to ERROR if the workload is not existed, unhealthy, inactive or failed.
-            if not workload or workload.state in [
-                WorkloadStatusStateEnum.UNKNOWN,  # Rare, but possible, for example, leaving pause container.
-                WorkloadStatusStateEnum.UNHEALTHY,
-                WorkloadStatusStateEnum.INACTIVE,
-                WorkloadStatusStateEnum.FAILED,
-            ]:
+            # An inference server is a service: it has no successful end, so a
+            # clean exit is an error alongside a failure or a vanished workload.
+            if phase != WorkloadPhase.RUNNING:
                 # Only if not in ERROR state yet.
                 if model_instance.state != ModelInstanceStateEnum.ERROR:
                     # Surface the workload's own diagnosis (e.g. a device-plugin
                     # admission rejection, an image-pull failure, an exit code)
                     # when available.
-                    failure_message = _describe_workload_failure(workload)
+                    failure_message = describe_workload_failure(workload, _WORKLOAD_FAILED_MESSAGE)
                     with contextlib.suppress(NotFoundException):
                         # Get patch dict for main worker.
                         if is_main_worker:
@@ -1090,12 +1026,10 @@ class ServeManager:
                     logger.trace(
                         f"UPDATED event: started model instance {mi.name} on subordinate worker."
                     )
-                elif workload.state in [
-                    WorkloadStatusStateEnum.UNKNOWN,
-                    WorkloadStatusStateEnum.UNHEALTHY,
-                    WorkloadStatusStateEnum.INACTIVE,
-                    WorkloadStatusStateEnum.FAILED,
-                ]:
+                elif classify_workload(workload) in (
+                    WorkloadPhase.EXITED,
+                    WorkloadPhase.FAILED,
+                ):
                     self._stop_model_instance(mi, clear_restart_backoff=False)
                     self._start_model_instance(mi)
                     logger.trace(
@@ -1749,7 +1683,20 @@ class ServeManager:
         self._stop_model_instance(mi, clear_restart_backoff=False)
         self._start_model_instance(mi)
 
-    def _update_model(self, id: int, **kwargs):
+    def _update_model(self, id: int, **kwargs) -> bool:
+        """
+        Update model with given fields.
+
+        Args:
+            id: The ID of the model to update.
+            **kwargs: The fields to update, group by field name and value.
+        """
+
+        return update_resource(
+            self._clientset.models, id, ModelUpdate, "Model", **kwargs
+        )
+
+    def _update_model_instance(self, id: int, **kwargs) -> bool:
         """
         Update model instance with given fields.
 
@@ -1758,38 +1705,13 @@ class ServeManager:
             **kwargs: The fields to update, group by field name and value.
         """
 
-        try:
-            m_public = self._clientset.models.get(id=id)
-
-            m = ModelUpdate(**m_public.model_dump())
-            for key, value in kwargs.items():
-                set_attr(m, key, value)
-
-            self._clientset.models.update(id=id, model_update=m)
-        except NotFoundException:
-            logger.warning(f"Model with ID {id} not found when trying to update.")
-
-    def _update_model_instance(self, id: int, **kwargs):
-        """
-        Update model instance with given fields.
-
-        Args:
-            id: The ID of the model instance to update.
-            **kwargs: The fields to update, group by field name and value.
-        """
-
-        try:
-            mi_public = self._clientset.model_instances.get(id=id)
-
-            mi = ModelInstanceUpdate(**mi_public.model_dump())
-            for key, value in kwargs.items():
-                set_attr(mi, key, value)
-
-            self._clientset.model_instances.update(id=id, model_update=mi)
-        except NotFoundException:
-            logger.warning(
-                f"Model instance with ID {id} not found when trying to update."
-            )
+        return update_resource(
+            self._clientset.model_instances,
+            id,
+            ModelInstanceUpdate,
+            "Model instance",
+            **kwargs,
+        )
 
     def _stop_model_instance(
         self,

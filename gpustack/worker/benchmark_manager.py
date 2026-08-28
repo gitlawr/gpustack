@@ -28,6 +28,11 @@ from gpustack.worker.benchmark import analysis, artifacts
 from gpustack.worker.benchmark.runner import BenchmarkRunner
 from gpustack.client import ClientSet
 from gpustack.server.bus import Event, EventType
+from gpustack.worker.controlloop import (
+    WorkloadPhase,
+    classify_workload,
+    watch_forever,
+)
 from gpustack.worker.schemas.benchmark_runner import (
     GenerativeBenchmarksReport,
     GenerativeRequestStats,
@@ -171,19 +176,13 @@ class BenchmarkManager:
         """
         Loop to watch benchmarks' event and handle.
         """
-        logger.info("Watching benchmarks event.")
         if not self._worker_task or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._benchmark_queue_worker())
-        while True:
-            try:
-                await self._clientset.benchmarks.awatch(
-                    callback=self._handle_benchmark_event
-                )
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error watching benchmarks: {e}")
-                await asyncio.sleep(5)
+        await watch_forever(
+            "benchmarks",
+            self._clientset.benchmarks.awatch,
+            callback=self._handle_benchmark_event,
+        )
 
     def _handle_benchmark_event(self, event: Event):
         """
@@ -523,16 +522,14 @@ class BenchmarkManager:
         if not workload:
             return False
 
-        if workload.state in [
-            WorkloadStatusStateEnum.PENDING,
-            WorkloadStatusStateEnum.INITIALIZING,
-        ]:
+        phase = classify_workload(workload)
+        if phase == WorkloadPhase.LAUNCHING:
             logger.trace(
                 f"Benchmark {benchmark.name}(id={benchmark.id}) workload is still launching. Skipping sync."
             )
             return True
 
-        if workload.state == WorkloadStatusStateEnum.RUNNING:
+        if phase == WorkloadPhase.RUNNING:
             logger.trace(
                 f"Benchmark {benchmark.name}(id={benchmark.id}) workload is running. Skipping sync."
             )
@@ -541,18 +538,17 @@ class BenchmarkManager:
         return False
 
     def _is_workload_completed(self, workload) -> bool:
-        """Check if workload has completed successfully."""
-        return workload and workload.state == WorkloadStatusStateEnum.INACTIVE
+        """Check if workload has completed successfully.
+
+        A benchmark is a task: exiting on its own is how it succeeds."""
+        return classify_workload(workload) == WorkloadPhase.EXITED
 
     def _is_workload_failed(self, workload) -> bool:
         """Check if workload has failed or is unhealthy."""
-        if not workload:
-            return True
-        return workload.state in [
-            WorkloadStatusStateEnum.UNKNOWN,
-            WorkloadStatusStateEnum.UNHEALTHY,
-            WorkloadStatusStateEnum.FAILED,
-        ]
+        return classify_workload(workload) in (
+            WorkloadPhase.FAILED,
+            WorkloadPhase.MISSING,
+        )
 
     def _handle_benchmark_timeout(self, benchmark: Benchmark):
         """Handle benchmark timeout.
