@@ -388,9 +388,12 @@
         MOONCAKE_DEVICE: "{{device_name}}"
         MOONCAKE_GLOBAL_SEGMENT_SIZE: "{{store_segment_size}}gb"
         MOONCAKE_LOCAL_BUFFER_SIZE: "4gb"
+  # Field names keep the component scope (engine_ / store_) for template
+  # readability; the labels speak Mooncake's own vocabulary (mode,
+  # global_segment_size), and the mode-scoped pair renders one at a time.
   managed_fields:
     - name: pool_mode
-      label: Pool Mode
+      label: Mode
       description: >-
         Where the pool's memory comes from. embedded — each engine GPU
         contributes host DRAM (simplest, no extra processes);
@@ -400,34 +403,39 @@
       default: embedded
       options: [embedded, standalone-store]
     - name: engine_segment_size
-      label: Engine Segment Size (GiB)
+      label: Global Segment Size (GiB)
       description: >-
-        Embedded mode — host DRAM each engine GPU registers to the pool
-        (per GPU, not per node); size it so the total across a node's
-        GPUs fits in host RAM. Standalone-store mode leaves it 0: the
-        store replicas own the capacity.
+        Host DRAM each engine GPU registers to the pool (per GPU, not
+        per node); size it so the total across a node's GPUs fits in
+        host RAM.
       type: number
       default: 4
       min: 0
       step: 1
+      visible_by: pool_mode
+      visible_when: embedded
     - name: store_replicas
       label: Store Replicas
       description: >-
-        Standalone-store mode — how many store replicas form the pool,
-        spread across the matching workers.
+        How many store replicas form the pool, spread across the
+        matching workers.
       type: number
       default: 1
       min: 1
       step: 1
+      visible_by: pool_mode
+      visible_when: standalone-store
     - name: store_segment_size
-      label: Store Segment Size (GiB)
+      label: Global Segment Size (GiB)
       description: >-
-        Standalone-store mode — DRAM each store replica registers to the
-        pool (per replica); size it to its worker's available RAM.
+        DRAM each store replica registers to the pool (per replica);
+        size it to its worker's available RAM.
       type: number
       default: 16
       min: 1
       step: 1
+      visible_by: pool_mode
+      visible_when: standalone-store
     - name: protocol
       label: Transport Protocol
       description: RDMA for production performance; TCP for functional setups.
@@ -435,7 +443,9 @@
       options: [tcp, rdma]
     - name: device_name
       label: RDMA Device
-      description: NIC device(s) for the RDMA protocol; leave empty for TCP.
+      description: NIC device(s) for the RDMA protocol.
+      visible_by: protocol
+      visible_when: rdma
   health_check:
     scheme: tcp
   # The master serves Prometheus text on its metrics port (GET /metrics,

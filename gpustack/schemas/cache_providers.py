@@ -326,6 +326,15 @@ class CacheProviderField(BaseModel):
     options: Optional[List[str]] = None
     """When set, the UI offers a fixed choice."""
 
+    visible_by: Optional[str] = None
+    """Name of another managed field this one's visibility follows; the
+    field renders only while that field equals visible_when (e.g. the
+    RDMA device only matters on the rdma protocol). Purely a form hint:
+    a hidden field's default still renders into templates."""
+
+    visible_when: Optional[Any] = None
+    """Value of the visible_by field that shows this one."""
+
     min: Optional[float] = None
     max: Optional[float] = None
     step: Optional[float] = None
@@ -360,6 +369,15 @@ class CacheProviderExternalField(BaseModel):
     (host:port or URL) added to the service's scrape targets. It is
     observability config, not connector config: the value never enters
     the injection placeholder namespace."""
+
+    visible_by: Optional[str] = None
+    """Name of another field this one's visibility follows; the field
+    renders only while that field equals visible_when (e.g. the RDMA
+    device only matters on the rdma protocol). Purely a form hint: a
+    hidden field's default still renders into templates."""
+
+    visible_when: Optional[Any] = None
+    """Value of the visible_by field that shows this one."""
 
 
 class CacheProviderComponent(BaseModel):

@@ -547,6 +547,15 @@ def test_mooncake_provider_declaration():
     assert fields["pool_mode"].options == ["embedded", "standalone-store"]
     assert fields["engine_segment_size"].default == 4
     assert fields["protocol"].options == ["tcp", "rdma"]
+    # the mode-scoped capacity pair renders one at a time, both speaking
+    # Mooncake's own vocabulary
+    assert fields["engine_segment_size"].label == "Global Segment Size (GiB)"
+    assert fields["store_segment_size"].label == "Global Segment Size (GiB)"
+    assert fields["engine_segment_size"].visible_when == "embedded"
+    assert fields["store_segment_size"].visible_when == "standalone-store"
+    assert fields["store_replicas"].visible_when == "standalone-store"
+    assert fields["device_name"].visible_by == "protocol"
+    assert fields["device_name"].visible_when == "rdma"
     assert provider.external_fields == []
 
     # Master-side metrics: the pool's allocated/capacity view on the
