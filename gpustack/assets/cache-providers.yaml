@@ -395,16 +395,19 @@
   managed_fields:
     - name: pool_mode
       label: Mode
-      description: >-
-        Where the pool's memory comes from. embedded — each engine GPU
-        contributes host DRAM (simplest, no extra processes);
-        standalone-store — dedicated store replicas own the pool, so the
-        cache survives engine restarts and CPU RAM-rich nodes can serve
-        it.
+      description: Where the pool's memory comes from.
       default: embedded
       options:
-        - { value: embedded, label: Embedded }
-        - { value: standalone-store, label: Standalone Store }
+        - value: embedded
+          label: Embedded
+          description: >-
+            Each engine GPU contributes host DRAM — simplest, no extra
+            processes.
+        - value: standalone-store
+          label: Standalone Store
+          description: >-
+            Dedicated store replicas own the pool: the cache survives
+            engine restarts, and CPU RAM-rich nodes can serve it.
     - name: engine_segment_size
       label: Global Segment Size (GiB)
       description: >-

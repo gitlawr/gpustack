@@ -308,6 +308,8 @@ class CacheProviderFieldOption(BaseModel):
 
     value: str
     label: Optional[str] = None
+    description: Optional[str] = None
+    """One-line explanation rendered under the label in the dropdown."""
 
 
 class CacheProviderField(BaseModel):
