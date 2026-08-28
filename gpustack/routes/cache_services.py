@@ -1000,11 +1000,12 @@ def _validate_managed_fields(cache_service_in: CacheServiceBase) -> None:
                 raise BadRequestException(
                     message=f"config.fields.{name} must be a boolean"
                 )
-        if field.options and str(value) not in field.options:
+        option_values = field.option_values() if field.options else []
+        if option_values and str(value) not in option_values:
             raise BadRequestException(
                 message=(
                     f"config.fields.{name} must be one of "
-                    f"{', '.join(field.options)}"
+                    f"{', '.join(option_values)}"
                 )
             )
         # String values reach shell tokens and JSON templates verbatim.

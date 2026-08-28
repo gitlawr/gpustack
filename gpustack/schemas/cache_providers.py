@@ -1,7 +1,7 @@
 import json
 import re
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, model_validator
 
@@ -302,6 +302,14 @@ class CacheProviderL2Backend(BaseModel):
     fields: List[CacheProviderL2Field] = []
 
 
+class CacheProviderFieldOption(BaseModel):
+    """A choice of an options field whose display text differs from the
+    stored value."""
+
+    value: str
+    label: Optional[str] = None
+
+
 class CacheProviderField(BaseModel):
     """A managed-mode configuration value promoted to a structured field
     in the service form's advanced section. The field carries no
@@ -323,14 +331,22 @@ class CacheProviderField(BaseModel):
     "true"/"false")."""
 
     default: Optional[Any] = None
-    options: Optional[List[str]] = None
-    """When set, the UI offers a fixed choice."""
+    options: Optional[List[Union[str, "CacheProviderFieldOption"]]] = None
+    """When set, the UI offers a fixed choice. An entry is either the
+    value itself or {value, label} when the display text differs from
+    the stored value (e.g. "Standalone Store" over standalone-store)."""
 
     visible_by: Optional[str] = None
     """Name of another managed field this one's visibility follows; the
     field renders only while that field equals visible_when (e.g. the
     RDMA device only matters on the rdma protocol). Purely a form hint:
     a hidden field's default still renders into templates."""
+
+    def option_values(self) -> List[str]:
+        return [
+            option if isinstance(option, str) else option.value
+            for option in (self.options or [])
+        ]
 
     visible_when: Optional[Any] = None
     """Value of the visible_by field that shows this one."""

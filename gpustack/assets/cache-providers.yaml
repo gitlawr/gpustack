@@ -361,7 +361,8 @@
       run_command: >-
         mooncake_master --rpc_port {{port}} --metrics_port {{metrics_port}}
         --default_kv_lease_ttl 30000
-        --eviction_high_watermark_ratio 0.95 --eviction_ratio 0.1
+        --eviction_high_watermark_ratio {{eviction_high_watermark_ratio}}
+        --eviction_ratio {{eviction_ratio}}
       health_check:
         scheme: http
         path: /metrics
@@ -401,7 +402,9 @@
         cache survives engine restarts and CPU RAM-rich nodes can serve
         it.
       default: embedded
-      options: [embedded, standalone-store]
+      options:
+        - { value: embedded, label: Embedded }
+        - { value: standalone-store, label: Standalone Store }
     - name: engine_segment_size
       label: Global Segment Size (GiB)
       description: >-
@@ -440,12 +443,32 @@
       label: Transport Protocol
       description: RDMA for production performance; TCP for functional setups.
       default: tcp
-      options: [tcp, rdma]
+      options:
+        - { value: tcp, label: TCP }
+        - { value: rdma, label: RDMA }
     - name: device_name
       label: RDMA Device
       description: NIC device(s) for the RDMA protocol.
       visible_by: protocol
       visible_when: rdma
+    # Recipes-curated eviction posture, exposed like LMCache's knobs:
+    # start evicting at 95% pool usage, free 10% per pass.
+    - name: eviction_high_watermark_ratio
+      label: Eviction High Watermark
+      description: Pool usage fraction at which eviction starts.
+      type: number
+      default: 0.95
+      min: 0.5
+      max: 1
+      step: 0.05
+    - name: eviction_ratio
+      label: Eviction Ratio
+      description: Fraction of the pool freed per eviction pass.
+      type: number
+      default: 0.1
+      min: 0.05
+      max: 1
+      step: 0.05
   health_check:
     scheme: tcp
   # The master serves Prometheus text on its metrics port (GET /metrics,

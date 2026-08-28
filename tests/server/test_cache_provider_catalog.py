@@ -542,11 +542,17 @@ def test_mooncake_provider_declaration():
         "store_segment_size",
         "protocol",
         "device_name",
+        "eviction_high_watermark_ratio",
+        "eviction_ratio",
     }
     assert fields["pool_mode"].default == "embedded"
-    assert fields["pool_mode"].options == ["embedded", "standalone-store"]
+    assert fields["pool_mode"].option_values() == ["embedded", "standalone-store"]
+    # options carry display labels where the stored value reads poorly
+    assert fields["pool_mode"].options[1].label == "Standalone Store"
     assert fields["engine_segment_size"].default == 4
-    assert fields["protocol"].options == ["tcp", "rdma"]
+    assert fields["protocol"].option_values() == ["tcp", "rdma"]
+    assert fields["eviction_high_watermark_ratio"].default == 0.95
+    assert fields["eviction_ratio"].default == 0.1
     # the mode-scoped capacity pair renders one at a time, both speaking
     # Mooncake's own vocabulary
     assert fields["engine_segment_size"].label == "Global Segment Size (GiB)"
