@@ -27,6 +27,7 @@ from gpustack.schemas.workloads import (
     WorkloadRestartPolicyEnum,
     WorkloadRoleEnum,
     WorkloadStateEnum,
+    WorkloadUpdate,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,3 +181,40 @@ def compile_model_instance(mi: ModelInstance) -> List[Workload]:
             )
         )
     return workloads
+
+
+SPEC_FIELDS = frozenset(
+    {
+        "name",
+        "owner_kind",
+        "owner_id",
+        "owner_principal_id",
+        "cluster_id",
+        "group_key",
+        "group_index",
+        "role",
+        "worker_id",
+        "gpu_type",
+        "gpu_indexes",
+        "gpu_addresses",
+        "computed_resource_claim",
+        "reserved_claims",
+        "restart_policy",
+        "active_deadline_seconds",
+        "spec_digest",
+        "labels",
+    }
+)
+"""What a workload is asked to be, as opposed to what it reports. The worker
+owns the rest, so recompiling must not write over it."""
+
+
+def workload_spec(workload: Workload) -> WorkloadUpdate:
+    """The spec half of a compiled workload, for updating an existing row."""
+    return WorkloadUpdate(
+        **{
+            name: getattr(workload, name)
+            for name in SPEC_FIELDS
+            if hasattr(workload, name)
+        }
+    )

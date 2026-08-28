@@ -13,9 +13,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.server.bus import Event, EventType
 from gpustack.server.controllers import ModelInstanceController
-
 
 _ANY_INSTANCE = object()
 
@@ -29,7 +33,16 @@ class _FakeSessionCtx:
 
 
 def _compiled(group_index):
-    return SimpleNamespace(group_index=group_index, name=f"mi-{group_index}")
+    """A real Workload, so the spec/state split is exercised rather than
+    stubbed: the update path has to build a WorkloadUpdate from it."""
+    return Workload(
+        name=f"mi-{group_index}",
+        owner_kind=WorkloadOwnerKindEnum.MODEL_INSTANCE,
+        owner_id=3,
+        worker_id=1,
+        group_index=group_index,
+        state=WorkloadStateEnum.RUNNING,
+    )
 
 
 def _existing_workload(group_index):
@@ -133,3 +146,21 @@ async def test_sync_never_fails_the_instances_own_reconcile(monkeypatch, caplog)
         await ModelInstanceController(MagicMock())._sync_workloads(_event())
 
     assert "Failed to sync workloads of model instance 3" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_write_over_what_the_worker_reported(monkeypatch):
+    """The worker mirrors execution state onto these rows as it goes.
+    Recompiling it from the instance on every event would undo that, so an
+    update carries the spec only."""
+    existing = [_existing_workload(0)]
+
+    with _workload_sync(monkeypatch, existing=existing, compiled=[_compiled(0)]):
+        await ModelInstanceController(MagicMock())._sync_workloads(_event())
+
+    update = existing[0].update.await_args.args[1]
+    assert update.worker_id == 1
+    assert "state" not in update.model_fields_set
+    assert "state_message" not in update.model_fields_set
+    assert "ports" not in update.model_fields_set
+    assert "pid" not in update.model_fields_set

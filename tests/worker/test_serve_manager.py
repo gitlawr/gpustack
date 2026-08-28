@@ -12,9 +12,11 @@ from gpustack.schemas.models import (
     SourceEnum,
 )
 from gpustack.server.bus import Event, EventType
+from gpustack.schemas.workloads import WorkloadStateEnum
 from gpustack.worker.serve_manager import (
     _WORKLOAD_FAILED_MESSAGE,
     ServeManager,
+    _execution_state_patch,
 )
 from gpustack.worker.controlloop import describe_workload_failure
 from gpustack_runtime.deployer import WorkloadStatusStateEnum
@@ -898,3 +900,93 @@ def test_sync_vgpu_allocation_steady_state_skips_worker_fetch():
         manager.sync_model_instances_state()
 
     clientset.workers.get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Mirroring execution state onto the instance's workloads
+# ---------------------------------------------------------------------------
+
+
+def test_execution_patch_of_the_leader_lands_at_group_position_zero():
+    group_index, fields = _execution_state_patch(
+        {
+            "state": ModelInstanceStateEnum.RUNNING,
+            "state_message": "",
+            "port": 8000,
+            "ports": [8000, 8001],
+            "pid": 999,
+        }
+    )
+
+    assert group_index == 0
+    assert fields["state"] == WorkloadStateEnum.RUNNING
+    assert fields["ports"] == {"service": 8000, "port1": 8001}
+    assert fields["pid"] == 999
+
+
+def test_execution_patch_of_a_subordinate_lands_at_its_group_position():
+    """A subordinate worker patches its own entry by index; that index is
+    what says which workload of the group reported."""
+    sw = ModelInstanceSubordinateWorker(
+        worker_id=2,
+        state=ModelInstanceStateEnum.ERROR,
+        state_message="boom",
+        pid=321,
+        ports=[40001],
+    )
+
+    group_index, fields = _execution_state_patch(
+        {"distributed_servers.subordinate_workers.1": sw}
+    )
+
+    assert group_index == 2
+    assert fields["state"] == WorkloadStateEnum.ERROR
+    assert fields["state_message"] == "boom"
+    assert fields["pid"] == 321
+    assert fields["ports"] == {"service": 40001}
+
+
+def test_fields_a_workload_does_not_carry_are_dropped():
+    """The instance's own lifecycle and its model files stay on the instance."""
+    _, fields = _execution_state_patch(
+        {"resolved_path": "/models/x", "download_progress": 42.0}
+    )
+
+    assert fields == {}
+
+
+def test_pre_container_states_mirror_as_pending():
+    _, fields = _execution_state_patch({"state": ModelInstanceStateEnum.DOWNLOADING})
+
+    assert fields["state"] == WorkloadStateEnum.PENDING
+
+
+def test_mirror_writes_to_the_matching_workload():
+    manager, clientset = _build_serve_manager()
+    workload = SimpleNamespace(id=77, owner_id=5, group_index=0)
+    clientset.workloads.list.return_value = SimpleNamespace(items=[workload])
+
+    with patch("gpustack.worker.serve_manager.update_resource") as update:
+        manager._mirror_execution_state(5, {"state": ModelInstanceStateEnum.RUNNING})
+
+    assert update.call_args[0][1] == 77
+    assert update.call_args[1]["state"] == WorkloadStateEnum.RUNNING
+
+
+def test_a_failed_mirror_never_fails_the_state_write_back():
+    """Nothing reads these rows yet, so a mirror that could fail a write-back
+    would be strictly worse than no mirror."""
+    manager, clientset = _build_serve_manager()
+    clientset.workloads.list.side_effect = RuntimeError("api down")
+
+    manager._mirror_execution_state(5, {"state": ModelInstanceStateEnum.RUNNING})
+
+
+def test_mirror_is_silent_when_the_instance_has_no_workload_row_yet():
+    manager, clientset = _build_serve_manager()
+    clientset.workloads.list.return_value = SimpleNamespace(items=[])
+
+    with patch("gpustack.worker.serve_manager.update_resource") as update:
+        manager._mirror_execution_state(5, {"state": ModelInstanceStateEnum.RUNNING})
+
+    update.assert_not_called()

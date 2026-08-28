@@ -83,7 +83,10 @@ from gpustack.schemas.workloads import (
     WorkloadRestartPolicyEnum,
     WorkloadStateEnum,
 )
-from gpustack.server.model_instance_workloads import compile_model_instance
+from gpustack.server.model_instance_workloads import (
+    compile_model_instance,
+    workload_spec,
+)
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.server.cache_services import resolve_instance_cache_config_safe
 from gpustack.schemas.workers import (
@@ -415,7 +418,11 @@ class ModelInstanceController:
                     if current is None:
                         await Workload.create(session, compiled)
                         continue
-                    await current.update(session, compiled)
+                    # Spec and binding only. Execution state is the worker's
+                    # to write -- it mirrors it onto these rows as it goes --
+                    # and compiling it back from the instance on every event
+                    # would overwrite what the worker just reported.
+                    await current.update(session, workload_spec(compiled))
 
                 # A distributed instance that lost subordinate workers, or a
                 # backend that stopped delegating, leaves rows behind.

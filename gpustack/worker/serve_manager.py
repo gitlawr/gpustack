@@ -54,7 +54,9 @@ from gpustack.schemas.models import (
     ModelInstanceSubordinateWorker,
     CategoryEnum,
 )
+from gpustack.schemas.workloads import WorkloadOwnerKindEnum, WorkloadUpdate
 from gpustack.server.bus import Event, EventType
+from gpustack.server.model_instance_workloads import named_ports, to_workload_state
 from gpustack.worker.controlloop import (
     ContainerLogPersistence,
     PortAllocator,
@@ -141,6 +143,43 @@ def _parse_allocated_accelerators(annotations: Optional[Dict[str, str]]) -> List
                 if isinstance(accelerator, dict) and accelerator.get("id"):
                     accelerators.append(accelerator)
     return accelerators
+
+
+_SUBORDINATE_PATCH = re.compile(r"^distributed_servers\.subordinate_workers\.(\d+)$")
+
+
+def _execution_state_patch(patch: dict):
+    """
+    Split a model instance write-back into (group position, workload fields).
+
+    A subordinate worker patches its own entry by index, so the position comes
+    from the patch key; anything else is the leader, at position 0. Fields the
+    workload does not carry -- the instance's own lifecycle, its model files --
+    are dropped.
+    """
+    for key, value in patch.items():
+        match = _SUBORDINATE_PATCH.match(key)
+        if match:
+            return int(match.group(1)) + 1, _subordinate_fields(value)
+
+    fields = {}
+    if "state" in patch:
+        fields["state"] = to_workload_state(patch["state"])
+    for name in ("state_message", "pid", "restart_count", "last_restart_time"):
+        if name in patch:
+            fields[name] = patch[name]
+    if "port" in patch or "ports" in patch:
+        fields["ports"] = named_ports(patch.get("port"), patch.get("ports")) or None
+    return 0, fields
+
+
+def _subordinate_fields(sw) -> dict:
+    return {
+        "state": to_workload_state(getattr(sw, "state", None)),
+        "state_message": getattr(sw, "state_message", None),
+        "pid": getattr(sw, "pid", None),
+        "ports": named_ports(None, getattr(sw, "ports", None)) or None,
+    }
 
 
 def provision_model_instance(
@@ -1377,12 +1416,69 @@ class ServeManager:
             **kwargs: The fields to update, group by field name and value.
         """
 
-        return update_resource(
+        applied = update_resource(
             self._clientset.model_instances,
             id,
             ModelInstanceUpdate,
             "Model instance",
             **kwargs,
+        )
+        self._mirror_execution_state(id, kwargs)
+        return applied
+
+    def _mirror_execution_state(self, model_instance_id: int, patch: dict):
+        """
+        Write the same execution state onto the instance's workload rows.
+
+        Every write-back funnels through here, including the indexed patches
+        into ``distributed_servers.subordinate_workers`` that a subordinate
+        worker makes, so one place covers both roles.
+
+        The instance row stays authoritative for now: this makes the workload
+        rows carry real execution state, rather than a copy of the instance
+        made when they were compiled, so that the aggregation that will read
+        them can be watched working before anything depends on it. Failures
+        are logged and dropped -- nothing reads these yet, and a mirror that
+        could fail a state write-back would be strictly worse than no mirror.
+        """
+        try:
+            group_index, fields = _execution_state_patch(patch)
+            if not fields:
+                return
+            workload = self._find_workload(model_instance_id, group_index)
+            if workload is None:
+                return
+            update_resource(
+                self._clientset.workloads,
+                workload.id,
+                WorkloadUpdate,
+                "Model instance workload",
+                **fields,
+            )
+        except Exception as e:
+            logger.debug(
+                f"Failed to mirror execution state of model instance "
+                f"{model_instance_id} onto its workload: {e}"
+            )
+
+    def _find_workload(self, model_instance_id: int, group_index: int):
+        """The instance's workload at that position in its group, from the
+        watch-backed cache."""
+        page = self._clientset.workloads.list(
+            params={
+                "worker_id": self._worker_id,
+                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE.value,
+                "page": -1,
+            }
+        )
+        return next(
+            (
+                workload
+                for workload in page.items or []
+                if workload.owner_id == model_instance_id
+                and workload.group_index == group_index
+            ),
+            None,
         )
 
     def _stop_model_instance(
