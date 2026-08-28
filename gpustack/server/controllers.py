@@ -886,6 +886,13 @@ class CacheServiceController:
 
             spec = provider.get_component(component) if provider else None
             count = spec.replicas if spec else 1
+            if spec is not None and spec.replicas_by:
+                configured = (config_fields or {}).get(spec.replicas_by)
+                try:
+                    if configured is not None and int(configured) >= 1:
+                        count = int(configured)
+                except (TypeError, ValueError):
+                    pass
 
             pinned: Set[int] = set()
             if service.worker_id:

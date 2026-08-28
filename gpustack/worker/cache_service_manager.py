@@ -282,6 +282,10 @@ class CacheServiceManager:
             params = self._build_template_params(
                 cache_service, provider, port, metrics_port
             )
+            # The worker's own IP: a store advertises it to peers (the
+            # P2P handshake publishes it as local_hostname), where the
+            # bind-address 0.0.0.0 would be useless.
+            params["worker_ip"] = self._config.worker_ip
             # Dependency addresses the controller stamped at creation
             # (e.g. the Mooncake master's host:port for a store).
             for name, address in (instance.component_addresses or {}).items():

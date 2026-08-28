@@ -34,6 +34,7 @@ def _build_manager(worker_id: int = 1):
     cfg = SimpleNamespace(
         service_port_range="40000-41000",
         system_default_container_registry=None,
+        worker_ip="10.0.0.1",
     )
     manager = CacheServiceManager(lambda: worker_id, lambda: clientset, cfg)
     return manager, clientset

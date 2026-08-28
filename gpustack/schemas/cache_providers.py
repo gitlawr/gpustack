@@ -380,6 +380,11 @@ class CacheProviderComponent(BaseModel):
     workers than replicas deploys what fits (a smaller pool beats
     parking the service). Ignored by "per_node"."""
 
+    replicas_by: Optional[str] = None
+    """Name of a number managed field whose configured value overrides
+    ``replicas`` (e.g. a user-sized store fleet); None keeps the declared
+    count."""
+
     depends_on: Optional[str] = None
     """Name of a component whose instances must be RUNNING (with ports
     known) before this component's instances are created — e.g. stores
@@ -417,9 +422,14 @@ class CacheProviderComponent(BaseModel):
     component and cannot be gated by enabled_by."""
 
     enabled_by: Optional[str] = None
-    """Name of a boolean managed field that turns this component on;
-    None means always on. A disabled component keeps no instances —
-    e.g. Mooncake's optional standalone stores."""
+    """Name of a managed field that turns this component on; None means
+    always on. Without enabled_when the field reads as a boolean; with
+    it, the component is on while the field equals that value (e.g.
+    Mooncake's stores exist while pool_mode is "standalone-store"). A
+    disabled component keeps no instances."""
+
+    enabled_when: Optional[Any] = None
+    """Value of the enabled_by field that turns this component on."""
 
     gpu_access: bool = True
     """Whether this component's container mounts the node's GPUs. LMCache
@@ -619,6 +629,14 @@ class CacheProvider(BaseModel):
                         f"component '{name}' is enabled by undeclared "
                         f"managed field '{component.enabled_by}'"
                     )
+                if (
+                    component.replicas_by
+                    and component.replicas_by not in declared_fields
+                ):
+                    raise ValueError(
+                        f"component '{name}' sizes replicas by undeclared "
+                        f"managed field '{component.replicas_by}'"
+                    )
         return self
 
     def attach_component(self) -> str:
@@ -640,12 +658,20 @@ class CacheProvider(BaseModel):
             return True
         fields = config_fields or {}
         if spec.enabled_by in fields:
-            return bool(fields[spec.enabled_by])
-        declared = next(
-            (field for field in self.managed_fields if field.name == spec.enabled_by),
-            None,
-        )
-        return bool(declared.default) if declared else False
+            value = fields[spec.enabled_by]
+        else:
+            declared = next(
+                (
+                    field
+                    for field in self.managed_fields
+                    if field.name == spec.enabled_by
+                ),
+                None,
+            )
+            value = declared.default if declared else None
+        if spec.enabled_when is not None:
+            return value == spec.enabled_when
+        return bool(value)
 
     def metrics_for(self, version: Optional[str]) -> Optional[CacheProviderMetrics]:
         """The effective metrics declaration for a service pinned to

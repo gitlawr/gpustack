@@ -496,19 +496,65 @@ def test_mooncake_provider_declaration():
     # (multi-worker) instances attach by design.
     assert provider.attach_locality == "cluster"
     assert provider.icon == "/static/catalog_icons/mooncake.png"
-    # Mooncake is a self-deployed distributed store; GPUStack only references
-    # it, so it is external-only and runs no managed container.
-    assert provider.supported_modes == [CacheServiceModeEnum.EXTERNAL.value]
-    assert provider.versions == {}
-    assert provider.health_check.scheme == "tcp"
+    # Managed only: the platform runs the master (and optional stores)
+    # from the vLLM runner images, whose bundled wheel matches the
+    # engines' — Mooncake's RPC wire format breaks across builds.
+    assert provider.supported_modes == [CacheServiceModeEnum.MANAGED.value]
+    assert provider.default_version == "v0.3.10.post2"
+    assert provider.custom_version is True
+    version = provider.versions["v0.3.10.post2"]
+    assert version.runtime_images["cuda"]["13"] == (
+        "gpustack/runner:cuda13.0-vllm0.27.1"
+    )
+    assert version.runtime_images["cuda"]["12"] == (
+        "gpustack/runner:cuda12.9-vllm0.27.1"
+    )
+    # CPU-only workers (a RAM-rich store node) run the plain image.
+    assert version.image == "gpustack/runner:cuda12.9-vllm0.27.1"
+
+    # The master coordinates and serves the metrics; capacity is either
+    # engine-contributed (embedded, the default) or owned by optional
+    # store replicas gated behind pool_mode.
+    master = provider.components["master"]
+    assert master.attach_endpoint is True
+    assert master.serves_metrics is True
+    assert master.gpu_access is False
+    assert master.health_check.scheme == "http"
+    assert master.health_check.target == "metrics"
+    store = provider.components["store"]
+    assert store.depends_on == "master"
+    assert store.replicas_by == "store_replicas"
+    assert store.enabled_by == "pool_mode"
+    assert store.enabled_when == "standalone-store"
+    assert store.gpu_access is False
+    assert store.env["MOONCAKE_MASTER"] == "{{component.master.address}}"
+    assert store.env["MOONCAKE_LOCAL_HOSTNAME"] == "{{worker_ip}}"
+    assert provider.component_enabled("store", None) is False
+    assert (
+        provider.component_enabled("store", {"pool_mode": "standalone-store"}) is True
+    )
+
+    fields = {field.name: field for field in provider.managed_fields}
+    assert set(fields) == {
+        "pool_mode",
+        "engine_segment_size",
+        "store_replicas",
+        "store_segment_size",
+        "protocol",
+        "device_name",
+    }
+    assert fields["pool_mode"].default == "embedded"
+    assert fields["pool_mode"].options == ["embedded", "standalone-store"]
+    assert fields["engine_segment_size"].default == 4
+    assert fields["protocol"].options == ["tcp", "rdma"]
+    assert provider.external_fields == []
 
     # Master-side metrics: the pool's allocated/capacity view on the
-    # master's Prometheus endpoint (conventionally port 9003). Lookup-hit
-    # accounting lives in the engine-side connector, so no hit_rate.
+    # master's Prometheus endpoint. Lookup-hit accounting lives in the
+    # engine-side connector, so no hit_rate.
     metrics = provider.default_metrics
     assert metrics is not None
     assert metrics.path == "/metrics"
-    assert metrics.default_port == 9003
     assert "hit_rate" not in metrics.mappings
     assert metrics.mappings["l1_usage_bytes"].gauge == "master_allocated_bytes"
     assert metrics.mappings["l1_usage_ratio"].gauge_ratio == {
@@ -516,24 +562,6 @@ def test_mooncake_provider_declaration():
         "denominator": "master_total_capacity_bytes",
     }
     assert provider.dashboard_uid == "gpustack-mooncake"
-
-    fields = {field.name: field for field in provider.external_fields}
-    assert set(fields) == {
-        "metadata_server",
-        "protocol",
-        "device_name",
-        "local_buffer_size",
-    }
-    assert fields["local_buffer_size"].default == "1GB"
-    assert fields["metadata_server"].default == "P2PHANDSHAKE"
-    assert fields["protocol"].default == "tcp"
-    assert fields["protocol"].options == ["tcp", "rdma"]
-    # None of the external fields are required: each has a usable default or
-    # is only needed for RDMA.
-    assert all(not field.required for field in provider.external_fields)
-
-    compat = provider.integration_for("vLLM")
-    assert compat is not None
 
 
 def test_mooncake_injection_renders_store_connector_env():
@@ -543,9 +571,6 @@ def test_mooncake_injection_renders_store_connector_env():
         "vLLM",
         {
             "master_server_address": "10.0.0.9:50051",
-            "metadata_server": "P2PHANDSHAKE",
-            "protocol": "tcp",
-            "device_name": None,
             "local_hostname": "10.0.0.7",
         },
     )
@@ -555,22 +580,26 @@ def test_mooncake_injection_renders_store_connector_env():
     # MOONCAKE_CONFIG_PATH points at; the injection materializes it.
     assert env == {
         "MOONCAKE_CONFIG_PATH": "/tmp/gpustack-mooncake.json",
+        # Chunk hashes must agree across engine processes; a random
+        # per-process hash seed would silently break sharing.
+        "PYTHONHASHSEED": "0",
         # TCP transport pools connections instead of opening one per
         # transfer slice, which exhausts ephemeral ports under prefill
         # bursts; the RDMA path ignores the switch.
         "MC_TCP_ENABLE_CONNECTION_POOL": "1",
     }
     config = json.loads(files["/tmp/gpustack-mooncake.json"])
-    # A pure requester: the externally deployed cluster owns the pool.
-    assert config["mode"] == "standalone-store"
-    assert config["global_segment_size"] == 0
+    # The managed defaults render the mainstream embedded shape: each
+    # engine GPU contributes the default segment size.
+    assert config["mode"] == "embedded"
+    assert config["global_segment_size"] == "4GB"
     assert config["master_server_address"] == "10.0.0.9:50051"
     assert config["metadata_server"] == "P2PHANDSHAKE"
     assert config["protocol"] == "tcp"
     # An unset optional field renders empty in the file; the config
     # schema treats empty device_name as "no RDMA device".
     assert config["device_name"] == ""
-    assert config["local_buffer_size"] == "1GB"
+    assert config["local_buffer_size"] == "4GB"
     assert args[0] == "--kv-transfer-config"
     assert '"kv_connector":"MooncakeStoreConnector"' in args[1]
 

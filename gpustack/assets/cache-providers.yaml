@@ -315,11 +315,12 @@
   source: built_in
   icon: /static/catalog_icons/mooncake.png
   description: >-
-    Mooncake Store is a distributed KV cache pool with a cluster-wide master
-    and per-node clients that transfer KV blocks peer-to-peer over RDMA/TCP.
-    It is deployed and operated outside GPUStack; register the master address
-    and GPUStack attaches inference engines to it, probes it, and (once
-    calibrated) scrapes its metrics.
+    Mooncake Store is a distributed KV cache pool: a lightweight master
+    coordinates it, and capacity comes from the engines themselves
+    (embedded mode — each GPU contributes host DRAM) or from dedicated
+    store replicas (standalone-store mode, which keeps the cache
+    independent of engine restarts). Any engine in the cluster attaches
+    over TCP/RDMA.
   links:
     - { label: Documentation, url: "https://kvcache-ai.github.io/Mooncake/" }
     - { label: GitHub, url: "https://github.com/kvcache-ai/Mooncake" }
@@ -327,19 +328,106 @@
   # docker-compose/grafana/grafana_dashboards/gpustack-mooncake.json,
   # built on the master's pool/keys/eviction/request metrics.
   dashboard_uid: gpustack-mooncake
-  supported_modes: [external]
-  # External connection parameters. The master address is the endpoint
-  # (host+port, default RPC port 50051); these feed the rest of the
-  # connector config. metadata_server P2PHANDSHAKE keeps peer discovery
-  # decentralized (no separate etcd/redis); a cluster with an external
-  # metadata service registers its "etcd://" / "http://" address instead.
-  external_fields:
-    - name: metadata_server
-      label: Metadata Server
+  supported_modes: [managed]
+  # The vLLM runner images bundle the mooncake wheel, so the cache
+  # containers and the engines share one wheel source — Mooncake's RPC
+  # wire format breaks across builds, and same-image sourcing is what
+  # keeps client and master compatible. Version = the bundled wheel.
+  default_version: v0.3.10.post2
+  custom_version: true
+  versions:
+    "v0.3.10.post2":
+      # CPU-only workers run master/store from the plain image (a store
+      # on a RAM-rich CPU node is a supported shape).
+      image: gpustack/runner:cuda12.9-vllm0.27.1
+      runtime_images:
+        cuda:
+          "12": gpustack/runner:cuda12.9-vllm0.27.1
+          "13": gpustack/runner:cuda13.0-vllm0.27.1
+        # cann: the cann9.0-910b-vllm0.20.2 runner likely bundles a
+        # different wheel version; probe before declaring (wire format
+        # is build-exact).
+  components:
+    # The coordinator: metadata only, no cache capacity, no GPU. Flag
+    # values follow the vllm-project/recipes curated Mooncake configs
+    # (30s KV lease; eviction starts at 95% pool usage, frees 10% per
+    # pass). Flags verified against the wheel's v0.3.10.post2 source:
+    # rpc_port supersedes the deprecated port, the metrics HTTP server
+    # binds all interfaces on its own (no metrics_host flag exists yet).
+    master:
+      attach_endpoint: true
+      serves_metrics: true
+      gpu_access: false
+      run_command: >-
+        mooncake_master --rpc_port {{port}} --metrics_port {{metrics_port}}
+        --default_kv_lease_ttl 30000
+        --eviction_high_watermark_ratio 0.95 --eviction_ratio 0.1
+      health_check:
+        scheme: http
+        path: /metrics
+        target: metrics
+    # Dedicated pool capacity, present only in standalone-store mode.
+    # Configured purely through env (MooncakeConfig.load_from_env);
+    # local_hostname must be the worker's reachable IP — the P2P
+    # handshake advertises it to peers, where the bind-any address
+    # would be useless.
+    store:
+      topology: replicas
+      replicas_by: store_replicas
+      depends_on: master
+      enabled_by: pool_mode
+      enabled_when: standalone-store
+      gpu_access: false
+      run_command: >-
+        python3 -m mooncake.mooncake_store_service --port {{port}}
+      env:
+        MOONCAKE_MASTER: "{{component.master.address}}"
+        MOONCAKE_TE_META_DATA_SERVER: P2PHANDSHAKE
+        MOONCAKE_LOCAL_HOSTNAME: "{{worker_ip}}"
+        MOONCAKE_PROTOCOL: "{{protocol}}"
+        MOONCAKE_DEVICE: "{{device_name}}"
+        MOONCAKE_GLOBAL_SEGMENT_SIZE: "{{store_segment_size}}gb"
+        MOONCAKE_LOCAL_BUFFER_SIZE: "4gb"
+  managed_fields:
+    - name: pool_mode
+      label: Pool Mode
       description: >-
-        Transfer Engine peer-discovery backend: P2PHANDSHAKE (decentralized),
-        or an etcd:// / redis:// / http:// address.
-      default: P2PHANDSHAKE
+        Where the pool's memory comes from. embedded — each engine GPU
+        contributes host DRAM (simplest, no extra processes);
+        standalone-store — dedicated store replicas own the pool, so the
+        cache survives engine restarts and CPU RAM-rich nodes can serve
+        it.
+      default: embedded
+      options: [embedded, standalone-store]
+    - name: engine_segment_size
+      label: Engine Segment Size (GiB)
+      description: >-
+        Embedded mode — host DRAM each engine GPU registers to the pool
+        (per GPU, not per node); size it so the total across a node's
+        GPUs fits in host RAM. Standalone-store mode leaves it 0: the
+        store replicas own the capacity.
+      type: number
+      default: 4
+      min: 0
+      step: 1
+    - name: store_replicas
+      label: Store Replicas
+      description: >-
+        Standalone-store mode — how many store replicas form the pool,
+        spread across the matching workers.
+      type: number
+      default: 1
+      min: 1
+      step: 1
+    - name: store_segment_size
+      label: Store Segment Size (GiB)
+      description: >-
+        Standalone-store mode — DRAM each store replica registers to the
+        pool (per replica); size it to its worker's available RAM.
+      type: number
+      default: 16
+      min: 1
+      step: 1
     - name: protocol
       label: Transport Protocol
       description: RDMA for production performance; TCP for functional setups.
@@ -348,12 +436,6 @@
     - name: device_name
       label: RDMA Device
       description: NIC device(s) for the RDMA protocol; leave empty for TCP.
-    - name: local_buffer_size
-      label: Local Buffer Size
-      description: >-
-        Per-GPU staging buffer for the engine's own store operations
-        (e.g. 1GB).
-      default: 1GB
   health_check:
     scheme: tcp
   # The master serves Prometheus text on its metrics port (GET /metrics,
@@ -363,7 +445,6 @@
   # hit_rate mapping; usage is the pool's allocated-vs-capacity view.
   default_metrics:
     path: /metrics
-    default_port: 9003
     mappings:
       l1_usage_bytes:
         gauge: master_allocated_bytes
@@ -376,9 +457,11 @@
     # shared KV pool. The connector reads its configuration solely from
     # the JSON file MOONCAKE_CONFIG_PATH points at (no per-field env
     # support), so the injection writes that file into the engine
-    # container. mode standalone-store with global_segment_size 0 makes
-    # the engine a pure requester: the externally deployed cluster owns
-    # the pool. The mode field is recent in vLLM; behavior on older
+    # container. The mode and the engine's contribution follow the
+    # service's pool_mode: embedded engines register
+    # engine_segment_size per GPU, standalone-store engines are pure
+    # requesters (the connector enforces zero contribution in that
+    # mode). The mode field is recent in vLLM; behavior on older
     # connectors is a calibration surface for integration testing.
     - backend: vLLM
       frameworks: [cuda]
@@ -386,6 +469,10 @@
       injection:
         env:
           MOONCAKE_CONFIG_PATH: /tmp/gpustack-mooncake.json
+          # The MP-style chunk hashes must agree across engine processes;
+          # a random per-process hash seed would silently break sharing
+          # (the recipes set the same).
+          PYTHONHASHSEED: "0"
           # The TCP transport opens a fresh connection per transfer slice
           # by default; under prefill bursts the client-side TIME_WAIT
           # backlog exhausts ephemeral ports (connect() fails with
@@ -395,11 +482,11 @@
         files:
           /tmp/gpustack-mooncake.json: |
             {
-              "mode": "standalone-store",
-              "metadata_server": "{{metadata_server}}",
+              "mode": "{{pool_mode}}",
+              "metadata_server": "P2PHANDSHAKE",
               "master_server_address": "{{master_server_address}}",
-              "global_segment_size": 0,
-              "local_buffer_size": "{{local_buffer_size}}",
+              "global_segment_size": "{{engine_segment_size}}GB",
+              "local_buffer_size": "4GB",
               "protocol": "{{protocol}}",
               "device_name": "{{device_name}}"
             }

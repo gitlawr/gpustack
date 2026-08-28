@@ -445,28 +445,49 @@ async def test_resolve_worker_param_ignored_for_fixed_external_endpoint():
 
 
 def mooncake_cache_service(**overrides):
+    """A managed Mooncake service: the master component instance carries
+    the attach address, and pool_mode drives the engine's contribution."""
     fields = dict(
         name="mooncake-svc",
         provider_name="Mooncake",
         provider_version=None,
-        mode=CacheServiceModeEnum.EXTERNAL,
+        mode=CacheServiceModeEnum.MANAGED,
         worker_id=None,
-        config=None,
-        endpoint=CacheServiceEndpoint(
-            host="10.0.0.9",
-            port=50051,
-            params={"metadata_server": "P2PHANDSHAKE", "protocol": "tcp"},
-        ),
+        config=CacheServiceConfig(),
+        endpoint=None,
     )
     fields.update(overrides)
     return managed_cache_service(**fields)
 
 
+def mooncake_master_instance(**overrides):
+    fields = dict(
+        id=31,
+        name="mooncake-svc-master-a1b2c",
+        cache_service_id=5,
+        worker_id=9,
+        cluster_id=1,
+        component="master",
+        port=50051,
+        state=CacheServiceStateEnum.RUNNING,
+    )
+    fields.update(overrides)
+    return CacheServiceInstance(**fields)
+
+
 @pytest.mark.asyncio
-async def test_resolve_external_mooncake_injects_store_connector():
+async def test_resolve_managed_mooncake_injects_store_connector():
+    """Engines resolve the managed master's address (the attach
+    component's instance) and default to embedded mode: each GPU
+    contributes the declared default segment size to the pool."""
     model = shared_cache_model()
     instance_worker = SimpleNamespace(id=7, ip="10.0.0.7", deleted_at=None)
-    with patch_lookups(mooncake_cache_service(), worker=None, instances=[]):
+    master_worker = SimpleNamespace(id=9, ip="10.0.0.9", deleted_at=None)
+    with patch_lookups(
+        mooncake_cache_service(),
+        worker=master_worker,
+        instances=[mooncake_master_instance()],
+    ):
         snapshot = await resolve_instance_cache_config(
             MagicMock(), model, worker=instance_worker
         )
@@ -474,34 +495,67 @@ async def test_resolve_external_mooncake_injects_store_connector():
     assert snapshot.injected is True
     # The connector reads its configuration solely from the JSON file
     # MOONCAKE_CONFIG_PATH points at; the snapshot carries the rendered
-    # file for the serving script to write, with the registered external
-    # fields and the declared defaults (local_buffer_size) filled in.
+    # file for the serving script to write, with the managed field
+    # defaults filled in.
     assert snapshot.env == {
         "MOONCAKE_CONFIG_PATH": "/tmp/gpustack-mooncake.json",
+        # Chunk hashes must agree across engine processes; a random
+        # per-process hash seed would silently break sharing.
+        "PYTHONHASHSEED": "0",
         # TCP transport pools connections instead of opening one per
         # transfer slice, which exhausts ephemeral ports under prefill
         # bursts; the RDMA path ignores the switch.
         "MC_TCP_ENABLE_CONNECTION_POOL": "1",
     }
     config = json.loads(snapshot.files["/tmp/gpustack-mooncake.json"])
-    assert config["mode"] == "standalone-store"
-    assert config["global_segment_size"] == 0
+    assert config["mode"] == "embedded"
+    assert config["global_segment_size"] == "4GB"
     assert config["master_server_address"] == "10.0.0.9:50051"
     assert config["metadata_server"] == "P2PHANDSHAKE"
     assert config["protocol"] == "tcp"
-    assert config["local_buffer_size"] == "1GB"
+    assert config["local_buffer_size"] == "4GB"
     assert '"kv_connector":"MooncakeStoreConnector"' in snapshot.args[1]
 
 
 @pytest.mark.asyncio
-async def test_resolve_external_provider_attaches_spanning_instances():
-    """Node-locality is the per_node providers' contract, not a
-    shared-cache property: a cross-host pool (Mooncake, external mode,
-    replicas topology) serves multi-worker instances by design — every
-    subordinate worker's engine reaches the master over the network."""
+async def test_resolve_standalone_store_mooncake_engine_contributes_nothing():
+    """standalone-store mode renders the engine a pure requester: the
+    store replicas own the pool."""
     model = shared_cache_model()
     instance_worker = SimpleNamespace(id=7, ip="10.0.0.7", deleted_at=None)
-    with patch_lookups(mooncake_cache_service(), worker=None, instances=[]):
+    master_worker = SimpleNamespace(id=9, ip="10.0.0.9", deleted_at=None)
+    service = mooncake_cache_service(
+        config=CacheServiceConfig(
+            fields={"pool_mode": "standalone-store", "engine_segment_size": 0}
+        )
+    )
+    with patch_lookups(
+        service, worker=master_worker, instances=[mooncake_master_instance()]
+    ):
+        snapshot = await resolve_instance_cache_config(
+            MagicMock(), model, worker=instance_worker
+        )
+
+    assert snapshot.injected is True
+    config = json.loads(snapshot.files["/tmp/gpustack-mooncake.json"])
+    assert config["mode"] == "standalone-store"
+    assert config["global_segment_size"] == "0GB"
+
+
+@pytest.mark.asyncio
+async def test_resolve_cluster_attach_provider_serves_spanning_instances():
+    """Node-locality is the per_node providers' contract, not a
+    shared-cache property: a cross-host pool (Mooncake) serves
+    multi-worker instances by design — every subordinate worker's engine
+    reaches the master over the network."""
+    model = shared_cache_model()
+    instance_worker = SimpleNamespace(id=7, ip="10.0.0.7", deleted_at=None)
+    master_worker = SimpleNamespace(id=9, ip="10.0.0.9", deleted_at=None)
+    with patch_lookups(
+        mooncake_cache_service(),
+        worker=master_worker,
+        instances=[mooncake_master_instance()],
+    ):
         snapshot = await resolve_instance_cache_config(
             MagicMock(),
             model,
