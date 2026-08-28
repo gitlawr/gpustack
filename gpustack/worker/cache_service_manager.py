@@ -76,6 +76,14 @@ worker restart mid-start, a state write-back that did not reach the server —
 keeps the instance stuck."""
 
 
+def _running_on(loop: asyncio.AbstractEventLoop) -> bool:
+    """Whether the caller is already on that loop's thread."""
+    try:
+        return asyncio.get_running_loop() is loop
+    except RuntimeError:
+        return False
+
+
 class CacheServiceManager:
     """
     Runs managed cache service instances on this worker: launches the
@@ -123,6 +131,11 @@ class CacheServiceManager:
     re-drives its start nor treats the missing workload as a crash.
     """
 
+    _loop: Optional[asyncio.AbstractEventLoop]
+    """The worker's event loop, captured when the watch starts. Launches are
+    posted here from other threads so every fork happens on the same thread,
+    as it does in the model instance and benchmark managers."""
+
     _provision_log_dir: str
     """
     The directory holding the provisioning logs of cache service instances
@@ -162,6 +175,7 @@ class CacheServiceManager:
         self._starting = set()
         self._last_start_attempt = {}
         self._provisioning_processes = {}
+        self._loop = None
 
         # Consecutive crashes per instance, which drives the backoff and the
         # give-up budget. Kept out of the row because restart_count is the
@@ -178,6 +192,7 @@ class CacheServiceManager:
         """
         Loop to watch cache service instances' event and handle.
         """
+        self._loop = asyncio.get_running_loop()
         await watch_forever(
             "cache service instances",
             self._clientset.cache_service_instances.awatch,
@@ -210,10 +225,19 @@ class CacheServiceManager:
 
     def _schedule_start(self, instance: CacheServiceInstance):
         """
-        Run the launch off the watch event loop: allocating ports lists the
-        worker's instances, which must not block the loop. Without a running
-        loop (direct invocation), run inline. A start already in flight for
-        this instance is not started a second time.
+        Launch on the event loop thread, wherever the caller runs.
+
+        The launch forks the provisioning subprocess, and fork keeps only the
+        calling thread: a lock held by any other thread at that moment stays
+        locked in the child. That is not made better or worse by which thread
+        forks, but having all three managers fork from the same one leaves a
+        single place to change if the start method is ever revisited. The
+        model instance and benchmark managers fork from the loop, so this does
+        too, including on the stale-PENDING recovery path that runs on the
+        sync thread.
+
+        A start already in flight for this instance is not started a second
+        time.
         """
         if not self._claim_start(instance.id):
             logger.debug(
@@ -221,12 +245,19 @@ class CacheServiceManager:
                 "a start is already in flight"
             )
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+
+        loop = self._loop
+        if loop is None or _running_on(loop):
             self._start_cache_service_instance(instance)
             return
-        loop.run_in_executor(None, self._start_cache_service_instance, instance)
+
+        try:
+            loop.call_soon_threadsafe(self._start_cache_service_instance, instance)
+        except RuntimeError as e:
+            # The loop is closing; the claim would otherwise block the retry
+            # that a restarted worker makes.
+            self._release_start(instance.id)
+            logger.debug(f"Skipped starting cache service instance {instance.id}: {e}")
 
     def _claim_start(self, instance_id: int) -> bool:
         """Mark a start as in flight; False when one already is."""

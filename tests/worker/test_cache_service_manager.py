@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import tempfile
 from pathlib import Path
@@ -2109,3 +2110,61 @@ def test_teardown_purges_every_generation():
 
     assert list(log_dir.glob("79.*.log")) == []
 
+
+# ---------------------------------------------------------------------------
+# Where the launch runs
+# ---------------------------------------------------------------------------
+
+
+def test_launch_from_another_thread_is_posted_to_the_event_loop():
+    """The stale-PENDING recovery runs on the sync thread, but the launch
+    forks a subprocess and all three managers fork from the loop."""
+    import threading
+
+    manager, _ = _build_manager(worker_id=1)
+    loop = MagicMock()
+    manager._loop = loop
+    instance = _new_instance()
+
+    with patch.object(manager, "_start_cache_service_instance") as start:
+        thread = threading.Thread(target=manager._schedule_start, args=(instance,))
+        thread.start()
+        thread.join()
+
+        start.assert_not_called()
+        loop.call_soon_threadsafe.assert_called_once_with(start, instance)
+
+
+def test_launch_on_the_loop_thread_runs_inline():
+    """Posting to the loop from the loop would only defer the work a tick."""
+    manager, _ = _build_manager(worker_id=1)
+    instance = _new_instance()
+
+    async def drive():
+        manager._loop = asyncio.get_running_loop()
+        with patch.object(manager, "_start_cache_service_instance") as start:
+            manager._schedule_start(instance)
+        return start
+
+    start = asyncio.run(drive())
+
+    start.assert_called_once()
+    assert start.call_args[0][0].id == instance.id
+
+
+def test_a_closing_loop_releases_the_claim():
+    """Otherwise the claim outlives the loop and blocks the retry a restarted
+    worker makes."""
+    manager, _ = _build_manager(worker_id=1)
+    loop = MagicMock()
+    loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
+    manager._loop = loop
+    instance = _new_instance()
+
+    import threading
+
+    thread = threading.Thread(target=manager._schedule_start, args=(instance,))
+    thread.start()
+    thread.join()
+
+    assert instance.id not in manager._starting
