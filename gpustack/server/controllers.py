@@ -83,6 +83,7 @@ from gpustack.schemas.workloads import (
     WorkloadRestartPolicyEnum,
     WorkloadStateEnum,
 )
+from gpustack.server.model_instance_workloads import compile_model_instance
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.server.cache_services import resolve_instance_cache_config_safe
 from gpustack.schemas.workers import (
@@ -287,6 +288,7 @@ class ModelInstanceController:
         """
 
         model_instance: ModelInstance = event.data
+        await self._sync_workloads(event)
         # A cross-instance DELETE may carry only the id (see Event), so take
         # what the payload can give: the id always resolves, model_id only
         # when the event is hydrated.
@@ -369,6 +371,59 @@ class ModelInstanceController:
             logger.error(
                 "Failed to reconcile model instance "
                 f"{event_field(model_instance, 'name', instance_id)}: {e}"
+            )
+
+    async def _sync_workloads(self, event: Event):
+        """
+        Keep the instance's workload rows in step with its binding.
+
+        Written but not yet read: the worker still drives itself from the
+        model instance row. Compiling now means the mapping runs against real
+        instances -- including the distributed ones -- before anything depends
+        on it, and a wrong row is a wrong row rather than a stopped container.
+
+        See docs/proposals/workload-resource.md, stage 3.
+        """
+        instance_id = resolve_event_id(event)
+        if instance_id is None:
+            return
+        try:
+            async with async_session() as session:
+                existing = await Workload.all_by_fields(
+                    session,
+                    {
+                        "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                        "owner_id": instance_id,
+                    },
+                )
+                by_group_index = {
+                    workload.group_index: workload for workload in existing
+                }
+
+                if event.type == EventType.DELETED:
+                    for workload in existing:
+                        await workload.delete(session)
+                    return
+
+                instance = await ModelInstance.one_by_id(session, instance_id)
+                if instance is None:
+                    return
+
+                desired = compile_model_instance(instance)
+                for compiled in desired:
+                    current = by_group_index.pop(compiled.group_index, None)
+                    if current is None:
+                        await Workload.create(session, compiled)
+                        continue
+                    await current.update(session, compiled)
+
+                # A distributed instance that lost subordinate workers, or a
+                # backend that stopped delegating, leaves rows behind.
+                for stale in by_group_index.values():
+                    await stale.delete(session)
+        except Exception as e:
+            logger.error(
+                f"Failed to sync workloads of model instance {instance_id}: {e}"
             )
 
 
