@@ -14,6 +14,7 @@ import pytest
 
 from gpustack.schemas.cache_providers import CacheProvider
 from gpustack.schemas.cache_services import (
+    CacheServiceConfig,
     CacheServiceModeEnum,
     CacheServiceStateEnum,
 )
@@ -254,6 +255,53 @@ async def test_replicas_stack_on_one_worker_when_the_cluster_is_smaller(monkeypa
     assert len(stores) == 2
     assert {row.worker_id for row in stores} == {5}
     assert store.delete.await_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields,expected",
+    [({}, 1), ({"enable_ha": True, "master_replicas": 3}, 3)],
+)
+async def test_replica_sizing_follows_the_fields_gate(monkeypatch, fields, expected):
+    """A count offered only with a feature resolves to its gated default
+    while the feature is off, so the master runs alone until HA is on."""
+    from gpustack.schemas.cache_providers import (
+        CacheProviderComponent,
+        CacheProviderField,
+    )
+
+    provider = _pool_provider()
+    provider.managed_fields = [
+        CacheProviderField(name="enable_ha", type="boolean", default=False),
+        CacheProviderField(
+            name="master_replicas",
+            type="number",
+            default=3,
+            gated_default=1,
+            visible_by="enable_ha",
+            visible_when=True,
+        ),
+    ]
+    provider.components["master"] = CacheProviderComponent(
+        replicas_by="master_replicas",
+        attach_endpoint=True,
+        run_command="pool-master --port {{port}}",
+        gpu_access=False,
+    )
+    del provider.components["store"]
+    service = _service(worker_id=None, config=CacheServiceConfig(fields=fields))
+    create = _patch_reconcile(
+        monkeypatch,
+        provider,
+        workers=[_worker(5), _worker(6), _worker(7)],
+        worker=_worker(5),
+        instance_lists=[[], []],
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reconcile_service(MagicMock(), service)
+
+    assert create.await_count == expected
 
 
 @pytest.mark.asyncio

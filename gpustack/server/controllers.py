@@ -76,6 +76,7 @@ from gpustack.schemas.cache_services import (
     CacheServiceModeEnum,
     CacheServiceStateEnum,
 )
+from gpustack.schemas.cache_providers import resolved_field_values
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.server.cache_services import resolve_instance_cache_config_safe
 from gpustack.schemas.workers import (
@@ -365,14 +366,21 @@ class ModelInstanceController:
             )
 
 
-def _component_replica_count(spec, config_fields: Optional[Dict[str, Any]]) -> int:
+def _component_replica_count(
+    spec, provider, config_fields: Optional[Dict[str, Any]]
+) -> int:
     """The component's replica count: its declared one unless a managed
     field sizes it (a value below one, or one that is not a number at
-    all, keeps the declaration)."""
+    all, keeps the declaration). The sizing field resolves through its
+    visibility gate, so a count offered only with a feature falls back to
+    the gated default while the feature is off."""
     count = spec.replicas if spec else 1
     if spec is None or not spec.replicas_by:
         return count
-    configured = (config_fields or {}).get(spec.replicas_by)
+    resolved = resolved_field_values(
+        provider.managed_fields if provider else [], config_fields or {}
+    )
+    configured = resolved.get(spec.replicas_by)
     try:
         if configured is not None and int(configured) >= 1:
             count = int(configured)
@@ -909,7 +917,7 @@ class CacheServiceController:
                 continue
 
             spec = provider.get_component(component) if provider else None
-            count = _component_replica_count(spec, config_fields)
+            count = _component_replica_count(spec, provider, config_fields)
 
             pinned: Set[int] = set()
             if service.worker_id:
