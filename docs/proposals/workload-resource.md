@@ -1,8 +1,10 @@
 # 提案：通用 Workload 资源
 
-状态：草案，阶段 0 POC 已完成
+状态：实施中 —— 阶段 0/1/2 完成，阶段 3 约一半（见 §4）
 目标：模型实例、基准测试、缓存服务实例三类负载统一编译到一个 Workload 资源
 影响范围：新增 `workloads` 表；三类负载的用户面 API **保持不变**
+
+> 实施中新增的结论散在 §2.6、§3、§4 各阶段小节里，都标了「实施中发现」。它们是这份提案里唯一不来自设计推演、而来自把代码写出来的部分。
 
 ## 1. 目标形态
 
@@ -127,9 +129,16 @@ workloads
   ports                                          -- JSON: {"service": 40001, "metrics": 40002}
   pid, arguments                                 -- JSON
   restart_count, last_restart_time
+  started_at                                     -- 容器何时开始，见下
   healthy, last_check_at
   progress                                       -- 供给进度，见 §2.4
 ```
+
+`started_at`（**实施中发现**）：`active_deadline_seconds` 必须从某个时刻起算，而行的 `created_at` 是它**被创建**的时刻——对排队等前一个跑完的基准测试来说，两者差着整段排队时间。对应 Kubernetes Job 的 `status.startTime`，由 worker 在容器启动时写入。
+
+**枚举必须自定义 `__str__` 返回 value**（**实施中发现**）：生成的客户端用 `str(属性)` 比对 `str(查询值)` 过滤 watch 缓存，而裸的 `class X(str, Enum)` 渲染成 `"X.MEMBER"`——**任何按枚举字段的缓存过滤会静默返回空列表，不是报错**。缓存服务的对账循环正是这样读实例的，读到空的含义是「服务器不再报告这些」，也就是回收容器的输入。`CacheServiceStateEnum` 早就为此定义了 `__str__`。
+
+**读缓存时不要传 `page` 参数**（**实施中发现**）：客户端只要看到 page 就整个跳过缓存直接打 API。高频读（每次状态写回）传 `page=-1` 会变成每次一个全量 HTTP 请求。
 
 `ports` 是唯一的端口载体，**不要另设 `port` 列**：`_assign_ports` 里 `mi.ports = [mi.port]` 然后 extend，两者恒为同一个端口，拆成两列只会让它们漂移。第一个端口通用命名为 `service`，其余由各 backend 自己的 compiler 命名——`ports[1:]` 的布局取决于 backend 与 executor（vLLM/mp 是 DP-RPC + master-port + VLLM_PORT，vLLM/ray 仅 dp>1 时有 DP-RPC，其他 backend 没有），且 connecting port 恒在末位，通用层猜不了。
 
@@ -182,46 +191,63 @@ UNIQUE (owner_kind, owner_id, worker_id, group_index)
 
 **顺带发现**：`RUN_FIRST` 在生产路径上是死的。调度器只对 vLLM / SGLang / MindIE 设 `INITIALIZE_LATER`，其余留默认 `DELEGATED`，无处设 `RUN_FIRST`。迁移时可确认是否保留。
 
-### 阶段 1：缓存服务实例（免迁移窗口）
+### 阶段 1：缓存服务实例 —— 已完成 ✅
 
-缓存服务尚未发布，**这是唯一不需要数据迁移的窗口**——建表 + 删表，无回填、无双写期。
+免迁移窗口用掉了：建 `workloads` 表、删 `cache_service_instances`，不是数据迁移。
 
-- 建 `workloads` 表，删 `cache_service_instances`
-- `CacheServiceController` 改为编译 Workload + 聚合状态
-- `cache_service_manager` 改为 watch `workloads`（filter `owner_kind='cache_service'`），**这一步之后它就是 Workload 控制回路的雏形**
-- 前端零改动（见 §6）
+**唯一完整迁移的一类**——Workload 就是权威，没有影子阶段。controller 编译并聚合状态，`cache_service_manager` watch `workloads`（filter `owner_kind`），前端零改动。
 
-迁移链是单线的（36 个 revision，单 head `b7e2c4d15a80`，无分支），`cache_service_instances` 由 `d5e8f0a1b2c3` 创建，必然在新 revision 之前执行，所以 `drop_table` 无需条件判断。
+兑现的收益与预测一致：租户过滤不再对父表子查询（workload 自带 `owner_principal_id`）；端点解析的 RUNNING 筛选下推到查询（它每次模型实例调度都跑）；exporter 必须声明 `owner_kind`，否则会连另外两类的行一起收走——**这是整个迁移里唯一不会大声失败的错误**。
 
-### 阶段 2：基准测试
+容器名从 `cache-svc-{服务}-i{实例}` 变成 `cache-svc-{服务}-w{worker}`：name 就是容器名、必须先于行存在，所以不能用行 id，而 (服务, worker) 本来就是身份。
 
-天然的 Job 形态，验证 `restart_policy=never` + `active_deadline_seconds`。
+### 阶段 2：基准测试 —— 已完成 ✅
 
-`Benchmark` 表**不减字段**，只是执行部分（`state` / `pid` / `worker_id`）改为从子 Workload 聚合。API 不变。
+**实际在阶段 3 之后做**，导致 `restart_policy` 和 `active_deadline_seconds` 一度没有消费者。
 
-明确**不下沉**的两样：
+`restart_policy = never` 第一次有了填写者:基准测试退出是**完成**不是故障。三个状态没有容器可描述——`pending` / `queued` / `stopped`——都留在 workload 的 pending；`queued` 尤其说明问题,那是服务端决定 worker 下一个跑哪个,不是执行。
 
-- **结果收集** —— `_collect_results`（`benchmark_manager.py:767` 起约 400 行）从容器写出的 point 文件读、聚合、回写 metrics。领域逻辑。
-- **串行队列** —— `_active_benchmark_id` 保证同 worker 同时只跑一个压测（独占 GPU）。这是**准入/调度语义**，按「调度是上层职责」应留在 server 侧：同一 worker 上只把一个基准测试置为 assigned。Workload 层不引入队列或并发上限概念。
+**`active_deadline_seconds` 的消费顺带修掉一个洞**(**实施中发现**):worker 原本从内存时间戳起算超时,worker 中途重启后时间戳为 None,`_is_benchmark_timed_out` 从此永远返回 False,跑飞的基准测试一直占着 GPU。deadline 改从 workload 行取即可幸存。这也是 `started_at` 被识别出来的原因(见 §3)。
 
-### 阶段 3：模型实例
+状态镜像已补齐,与模型实例同形。仍未做:折叠回 Benchmark 行(它仍是权威)。
 
-爆炸半径最大，涉及调度器与分布式拓扑。前置条件是阶段 0 的结论已在阶段 1、2 上验证过。
+**明确不下沉的两样**保持原判:结果收集(领域逻辑)、串行队列(`_active_benchmark_id` 是准入语义,留在 server 侧)。
 
-- 调度器的绑定结果直接写进 Workload（`worker_id` + `gpu_indexes` + `computed_resource_claim`）
-- `distributed_servers.subordinate_workers[]` 提升为多行，按 `group_key` 关联
-- `ModelInstance` 保留自己的完整生命周期（含 `ANALYZING` / `SCHEDULED` / `DOWNLOADING`），controller 映射执行子集
+### 阶段 3：模型实例 —— 约一半 🔶
 
-这一阶段有数据迁移（模型实例已发布），需要回填 + 回滚方案。
+提案原本只有三条要求,实施时拆成四步:
 
-### 与 worker 控制回路抽取的关系
+| 步骤 | 状态 |
+|---|---|
+| 1. 编译成 Workload 行 | ✅ 写入,无人消费 |
+| 2a. 执行状态镜像到 Workload | ✅ 双写,实例行仍权威 |
+| 2b. 折叠回实例 | 🔶 **代码就位,仅比对,开关关闭** |
+| 3. 调度器直接写绑定、`subordinate_workers[]` 变成行 | ⬜ 未开始 |
+| 4. 从 ModelInstance 摘字段(真实数据迁移) | ⬜ 未开始 |
 
-worker 侧共享库（`worker/controlloop/`）已抽出 `watcher` / `workload_state` / `writeback`，这三块与资源模型正交。**剩下的 `ports` 和 `reaper` 应该等阶段 1 之后再抽**：
+**为什么 2b 不直接翻**:它一旦生效就是实例状态的唯一来源,而折叠错了实例永远出不了 STARTING——第一现场会是生产环境。所以折叠照常运行但只记录分歧:
 
-- `ports` —— 统一需要命名端口模型，那正是 §3 的一部分
-- `reaper` —— 如果 workload 成为单一资源，`workload_cleaner.py` 从「按 type label 分三支、每支一次 API list」退化成「列本 worker 的 workloads，与运行时对账」，注册制那套设计不需要存在
+```
+Workload fold disagrees with model instance ...
+```
 
-`backoff` 与资源模型无关，可随时抽（顺带修掉 serve 的退避指数只存内存、worker 重启后归零、且无重启上限的问题）。
+**沉默就是可以翻转的证据。** `GPUSTACK_MODEL_INSTANCE_STATE_FROM_WORKLOADS=true` 是开关,它随步骤 4 一起消失。
+
+折叠逻辑对着 `_get_main_worker_distributed_state` 逐项验证:两个 follower 的 16 种状态组合全部与生产实现比对。
+
+**`pending` 折不回去**(**实施中发现**):`scheduled` / `initializing` / `downloading` 三个实例状态全都镜像成 workload 的 `pending`,折回去会把更丰富的实例状态替换成更贫乏的。这些状态属于实例自己的生命周期——正是 §2.3 那条边界从另一侧看的样子,也是它第一次被动验证。
+
+步骤 3 的规模需要预先知道:**68 个文件引用 `ModelInstance`**,`distributed_servers` 散在 20 个文件里,含调度器、全部候选选择器、放置打分器、资源核算和四个 backend。
+
+### 与 worker 控制回路抽取的关系 —— 已完成 ✅
+
+8 块全部抽出(`gpustack/worker/controlloop/`,约 1100 行):
+
+`watcher` / `workload_state` / `writeback` / `backoff` / `container_logs` / `launcher` / `reaper` / `ports`
+
+后两块原本卡在资源模型,阶段 1 之后解锁。`reaper` 最终没有退化成单一对账——只迁了缓存服务,三个 kind 的分支仍是实的,所以做成了注册制。
+
+抽取过程中修掉的既有缺陷:serve 的重启退避指数只存内存(worker 重启后归零)、孤儿回收在活跃集读取失败时会当成「没有活跃的」、三个供给子进程的前导重复了三遍。
 
 ## 5. 级联删除：从外键降级为 controller GC
 
@@ -287,7 +313,25 @@ worker 侧共享库（`worker/controlloop/`）已抽出 `watcher` / `workload_st
 
 ## 8. 待决
 
-- 阶段 1 是否现在做（§7 的取舍；POC 已把「模型是猜的」这条风险消掉）
-- §5 的 GC 三层是否先于阶段 1 单独加固
-- `DELEGATED` 的资源预留：用 `managed` 字段，还是把多节点 claim 并到 leader workload
-- 两个既存问题（DELEGATED 从属节点被判 ERROR、同机 follower 不被管理）是否独立立项修复
+**已决定的**（记录在此,免得重新讨论）:
+
+- 阶段 1 现在做 —— 已完成
+- GC 三层先于阶段 1 单独加固 —— 已完成(§5)
+- `DELEGATED` 的资源预留并入 leader 的 `reserved_claims`,不用 `managed` 字段 —— 见 §2.5
+
+**待决的**:
+
+- **翻 `GPUSTACK_MODEL_INSTANCE_STATE_FROM_WORKLOADS`** —— 前提是分歧日志为空。这是阶段 3 往下走的闸门。
+- **基准测试的折叠**是否也做(目前 Benchmark 行仍权威)
+- **两个既存问题是否独立立项**:DELEGATED 从属节点被对账循环写成 ERROR(**可达性待产品确认**:v2 的 `BackendEnum` 里没有 llama-box,GGUF 分布式能否真走到多 worker 调度,代码判断不了);与 leader 同机的 follower 永远不被管理
+- **serve 无重启上限**:缓存服务 5 次后 park 到 ERROR,模型实例永远重启。判断是产品语义不是缺陷(推理服务的失败常常是外部的,且用户能用 `restart_on_error` 关掉),未改
+- **serve 的退避不持久化**:`restart_count` 是日志文件的代号必须单调,不能兼任连续崩溃计数,所以持久化需要另开一列。当期明确不做
+
+## 9. 验证清单
+
+19 个 commit 全部测试绿,但**没有一行在真实环境跑过**。按信息量排:
+
+1. **缓存服务** —— 唯一完整迁移的。删除服务,容器应秒级消失(原来最多约 7 分钟);`previous=true` 能看到上一次的**容器**日志
+2. **分歧日志** —— 搜 `Workload fold disagrees with model instance`。空 = 折叠站得住
+3. **基准测试超时** —— 设了 `benchmark_max_duration_seconds` 后中途重启 worker,超时应仍触发
+4. **回归面** —— 模型实例和基准测试行为应完全不变(权威数据源都没动)
