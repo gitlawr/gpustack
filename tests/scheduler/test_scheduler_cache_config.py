@@ -107,6 +107,12 @@ def _schedule_patches(model, model_instance, candidate, resolve_mock, service_mo
             resolve_mock,
         ),
         patch("gpustack.scheduler.scheduler.ModelInstanceService", service_mock),
+        # The binding transaction now also writes the instance's workload
+        # rows; these tests are about the cache config it resolves.
+        patch(
+            "gpustack.scheduler.scheduler.sync_model_instance_workloads",
+            AsyncMock(),
+        ),
     )
 
 

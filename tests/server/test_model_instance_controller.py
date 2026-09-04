@@ -24,7 +24,7 @@ from gpustack.server.controllers import (
     ModelInstanceWorkloadStateController,
 )
 
-_ANY_INSTANCE = object()
+_ANY_INSTANCE = SimpleNamespace(id=3)
 
 
 class _FakeSessionCtx:
@@ -62,6 +62,10 @@ def _workload_sync(monkeypatch, existing, compiled, instance=_ANY_INSTANCE):
         "gpustack.server.controllers.async_session", lambda: _FakeSessionCtx()
     )
     monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.all_by_fields",
+        AsyncMock(return_value=existing),
+    )
+    monkeypatch.setattr(
         "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(return_value=existing),
     )
@@ -70,10 +74,13 @@ def _workload_sync(monkeypatch, existing, compiled, instance=_ANY_INSTANCE):
         AsyncMock(return_value=instance),
     )
     monkeypatch.setattr(
-        "gpustack.server.controllers.compile_model_instance", lambda mi: compiled
+        "gpustack.server.model_instance_workloads.compile_model_instance",
+        lambda mi: compiled,
     )
     create = AsyncMock()
-    monkeypatch.setattr("gpustack.server.controllers.Workload.create", create)
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.create", create
+    )
     yield create
 
 

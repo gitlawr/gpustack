@@ -7,6 +7,8 @@ Asserted against the production code the mapping has to agree with:
 """
 
 import itertools
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -31,6 +33,7 @@ from gpustack.server.model_instance_workloads import (
     aggregate_instance_state,
     compile_model_instance,
     named_ports,
+    sync_model_instance_workloads,
 )
 
 
@@ -354,3 +357,92 @@ def test_the_fold_agrees_with_what_the_worker_decides_today(states):
         assert folded is None  # hold
     else:
         assert folded["state"] == reference["state"]
+
+
+# ---------------------------------------------------------------------------
+# Keeping the rows in step with the binding
+# ---------------------------------------------------------------------------
+
+
+class _Row(SimpleNamespace):
+    pass
+
+
+def _existing(group_index):
+    return _Row(group_index=group_index, update=AsyncMock(), delete=AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_sync_creates_a_row_per_container(monkeypatch):
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.all_by_fields",
+        AsyncMock(return_value=[]),
+    )
+    create = AsyncMock()
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.create", create
+    )
+
+    await sync_model_instance_workloads(
+        MagicMock(),
+        _instance(
+            mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER, followers=2
+        ),
+    )
+
+    assert create.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_sync_updates_in_place_so_the_row_id_does_not_move(monkeypatch):
+    """The worker reports against these rows and keys its logs by their id;
+    recreating them on every reconcile would move both."""
+    existing = [_existing(0)]
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.all_by_fields",
+        AsyncMock(return_value=existing),
+    )
+    create = AsyncMock()
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.create", create
+    )
+
+    await sync_model_instance_workloads(MagicMock(), _instance())
+
+    create.assert_not_awaited()
+    existing[0].update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_drops_rows_for_followers_that_are_gone(monkeypatch):
+    existing = [_existing(0), _existing(1)]
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.all_by_fields",
+        AsyncMock(return_value=existing),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.create", AsyncMock()
+    )
+
+    await sync_model_instance_workloads(MagicMock(), _instance())
+
+    existing[0].update.assert_awaited_once()
+    existing[1].delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_writes_the_spec_not_the_state(monkeypatch):
+    existing = [_existing(0)]
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.all_by_fields",
+        AsyncMock(return_value=existing),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.create", AsyncMock()
+    )
+
+    await sync_model_instance_workloads(MagicMock(), _instance())
+
+    update = existing[0].update.await_args.args[1]
+    assert update.worker_id == 1
+    assert "state" not in update.model_fields_set

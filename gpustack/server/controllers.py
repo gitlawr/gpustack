@@ -87,7 +87,7 @@ from gpustack.schemas.benchmark import Benchmark
 from gpustack.server.benchmark_workloads import compile_benchmark
 from gpustack.server.model_instance_workloads import (
     aggregate_instance_state,
-    compile_model_instance,
+    sync_model_instance_workloads,
     workload_spec,
 )
 from gpustack.server.cache_provider_catalog import get_cache_provider
@@ -395,42 +395,21 @@ class ModelInstanceController:
             return
         try:
             async with async_session() as session:
-                existing = await Workload.all_by_fields(
-                    session,
-                    {
-                        "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
-                        "owner_id": instance_id,
-                    },
-                )
-                by_group_index = {
-                    workload.group_index: workload for workload in existing
-                }
-
                 if event.type == EventType.DELETED:
-                    for workload in existing:
+                    for workload in await Workload.all_by_fields(
+                        session,
+                        {
+                            "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                            "owner_id": instance_id,
+                        },
+                    ):
                         await workload.delete(session)
                     return
 
                 instance = await ModelInstance.one_by_id(session, instance_id)
                 if instance is None:
                     return
-
-                desired = compile_model_instance(instance)
-                for compiled in desired:
-                    current = by_group_index.pop(compiled.group_index, None)
-                    if current is None:
-                        await Workload.create(session, compiled)
-                        continue
-                    # Spec and binding only. Execution state is the worker's
-                    # to write -- it mirrors it onto these rows as it goes --
-                    # and compiling it back from the instance on every event
-                    # would overwrite what the worker just reported.
-                    await current.update(session, workload_spec(compiled))
-
-                # A distributed instance that lost subordinate workers, or a
-                # backend that stopped delegating, leaves rows behind.
-                for stale in by_group_index.values():
-                    await stale.delete(session)
+                await sync_model_instance_workloads(session, instance)
         except Exception as e:
             logger.error(
                 f"Failed to sync workloads of model instance {instance_id}: {e}"

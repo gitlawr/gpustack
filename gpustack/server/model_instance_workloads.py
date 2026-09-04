@@ -209,6 +209,44 @@ SPEC_FIELDS = frozenset(
 owns the rest, so recompiling must not write over it."""
 
 
+async def sync_model_instance_workloads(session, instance: ModelInstance) -> None:
+    """
+    Bring an instance's workload rows in line with its binding.
+
+    Shared by the scheduler, which calls it in the transaction that writes the
+    binding, and by the controller, which is the level-triggered backstop for
+    everything the scheduler is not the source of. Without the scheduler call
+    the rows appear a controller hop after the instance is bound, and the
+    worker can start inside that window -- with nowhere to report to.
+
+    Idempotent: an existing row is updated in place, so the id the worker
+    reports against does not move.
+    """
+    existing = await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+            "owner_id": instance.id,
+        },
+    )
+    by_group_index = {workload.group_index: workload for workload in existing}
+
+    for compiled in compile_model_instance(instance):
+        current = by_group_index.pop(compiled.group_index, None)
+        if current is None:
+            await Workload.create(session, compiled)
+            continue
+        # Spec and binding only. Execution state is the worker's to write --
+        # it mirrors it onto these rows as it goes -- and recompiling it from
+        # the instance would overwrite what the worker just reported.
+        await current.update(session, workload_spec(compiled))
+
+    # A distributed instance that lost subordinate workers, or a backend that
+    # started delegating, leaves rows behind.
+    for stale in by_group_index.values():
+        await stale.delete(session)
+
+
 def workload_spec(workload: Workload) -> WorkloadUpdate:
     """The spec half of a compiled workload, for updating an existing row."""
     return WorkloadUpdate(

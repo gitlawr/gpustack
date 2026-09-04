@@ -67,6 +67,9 @@ from gpustack.scheduler.calculator import (
     check_diffusers_model_index_from_workers,
 )
 from gpustack.server.cache_services import resolve_instance_cache_config_safe
+from gpustack.server.model_instance_workloads import (
+    sync_model_instance_workloads,
+)
 from gpustack.server.services import (
     ModelInstanceService,
     ModelService,
@@ -414,6 +417,13 @@ class Scheduler:
                     )
 
                 await ModelInstanceService(session).update(model_instance)
+
+                # In the same transaction as the binding: the workload rows
+                # would otherwise appear a controller hop later, and the worker
+                # reacts to SCHEDULED. Inside that window it can start a
+                # container with no row to report against. The controller
+                # remains the level-triggered backstop.
+                await sync_model_instance_workloads(session, model_instance)
 
                 logger.debug(
                     f"Scheduled model instance {model_instance.name} to worker "
