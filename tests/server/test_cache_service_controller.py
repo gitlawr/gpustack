@@ -204,6 +204,123 @@ def _pool_provider() -> CacheProvider:
     )
 
 
+def _store_pool_provider(replicas: int) -> CacheProvider:
+    from gpustack.schemas.cache_providers import CacheProviderComponent
+
+    provider = _pool_provider()
+    provider.components["store"] = CacheProviderComponent(
+        topology="replicas",
+        replicas=replicas,
+        depends_on="master",
+        run_command="pool-store --port {{port}}",
+        gpu_access=False,
+    )
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_replicas_stack_on_one_worker_when_the_cluster_is_smaller(monkeypatch):
+    """A replica is a process, not a node claim: a cluster smaller than
+    the replica count runs several on the same worker rather than
+    silently shrinking the pool."""
+    service = _service(worker_id=None)
+    master = _instance(
+        id=21,
+        worker_id=5,
+        component="master",
+        state=CacheServiceStateEnum.RUNNING,
+        port=50051,
+    )
+    store = _instance(
+        id=22,
+        worker_id=5,
+        component="store",
+        state=CacheServiceStateEnum.RUNNING,
+        component_addresses={"master": "10.0.0.5:50051"},
+    )
+    create = _patch_reconcile(
+        monkeypatch,
+        _store_pool_provider(3),
+        workers=[_worker(5, ip="10.0.0.5")],
+        worker=_worker(5, ip="10.0.0.5"),
+        instance_lists=[[master, store], [master, store]],
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reconcile_service(MagicMock(), service)
+
+    created = [call.args[1] for call in create.await_args_list]
+    stores = [row for row in created if row.component == "store"]
+    assert len(stores) == 2
+    assert {row.worker_id for row in stores} == {5}
+    assert store.delete.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_replicas_spread_before_stacking(monkeypatch):
+    """Two workers take one replica each before either takes a second."""
+    service = _service(worker_id=None)
+    master = _instance(
+        id=21,
+        worker_id=5,
+        component="master",
+        state=CacheServiceStateEnum.RUNNING,
+        port=50051,
+    )
+    create = _patch_reconcile(
+        monkeypatch,
+        _store_pool_provider(3),
+        workers=[_worker(5, ip="10.0.0.5"), _worker(6, ip="10.0.0.6")],
+        worker=_worker(5, ip="10.0.0.5"),
+        instance_lists=[[master], [master]],
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reconcile_service(MagicMock(), service)
+
+    placements = sorted(
+        row.worker_id
+        for row in (call.args[1] for call in create.await_args_list)
+        if row.component == "store"
+    )
+    assert placements == [5, 5, 6]
+
+
+@pytest.mark.asyncio
+async def test_lowered_replica_count_deletes_the_surplus(monkeypatch):
+    service = _service(worker_id=None)
+    master = _instance(
+        id=21,
+        worker_id=5,
+        component="master",
+        state=CacheServiceStateEnum.RUNNING,
+        port=50051,
+    )
+    addresses = {"master": "10.0.0.5:50051"}
+    stores = [
+        _instance(
+            id=22 + offset,
+            worker_id=5,
+            component="store",
+            state=CacheServiceStateEnum.RUNNING,
+            component_addresses=addresses,
+        )
+        for offset in range(3)
+    ]
+    _patch_reconcile(
+        monkeypatch,
+        _store_pool_provider(1),
+        workers=[_worker(5, ip="10.0.0.5")],
+        worker=_worker(5, ip="10.0.0.5"),
+        instance_lists=[[master, *stores], [master, stores[0]]],
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reconcile_service(MagicMock(), service)
+
+    assert [store.delete.await_count for store in stores] == [0, 1, 1]
+
+
 @pytest.mark.asyncio
 async def test_dependent_component_gets_stamped_dependency_address(monkeypatch):
     """Stores are created only once the master runs with a known port,

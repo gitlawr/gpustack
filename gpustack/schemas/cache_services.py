@@ -216,12 +216,12 @@ CacheServicesPublic = PaginatedList[CacheServicePublic]
 
 class CacheServiceInstanceBase(SQLModel):
     """One cache server container of a managed cache service. The parent
-    service's provider topology dictates the desired set: replicas
-    providers get exactly one instance on the user-picked worker; per-node
-    providers get one instance per non-deleted worker of the service's
-    cluster (narrowed by the service's worker_selector when one is set);
-    rows on NOT_READY workers are kept — the worker restarts its
-    container when it comes back.
+    provider's topology dictates the desired rows: a replicas component
+    gets its configured count placed across the cluster's matching
+    workers, packing more than one onto a worker whose allocatable RAM
+    holds their declared claims; a per_node component gets one instance
+    per non-deleted matching worker. Rows on NOT_READY workers are kept —
+    the worker restarts its container when it comes back.
     """
 
     component: str = Field(
@@ -229,8 +229,7 @@ class CacheServiceInstanceBase(SQLModel):
     )
     """Which of the provider's declared components this instance runs
     (e.g. Mooncake's "master" / "store"). Empty for single-component
-    providers — a real value, not NULL, so it participates in the
-    (service, worker, component) uniqueness on every database."""
+    providers."""
 
     component_addresses: Optional[Dict[str, str]] = Field(
         sa_column=Column(JSON), default=None
@@ -307,17 +306,6 @@ class CacheServiceInstanceBase(SQLModel):
 
 class CacheServiceInstance(CacheServiceInstanceBase, BaseModelMixin, table=True):
     __tablename__ = "cache_service_instances"
-    __table_args__ = (
-        # Components of one service may share a worker (Mooncake's
-        # master rides a worker its store also runs on), so uniqueness
-        # is per component.
-        UniqueConstraint(
-            "cache_service_id",
-            "worker_id",
-            "component",
-            name="uix_cache_service_instances_service_worker_component",
-        ),
-    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
 

@@ -2,11 +2,10 @@
 
 Adds the ``component`` column to ``cache_service_instances``: which of
 the provider's declared components (e.g. Mooncake's master / store) the
-instance runs. Single-component providers store the empty string — a
-real value, not NULL, so it can participate in the widened uniqueness
-below (NULLs compare distinct inside unique constraints on every
-supported database). Components of one service may share a worker, so
-the (service, worker) uniqueness gains the component column.
+instance runs; single-component providers store the empty string. The
+(service, worker) uniqueness goes with it: components of one service
+may share a worker, and a replicas component may place several of its
+own instances on one worker whose RAM holds them.
 
 Revision ID: c9d3e5f7a1b2
 Revises: b7e2c4d15a80
@@ -27,7 +26,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 _TABLE = "cache_service_instances"
 _OLD_UNIQUE = "uix_cache_service_instances_service_worker"
-_NEW_UNIQUE = "uix_cache_service_instances_service_worker_component"
 
 
 def upgrade() -> None:
@@ -45,15 +43,9 @@ def upgrade() -> None:
         sa.Column("component_addresses", sa.JSON(), nullable=True),
     )
     op.drop_constraint(_OLD_UNIQUE, _TABLE, type_="unique")
-    op.create_unique_constraint(
-        _NEW_UNIQUE,
-        _TABLE,
-        ["cache_service_id", "worker_id", "component"],
-    )
 
 
 def downgrade() -> None:
-    op.drop_constraint(_NEW_UNIQUE, _TABLE, type_="unique")
     op.create_unique_constraint(
         _OLD_UNIQUE,
         _TABLE,

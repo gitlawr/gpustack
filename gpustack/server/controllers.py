@@ -365,6 +365,22 @@ class ModelInstanceController:
             )
 
 
+def _component_replica_count(spec, config_fields: Optional[Dict[str, Any]]) -> int:
+    """The component's replica count: its declared one unless a managed
+    field sizes it (a value below one, or one that is not a number at
+    all, keeps the declaration)."""
+    count = spec.replicas if spec else 1
+    if spec is None or not spec.replicas_by:
+        return count
+    configured = (config_fields or {}).get(spec.replicas_by)
+    try:
+        if configured is not None and int(configured) >= 1:
+            count = int(configured)
+    except (TypeError, ValueError):
+        pass
+    return count
+
+
 class CacheServiceController:
     """
     Reconciles managed cache services onto their desired CacheServiceInstance
@@ -702,7 +718,14 @@ class CacheServiceController:
         addresses = await self._component_addresses(session, provider, instances)
 
         surviving: List[CacheServiceInstance] = []
-        existing_keys: Set[Tuple[str, int]] = set()
+        # How many rows of each (component, worker) pair the desired
+        # layout still has room for; a replica beyond that count is
+        # surplus (the count dropped, or the pool moved elsewhere).
+        room: Dict[Tuple[str, int], int] = {
+            (component, worker_id): replicas
+            for component, layout in desired_by_component.items()
+            for worker_id, replicas in layout.items()
+        }
         for instance in instances:
             component = instance.component or ""
             spec = provider.get_component(component) if provider else None
@@ -716,17 +739,16 @@ class CacheServiceController:
                 stale_address = bool(expected) and (
                     (instance.component_addresses or {}) != expected
                 )
-            if (
-                instance.worker_id not in desired_by_component.get(component, set())
-                or stale_address
-            ):
+            key = (component, instance.worker_id)
+            surplus = room.get(key, 0) <= 0
+            if surplus or stale_address:
                 await instance.delete(session)
                 reason = (
                     "its dependency's address changed"
                     if stale_address
                     else (
-                        f"worker {instance.worker_id} left the desired "
-                        f"set of component '{component}'"
+                        f"worker {instance.worker_id} holds no more replicas "
+                        f"of component '{component}'"
                     )
                 )
                 logger.info(
@@ -735,9 +757,9 @@ class CacheServiceController:
                 )
             else:
                 surviving.append(instance)
-                existing_keys.add((component, instance.worker_id))
+                room[key] -= 1
 
-        for component, desired_worker_ids in desired_by_component.items():
+        for component, layout in desired_by_component.items():
             spec = provider.get_component(component) if provider else None
             instance_addresses: Optional[Dict[str, str]] = None
             if spec is not None and spec.depends_on:
@@ -745,12 +767,13 @@ class CacheServiceController:
                     # Converges on the dependency's RUNNING event.
                     continue
                 instance_addresses = {spec.depends_on: addresses[spec.depends_on]}
-            missing = desired_worker_ids - {
+            # Whatever room the surviving rows left over is what to create.
+            missing = [
                 worker_id
-                for existing_component, worker_id in existing_keys
-                if existing_component == component
-            }
-            for worker_id in sorted(missing):
+                for worker_id in sorted(layout)
+                for _ in range(room.get((component, worker_id), 0))
+            ]
+            for worker_id in missing:
                 # Same display-name convention as model instances: the
                 # parent's name (as of instance creation; a later service
                 # rename does not rename instances), the component role
@@ -826,22 +849,23 @@ class CacheServiceController:
         session: AsyncSession,
         service: CacheService,
         instances: List[CacheServiceInstance],
-    ) -> Tuple[Dict[str, Set[int]], Optional[str], bool]:
-        """The workers each provider component should have instances on
-        ("" keys the sole component of single-component providers), an
-        error message when a desired set is unsatisfiable, and whether
-        the instance rows should still be reconciled. A per_node selector
-        matching nothing is an authoritative empty set — labels change
-        only by explicit edits, so the instances follow (the selector can
-        scale the service to zero) and the service parks in ERROR to say
-        why. A replicas component is scheduler-placed: an explicit
-        service worker_id pins one replica, the rest stay sticky to the
-        workers they already run on and top up from the lowest-id
-        matching workers. A pinned worker vanishing is a fault that
-        parks the service without touching its rows (the user chose it);
-        an auto-placed replica just moves (pool reset — the provider
-        self-heals by remounting). Fewer matching workers than replicas
-        deploys what fits: a smaller pool beats parking the service."""
+    ) -> Tuple[Dict[str, Dict[int, int]], Optional[str], bool]:
+        """How many instances each provider component should have on each
+        worker ("" keys the sole component of single-component
+        providers), an error message when a desired layout is
+        unsatisfiable, and whether the instance rows should still be
+        reconciled. A per_node selector matching nothing is
+        an authoritative empty layout — labels change only by explicit
+        edits, so the instances follow (the selector can scale the
+        service to zero) and the service parks in ERROR to say why. A
+        replicas component is scheduler-placed: an explicit service
+        worker_id pins one replica, the rest stay sticky to where they
+        already run and spread over the matching workers by lowest id,
+        wrapping around so a cluster smaller than the replica count
+        stacks the remainder on workers it already uses. A pinned worker
+        vanishing is a fault that parks the service without touching its
+        rows (the user chose it); an auto-placed replica just moves (pool
+        reset — the provider self-heals by remounting)."""
         provider = get_cache_provider(service.provider_name)
         layouts = provider.component_layouts() if provider else {"": "replicas"}
         multi_component = bool(provider and provider.components)
@@ -860,13 +884,13 @@ class CacheServiceController:
         matching_ids = {worker.id for worker in matching}
 
         config_fields = service.config.fields if service.config else None
-        desired: Dict[str, Set[int]] = {}
+        desired: Dict[str, Dict[int, int]] = {}
         for component, topology in layouts.items():
             # A component turned off by its managed field keeps no
             # instances: its desired set is empty, and the diff below
             # deletes any leftovers from before the toggle.
             if provider and not provider.component_enabled(component, config_fields):
-                desired[component] = set()
+                desired[component] = {}
                 continue
             if topology == "per_node":
                 if not workers:
@@ -881,18 +905,11 @@ class CacheServiceController:
                         f"No workers match the worker selector: {selector}.",
                         True,
                     )
-                desired[component] = set(matching_ids)
+                desired[component] = {worker_id: 1 for worker_id in matching_ids}
                 continue
 
             spec = provider.get_component(component) if provider else None
-            count = spec.replicas if spec else 1
-            if spec is not None and spec.replicas_by:
-                configured = (config_fields or {}).get(spec.replicas_by)
-                try:
-                    if configured is not None and int(configured) >= 1:
-                        count = int(configured)
-                except (TypeError, ValueError):
-                    pass
+            count = _component_replica_count(spec, config_fields)
 
             pinned: Set[int] = set()
             if service.worker_id:
@@ -911,21 +928,26 @@ class CacheServiceController:
                     True,
                 )
 
-            current = {
-                instance.worker_id
-                for instance in instances
-                if (instance.component or "") == component
-                and instance.worker_id in matching_ids
-            }
-            chosen: Set[int] = set()
-            for worker_id in (
+            current: Dict[int, int] = {}
+            for instance in instances:
+                if (instance.component or "") != component:
+                    continue
+                if instance.worker_id in matching_ids:
+                    current[instance.worker_id] = current.get(instance.worker_id, 0) + 1
+
+            # Sticky workers first (a moved replica resets its share of
+            # the pool), then the rest by id. The rotation repeats, so a
+            # cluster smaller than the replica count stacks the remainder
+            # instead of shrinking the pool.
+            rotation = (
                 sorted(pinned)
-                + sorted(current - pinned)
-                + sorted(matching_ids - pinned - current)
-            ):
-                if len(chosen) >= count:
-                    break
-                chosen.add(worker_id)
+                + sorted(set(current) - pinned)
+                + sorted(matching_ids - pinned - set(current))
+            )
+            chosen: Dict[int, int] = {}
+            for index in range(count):
+                worker_id = rotation[index % len(rotation)]
+                chosen[worker_id] = chosen.get(worker_id, 0) + 1
             desired[component] = chosen
         return desired, None, True
 
