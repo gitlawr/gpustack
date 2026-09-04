@@ -34,6 +34,7 @@ from gpustack.server.model_instance_workloads import (
     compile_model_instance,
     named_ports,
     sync_model_instance_workloads,
+    workload_spec,
 )
 
 
@@ -372,6 +373,15 @@ def _existing(group_index):
     return _Row(group_index=group_index, update=AsyncMock(), delete=AsyncMock())
 
 
+def _matching_row(compiled):
+    """A row that already says exactly what the spec asks for."""
+    row = _Row(update=AsyncMock(), delete=AsyncMock())
+    for name in workload_spec(compiled).model_fields_set:
+        setattr(row, name, getattr(compiled, name))
+    row.group_index = compiled.group_index
+    return row
+
+
 @pytest.mark.asyncio
 async def test_sync_creates_a_row_per_container(monkeypatch):
     monkeypatch.setattr(
@@ -446,3 +456,45 @@ async def test_sync_writes_the_spec_not_the_state(monkeypatch):
     update = existing[0].update.await_args.args[1]
     assert update.worker_id == 1
     assert "state" not in update.model_fields_set
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_rewrite_a_row_that_already_matches(monkeypatch):
+    """update publishes an event whether or not anything changed, and this
+    runs on every event about the instance. Writing unconditionally turns one
+    instance event into an event per workload, each of which wakes the fold
+    that reads them back."""
+    instance = _instance()
+    compiled = compile_model_instance(instance)[0]
+    current = _matching_row(compiled)
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.all_by_fields",
+        AsyncMock(return_value=[current]),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.create", AsyncMock()
+    )
+
+    await sync_model_instance_workloads(MagicMock(), instance)
+
+    current.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_writes_when_the_binding_moved(monkeypatch):
+    instance = _instance()
+    compiled = compile_model_instance(instance)[0]
+    current = _matching_row(compiled)
+    current.worker_id = 99  # rescheduled elsewhere
+
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.all_by_fields",
+        AsyncMock(return_value=[current]),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.model_instance_workloads.Workload.create", AsyncMock()
+    )
+
+    await sync_model_instance_workloads(MagicMock(), instance)
+
+    current.update.assert_awaited_once()

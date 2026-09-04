@@ -87,6 +87,7 @@ from gpustack.schemas.benchmark import Benchmark
 from gpustack.server.benchmark_workloads import compile_benchmark
 from gpustack.server.model_instance_workloads import (
     aggregate_instance_state,
+    spec_differs,
     sync_model_instance_workloads,
     workload_spec,
 )
@@ -553,7 +554,9 @@ class BenchmarkController:
                 # Spec and binding only, for the same reason as the other
                 # kinds: the worker will own execution state, and recompiling
                 # it from the benchmark on every event would overwrite it.
-                await existing[0].update(session, workload_spec(compiled))
+                spec = workload_spec(compiled)
+                if spec_differs(existing[0], spec):
+                    await existing[0].update(session, spec)
         except Exception as e:
             logger.error(f"Failed to sync workload of benchmark {benchmark_id}: {e}")
 

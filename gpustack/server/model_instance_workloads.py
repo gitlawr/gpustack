@@ -239,12 +239,29 @@ async def sync_model_instance_workloads(session, instance: ModelInstance) -> Non
         # Spec and binding only. Execution state is the worker's to write --
         # it mirrors it onto these rows as it goes -- and recompiling it from
         # the instance would overwrite what the worker just reported.
-        await current.update(session, workload_spec(compiled))
+        spec = workload_spec(compiled)
+        if spec_differs(current, spec):
+            await current.update(session, spec)
 
     # A distributed instance that lost subordinate workers, or a backend that
     # started delegating, leaves rows behind.
     for stale in by_group_index.values():
         await stale.delete(session)
+
+
+def spec_differs(current, spec: WorkloadUpdate) -> bool:
+    """
+    Whether the row already says what the spec asks for.
+
+    ``update`` publishes an event whether or not anything changed, and this
+    runs on every event about the owning resource. Writing unconditionally
+    would turn one instance event into an event per workload it has, each of
+    which wakes the fold that reads them back.
+    """
+    return any(
+        getattr(current, name, None) != getattr(spec, name)
+        for name in spec.model_fields_set
+    )
 
 
 def workload_spec(workload: Workload) -> WorkloadUpdate:
