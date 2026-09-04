@@ -312,6 +312,18 @@ class ServeManager:
         # No callback: the stream is consumed only to keep the client cache warm.
         await watch_forever("models", self._clientset.models.awatch)
 
+    async def watch_model_instance_workloads(self):
+        """
+        Keep the workload cache warm.
+
+        No callback: this worker does not act on workload events yet. It reads
+        them, to find the row an instance's execution state mirrors onto, and
+        without a running watch every one of those reads is an API call.
+        """
+        await watch_forever(
+            "model instance workloads", self._clientset.workloads.awatch
+        )
+
     async def watch_model_instances_event(self):
         """
         Loop to watch model instances' event and handle.
@@ -1464,11 +1476,12 @@ class ServeManager:
     def _find_workload(self, model_instance_id: int, group_index: int):
         """The instance's workload at that position in its group, from the
         watch-backed cache."""
+        # No page parameter: the generated client skips its cache whenever
+        # one is present, and this runs on every state write-back.
         page = self._clientset.workloads.list(
             params={
                 "worker_id": self._worker_id,
                 "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE.value,
-                "page": -1,
             }
         )
         return next(

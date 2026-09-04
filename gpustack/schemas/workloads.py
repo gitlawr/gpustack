@@ -32,6 +32,13 @@ class WorkloadOwnerKindEnum(str, Enum):
     MODEL_INSTANCE = "model_instance"
     BENCHMARK = "benchmark"
 
+    def __str__(self):
+        # The generated clients filter their watch-backed cache by comparing
+        # str(attribute) with str(the queried value), so an enum that renders
+        # as "ClassName.MEMBER" silently matches nothing and a filtered read
+        # comes back empty.
+        return self.value
+
 
 class WorkloadStateEnum(str, Enum):
     """
@@ -51,6 +58,13 @@ class WorkloadStateEnum(str, Enum):
     """Ran to completion. Only task workloads reach it."""
     ERROR = "error"
 
+    def __str__(self):
+        # The generated clients filter their watch-backed cache by comparing
+        # str(attribute) with str(the queried value), so an enum that renders
+        # as "ClassName.MEMBER" silently matches nothing and a filtered read
+        # comes back empty.
+        return self.value
+
 
 class WorkloadRestartPolicyEnum(str, Enum):
     """What a stop means."""
@@ -60,6 +74,13 @@ class WorkloadRestartPolicyEnum(str, Enum):
     ON_FAILURE = "on_failure"
     NEVER = "never"
 
+    def __str__(self):
+        # The generated clients filter their watch-backed cache by comparing
+        # str(attribute) with str(the queried value), so an enum that renders
+        # as "ClassName.MEMBER" silently matches nothing and a filtered read
+        # comes back empty.
+        return self.value
+
 
 class WorkloadRoleEnum(str, Enum):
     """A workload's part in its group. A standalone workload is the leader of
@@ -67,6 +88,13 @@ class WorkloadRoleEnum(str, Enum):
 
     LEADER = "leader"
     FOLLOWER = "follower"
+
+    def __str__(self):
+        # The generated clients filter their watch-backed cache by comparing
+        # str(attribute) with str(the queried value), so an enum that renders
+        # as "ClassName.MEMBER" silently matches nothing and a filtered read
+        # comes back empty.
+        return self.value
 
 
 class ReservedClaim(BaseModel):

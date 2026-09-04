@@ -231,3 +231,34 @@ async def test_watch_filters_a_worker_to_its_own_cluster(monkeypatch):
     assert seen["fields"] == {"worker_id": 3}
     assert seen["filter_func"](_workload(cluster_id=1)) is True
     assert seen["filter_func"](_workload(cluster_id=2)) is False
+
+
+# ---------------------------------------------------------------------------
+# Enum rendering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        WorkloadOwnerKindEnum.MODEL_INSTANCE,
+        WorkloadStateEnum.RUNNING,
+        WorkloadRestartPolicyEnum.NEVER,
+        WorkloadRoleEnum.FOLLOWER,
+    ],
+)
+def test_enums_render_as_their_value(member):
+    """The generated clients filter their watch-backed cache by comparing
+    str(attribute) with str(the queried value). An enum rendering as
+    "ClassName.MEMBER" matches nothing, so a filtered read comes back empty --
+    silently, and the caller reads that as "this workload does not exist"."""
+    assert str(member) == member.value
+
+
+def test_a_cache_filter_on_an_enum_field_matches():
+    """The failure this guards is not a crash: it is a filtered list that
+    quietly returns nothing."""
+    workload = _workload()
+    queried = WorkloadOwnerKindEnum.CACHE_SERVICE.value
+
+    assert str(getattr(workload, "owner_kind")) == str(queried)
