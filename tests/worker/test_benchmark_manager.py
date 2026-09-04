@@ -9,6 +9,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 import gpustack.worker.benchmark_manager as bm
+from gpustack.schemas.benchmark import BenchmarkStateEnum
 from gpustack.schemas.workloads import WorkloadStateEnum
 from gpustack.schemas import benchmark as bm_schemas
 from gpustack.worker.benchmark import analysis, artifacts
@@ -2224,4 +2225,47 @@ class TestDeadlineFromWorkload:
 
         assert update.call_args[0][1] == 9
         assert update.call_args[1]["started_at"] is not None
+        # State is the mirror's business; this records only when it began.
+        assert "state" not in update.call_args[1]
+
+    def test_state_is_mirrored_onto_the_workload(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=None, started_ago_seconds=1)]
+        )
+
+        with patch("gpustack.worker.benchmark_manager.update_resource") as update:
+            mgr._mirror_execution_state(
+                5, {"state": BenchmarkStateEnum.COMPLETED, "state_message": "done"}
+            )
+
+        assert update.call_args[0][1] == 9
+        assert update.call_args[1]["state"] == WorkloadStateEnum.SUCCEEDED
+        assert update.call_args[1]["state_message"] == "done"
+
+    def test_a_state_sent_as_a_plain_string_still_maps(self):
+        """The state write-back goes out as JSON, so what comes back through
+        this funnel is whatever the caller passed -- often the bare value."""
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=None, started_ago_seconds=1)]
+        )
+
+        with patch("gpustack.worker.benchmark_manager.update_resource") as update:
+            mgr._mirror_execution_state(5, {"state": "running"})
+
         assert update.call_args[1]["state"] == WorkloadStateEnum.RUNNING
+
+    def test_a_failed_mirror_never_fails_the_state_write_back(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.side_effect = RuntimeError("api down")
+
+        mgr._mirror_execution_state(5, {"state": BenchmarkStateEnum.RUNNING})
+
+    def test_a_patch_with_nothing_a_workload_carries_writes_nothing(self):
+        mgr = self._manager()
+
+        with patch("gpustack.worker.benchmark_manager.update_resource") as update:
+            mgr._mirror_execution_state(5, {"results": [1, 2, 3]})
+
+        update.assert_not_called()

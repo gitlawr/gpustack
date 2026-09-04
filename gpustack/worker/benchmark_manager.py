@@ -27,9 +27,9 @@ from gpustack.worker.benchmark.runner import BenchmarkRunner
 from gpustack.client import ClientSet
 from gpustack.schemas.workloads import (
     WorkloadOwnerKindEnum,
-    WorkloadStateEnum,
     WorkloadUpdate,
 )
+from gpustack.server.benchmark_workloads import to_workload_state
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.controlloop import (
     update_resource,
@@ -349,11 +349,54 @@ class BenchmarkManager:
         client = self._clientset.http_client.get_async_httpx_client()
         resp = await client.patch(f"/benchmarks/{id}/state", json=kwargs)
         resp.raise_for_status()
+        self._mirror_execution_state(id, kwargs)
 
     def _update_benchmark_state_sync(self, id: int, **kwargs):
         client = self._clientset.http_client.get_httpx_client()
         resp = client.patch(f"/benchmarks/{id}/state", json=kwargs)
         resp.raise_for_status()
+        self._mirror_execution_state(id, kwargs)
+
+    def _mirror_execution_state(self, benchmark_id: int, patch: dict):
+        """
+        Report the same execution state onto the benchmark's workload row.
+
+        Both write-backs funnel through here, as they do for a model instance,
+        and for the same reason: the benchmark row stays authoritative while
+        the workload rows are shown to carry real state, before anything reads
+        them. Failures are logged and dropped -- nothing depends on these yet,
+        and a mirror that could fail a state write-back would be worse than no
+        mirror.
+        """
+        try:
+            fields = {}
+            if "state" in patch:
+                fields["state"] = to_workload_state(
+                    BenchmarkStateEnum(patch["state"])
+                    if not isinstance(patch["state"], BenchmarkStateEnum)
+                    else patch["state"]
+                )
+            for name in ("state_message", "pid"):
+                if name in patch:
+                    fields[name] = patch[name]
+            if not fields:
+                return
+
+            workload = self._find_workload(benchmark_id)
+            if workload is None:
+                return
+            update_resource(
+                self._clientset.workloads,
+                workload.id,
+                WorkloadUpdate,
+                "Benchmark workload",
+                **fields,
+            )
+        except Exception as e:
+            logger.debug(
+                f"Failed to mirror execution state of benchmark {benchmark_id} "
+                f"onto its workload: {e}"
+            )
 
     def _stop_benchmark(self, benchmark: Benchmark):
         """
@@ -1427,7 +1470,6 @@ class BenchmarkManager:
             WorkloadUpdate,
             "Benchmark workload",
             started_at=datetime.now(timezone.utc),
-            state=WorkloadStateEnum.RUNNING,
         )
 
     def _maybe_snapshot_logs(self, benchmark: Benchmark):
