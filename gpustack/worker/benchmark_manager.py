@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import datetime, timezone
 import re
 import time
 from typing import Dict, NamedTuple, Optional, Callable, List, Set, Tuple
@@ -24,8 +25,14 @@ from gpustack.schemas.benchmark import (
 from gpustack.worker.benchmark import analysis, artifacts
 from gpustack.worker.benchmark.runner import BenchmarkRunner
 from gpustack.client import ClientSet
+from gpustack.schemas.workloads import (
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+    WorkloadUpdate,
+)
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.controlloop import (
+    update_resource,
     ProvisionRunner,
     WorkloadPhase,
     classify_workload,
@@ -317,6 +324,7 @@ class BenchmarkManager:
                 provision=partial(provision_benchmark, benchmark, fallback_registry),
             )
             self._set_active_benchmark(benchmark.id)
+            self._mark_workload_started(benchmark)
             patch_dict = {
                 "state": BenchmarkStateEnum.RUNNING,
                 "pid": process.pid,
@@ -1357,6 +1365,23 @@ class BenchmarkManager:
             self._active_benchmark_started_at = None
 
     def _is_benchmark_timed_out(self, benchmark: Benchmark) -> bool:
+        """
+        Whether this benchmark has outrun its deadline.
+
+        Preferably measured from the workload row, which survives a worker
+        restart. The in-memory clock does not: after a restart
+        ``_active_benchmark_started_at`` is None, so a run that was already
+        going answers False forever and holds its GPU until someone notices.
+        """
+        workload = self._find_workload(benchmark.id)
+        if workload is not None and workload.active_deadline_seconds:
+            if workload.started_at is None:
+                return False
+            elapsed = (datetime.now(timezone.utc) - workload.started_at).total_seconds()
+            return elapsed > workload.active_deadline_seconds
+
+        # No row yet, or no deadline on it: the worker-local clock, which is
+        # all there was before.
         limit = self._config.benchmark_max_duration_seconds
         if not limit:
             return False
@@ -1365,6 +1390,45 @@ class BenchmarkManager:
         if self._active_benchmark_started_at is None:
             return False
         return (time.time() - self._active_benchmark_started_at) > limit
+
+    def _find_workload(self, benchmark_id: int):
+        """
+        The benchmark's workload row, from the watch-backed cache the worker
+        keeps warm. No page parameter: the generated client skips its cache
+        whenever one is present, and this runs on every sync pass.
+        """
+        try:
+            page = self._clientset.workloads.list(
+                params={
+                    "worker_id": self._worker_id,
+                    "owner_kind": WorkloadOwnerKindEnum.BENCHMARK.value,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Failed to read workloads of benchmark {benchmark_id}: {e}")
+            return None
+        return next(
+            (w for w in page.items or [] if w.owner_id == benchmark_id),
+            None,
+        )
+
+    def _mark_workload_started(self, benchmark: Benchmark):
+        """
+        Record when the container began, which is what the deadline is
+        measured from. Not the row's creation time: a benchmark that sat
+        queued behind another was created long before it ran.
+        """
+        workload = self._find_workload(benchmark.id)
+        if workload is None:
+            return
+        update_resource(
+            self._clientset.workloads,
+            workload.id,
+            WorkloadUpdate,
+            "Benchmark workload",
+            started_at=datetime.now(timezone.utc),
+            state=WorkloadStateEnum.RUNNING,
+        )
 
     def _maybe_snapshot_logs(self, benchmark: Benchmark):
         """Throttled log snapshot for a running benchmark (see

@@ -1,10 +1,15 @@
 from collections import deque
 from types import SimpleNamespace
 
+from datetime import datetime, timedelta, timezone
+
+import time
+
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import gpustack.worker.benchmark_manager as bm
+from gpustack.schemas.workloads import WorkloadStateEnum
 from gpustack.schemas import benchmark as bm_schemas
 from gpustack.worker.benchmark import analysis, artifacts
 from gpustack.worker.benchmark.runner import BenchmarkRunner
@@ -2133,3 +2138,90 @@ class TestTheProbesCapIsNotTheUsersRange:
         }
         codes = [w["code"] for w in self._validity(ramp)["warnings"]]
         assert codes == ["not_saturated"]
+
+
+class TestDeadlineFromWorkload:
+    """The timeout, taken from the workload row instead of worker memory."""
+
+    def _manager(self, limit=None):
+        mgr = object.__new__(bm.BenchmarkManager)
+        mgr._config = SimpleNamespace(benchmark_max_duration_seconds=limit)
+        mgr._clientset_getter = lambda: self._clientset
+        mgr._worker_id_getter = lambda: 1
+        mgr._active_benchmark_id = None
+        mgr._active_benchmark_started_at = None
+        self._clientset = MagicMock()
+        self._clientset.workloads.list.return_value = SimpleNamespace(items=[])
+        return mgr
+
+    def _workload(self, deadline, started_ago_seconds):
+        started_at = (
+            None
+            if started_ago_seconds is None
+            else datetime.now(timezone.utc) - timedelta(seconds=started_ago_seconds)
+        )
+        return SimpleNamespace(
+            id=9,
+            owner_id=5,
+            active_deadline_seconds=deadline,
+            started_at=started_at,
+        )
+
+    def test_a_run_past_its_deadline_times_out(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=61)]
+        )
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is True
+
+    def test_a_run_inside_its_deadline_does_not(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=59)]
+        )
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is False
+
+    def test_the_deadline_survives_a_worker_restart(self):
+        """The hole this closes: after a restart the in-memory clock is None,
+        so a run that was already going answers False forever and holds its
+        GPU until someone notices."""
+        mgr = self._manager(limit=60)
+        mgr._active_benchmark_id = None  # as a freshly started worker has it
+        mgr._active_benchmark_started_at = None
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=600)]
+        )
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is True
+
+    def test_a_workload_that_has_not_started_has_nothing_to_measure_from(self):
+        """Queued behind another run: the row exists, the container does not."""
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=None)]
+        )
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is False
+
+    def test_without_a_row_the_worker_local_clock_still_applies(self):
+        """No regression while the rows are still being rolled out."""
+        mgr = self._manager(limit=60)
+        mgr._active_benchmark_id = 5
+        mgr._active_benchmark_started_at = time.time() - 61
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is True
+
+    def test_marking_the_start_records_when_the_container_began(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=None)]
+        )
+
+        with patch("gpustack.worker.benchmark_manager.update_resource") as update:
+            mgr._mark_workload_started(SimpleNamespace(id=5))
+
+        assert update.call_args[0][1] == 9
+        assert update.call_args[1]["started_at"] is not None
+        assert update.call_args[1]["state"] == WorkloadStateEnum.RUNNING

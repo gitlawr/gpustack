@@ -201,3 +201,10 @@ async def test_sync_never_raises(monkeypatch, caplog):
         await _controller()._reconcile(Event(type=EventType.UPDATED, data={"id": 5}))
 
     assert "Failed to sync workload of benchmark 5" in caplog.text
+
+
+def test_the_compiled_row_has_no_start_time_yet():
+    """started_at is the worker's to write, when the container begins. The row
+    exists from the moment the benchmark does, which for a queued one is well
+    before that."""
+    assert compile_benchmark(_benchmark()).started_at is None

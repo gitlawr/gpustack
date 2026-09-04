@@ -197,6 +197,10 @@ class WorkloadBase(SQLModel):
     last_restart_time: Optional[datetime] = Field(
         sa_column=Column(UTCDateTime), default=None
     )
+    started_at: Optional[datetime] = Field(sa_column=Column(UTCDateTime), default=None)
+    """When this workload's container began running, as opposed to when its row
+    was created. ``active_deadline_seconds`` is measured from it, and for a
+    task that sat queued the two differ by however long it waited."""
     healthy: Optional[bool] = None
     last_check_at: Optional[datetime] = Field(
         sa_column=Column(UTCDateTime), default=None
