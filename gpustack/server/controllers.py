@@ -83,6 +83,8 @@ from gpustack.schemas.workloads import (
     WorkloadRestartPolicyEnum,
     WorkloadStateEnum,
 )
+from gpustack.schemas.benchmark import Benchmark
+from gpustack.server.benchmark_workloads import compile_benchmark
 from gpustack.server.model_instance_workloads import (
     aggregate_instance_state,
     compile_model_instance,
@@ -513,6 +515,68 @@ class ModelInstanceWorkloadStateController:
             f"Workload fold disagrees with model instance {instance.name} "
             f"(id={instance.id}): {differing}"
         )
+
+
+class BenchmarkController:
+    """
+    Keeps a benchmark's workload row in step with the benchmark.
+
+    Stage 2 of docs/proposals/workload-resource.md, and the one that gives
+    ``restart_policy=never`` and ``active_deadline_seconds`` a consumer: a
+    benchmark is the task-shaped workload, and the service-shaped ones never
+    exercise either.
+
+    Written but not yet read, as the cache service and model instance rows
+    were before it. The worker still drives itself from the benchmark row.
+    """
+
+    def __init__(self, cfg: Config):
+        self._config = cfg
+
+    async def start(self):
+        async for event in Benchmark.subscribe(source="benchmark_controller"):
+            if event.type == EventType.HEARTBEAT:
+                continue
+            await self._reconcile(event)
+
+    async def _reconcile(self, event: Event):
+        benchmark_id = resolve_event_id(event)
+        if benchmark_id is None:
+            return
+        try:
+            async with async_session() as session:
+                existing = await Workload.all_by_fields(
+                    session,
+                    {
+                        "owner_kind": WorkloadOwnerKindEnum.BENCHMARK,
+                        "owner_id": benchmark_id,
+                    },
+                )
+
+                if event.type == EventType.DELETED:
+                    for workload in existing:
+                        await workload.delete(session)
+                    return
+
+                benchmark = await Benchmark.one_by_id(session, benchmark_id)
+                if benchmark is None:
+                    return
+
+                compiled = compile_benchmark(
+                    benchmark,
+                    max_duration_seconds=getattr(
+                        self._config, "benchmark_max_duration_seconds", None
+                    ),
+                )
+                if not existing:
+                    await Workload.create(session, compiled)
+                    return
+                # Spec and binding only, for the same reason as the other
+                # kinds: the worker will own execution state, and recompiling
+                # it from the benchmark on every event would overwrite it.
+                await existing[0].update(session, workload_spec(compiled))
+        except Exception as e:
+            logger.error(f"Failed to sync workload of benchmark {benchmark_id}: {e}")
 
 
 class CacheServiceController:

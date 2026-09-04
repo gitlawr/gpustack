@@ -51,6 +51,7 @@ from gpustack.config.config import Config
 from gpustack.schemas.config import GatewayModeEnum
 from gpustack.config import registration
 from gpustack.server.controllers import (
+    BenchmarkController,
     CacheServiceController,
     ModelController,
     ModelFileController,
@@ -515,6 +516,9 @@ class Server:
 
         cache_service_controller = CacheServiceController(self._config)
         tasks.append(asyncio.create_task(cache_service_controller.start()))
+
+        benchmark_controller = BenchmarkController(self._config)
+        tasks.append(asyncio.create_task(benchmark_controller.start()))
 
         logger.debug("Controllers started.")
         return tasks
