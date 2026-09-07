@@ -114,6 +114,32 @@ class CacheServiceProvisioner:
 
     def _start(self):
         instance = self._instance
+        # PENDING is the server's half of the lifecycle: it means no worker has
+        # taken the instance yet. Everything below is the worker's, and the slow
+        # part of it -- resolving the declaration and pulling the image -- can
+        # take minutes. Claiming the instance before that rather than after
+        # keeps the state honest about who is working on it, and stops the sync
+        # pass re-driving a start that is already underway once the instance has
+        # been PENDING past its grace period.
+        #
+        # A failed write-back leaves the row PENDING, which the sync pass
+        # recovers by re-driving the start; that path is idempotent.
+        if not update_cache_service_instance(
+            self._clientset,
+            instance.id,
+            state=WorkloadStateEnum.STARTING,
+            ports={
+                CACHE_SERVICE_PORT: self._port,
+                CACHE_SERVICE_METRICS_PORT: self._metrics_port,
+            },
+            state_message="",
+        ):
+            logger.error(
+                f"Failed to mark cache service instance {instance.id} as "
+                "starting; continuing, and the sync pass will re-drive the "
+                "start if the write never lands"
+            )
+
         try:
             cache_service = self._clientset.cache_services.get(id=instance.owner_id)
         except NotFoundException:
@@ -158,28 +184,10 @@ class CacheServiceProvisioner:
             )
         )
 
-        if update_cache_service_instance(
-            self._clientset,
-            instance.id,
-            state=WorkloadStateEnum.STARTING,
-            ports={
-                CACHE_SERVICE_PORT: self._port,
-                CACHE_SERVICE_METRICS_PORT: self._metrics_port,
-            },
-            state_message="",
-        ):
-            logger.info(
-                f"Started cache service {cache_service.name} instance "
-                f"(id={instance.id}) on port {self._port}"
-            )
-        else:
-            # The container is up but the server still sees the instance as
-            # PENDING; the sync pass re-drives the start rather than leaving a
-            # running cache server nothing points at.
-            logger.error(
-                f"Started cache service workload {workload_plan.name} "
-                f"but failed to mark instance {instance.id} as starting"
-            )
+        logger.info(
+            f"Started cache service {cache_service.name} instance "
+            f"(id={instance.id}) on port {self._port}"
+        )
 
     def _compile(
         self,

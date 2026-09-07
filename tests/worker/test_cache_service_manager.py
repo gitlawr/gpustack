@@ -6,7 +6,7 @@ from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 from gpustack.api.exceptions import NotFoundException
 from gpustack.schemas.cache_providers import (
@@ -1100,9 +1100,8 @@ def test_start_instance_parent_service_missing_sets_error():
         _provision(manager, clientset, instance)
 
     create.assert_not_called()
-    update.assert_called_once()
+    assert _states(update) == [WorkloadStateEnum.STARTING, WorkloadStateEnum.ERROR]
     assert update.call_args[0][0] == instance.id
-    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "not found" in update.call_args[1]["state_message"]
 
 
@@ -1124,7 +1123,8 @@ def test_start_instance_unknown_provider_sets_error():
         _provision(manager, clientset, instance)
 
     create.assert_not_called()
-    update.assert_called_once_with(
+    assert _states(update) == [WorkloadStateEnum.STARTING, WorkloadStateEnum.ERROR]
+    assert update.call_args == call(
         instance.id,
         state=WorkloadStateEnum.ERROR,
         state_message="Unknown cache provider: nonexistent",
@@ -1149,8 +1149,7 @@ def test_start_instance_unknown_version_sets_error():
         _provision(manager, clientset, instance)
 
     create.assert_not_called()
-    update.assert_called_once()
-    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
+    assert _states(update) == [WorkloadStateEnum.STARTING, WorkloadStateEnum.ERROR]
     assert "v9" in update.call_args[1]["state_message"]
 
 
@@ -1184,7 +1183,8 @@ def test_start_instance_failure_sets_error_and_releases_port():
     ):
         _provision(manager, clientset, instance)
 
-    update.assert_called_once_with(
+    assert _states(update) == [WorkloadStateEnum.STARTING, WorkloadStateEnum.ERROR]
+    assert update.call_args == call(
         instance.id,
         state=WorkloadStateEnum.ERROR,
         state_message="boom",
@@ -1192,8 +1192,9 @@ def test_start_instance_failure_sets_error_and_releases_port():
 
 
 def test_start_instance_reports_a_dropped_state_writeback(caplog):
-    """A running container whose STARTING write-back was lost is surfaced:
-    the instance is still PENDING server-side and gets started again."""
+    """A lost claim leaves the instance PENDING server-side, where the sync
+    pass re-drives it. The start still runs to completion rather than
+    aborting, so a write that was merely slow does not cost a repeated pull."""
     manager, clientset = _build_manager(worker_id=1)
 
     with caplog.at_level(logging.ERROR):
@@ -1206,7 +1207,7 @@ def test_start_instance_reports_a_dropped_state_writeback(caplog):
         )
 
     create.assert_called_once()
-    assert "failed to mark instance 11 as starting" in caplog.text
+    assert "Failed to mark cache service instance 11 as starting" in caplog.text
 
 
 def test_update_instance_reports_failed_writeback_without_raising():
@@ -2384,3 +2385,55 @@ def test_launch_records_the_workload_name_for_reaping():
         manager._start_cache_service_instance(instance)
 
     assert manager._workload_name_by_instance[instance.id] == INSTANCE_WORKLOAD_NAME
+
+
+def _states(update):
+    """The states written back, in order."""
+    return [c[1]["state"] for c in update.call_args_list]
+
+
+def test_start_instance_claims_the_instance_before_pulling_the_image():
+    """PENDING means no worker has taken the instance. Resolving the
+    declaration and pulling the image is the slow part of a start, so leaving
+    the row PENDING across it both misreports who is working on it and lets the
+    stale-PENDING recovery re-drive a start already under way."""
+    manager, clientset = _build_manager(worker_id=1)
+    order = []
+
+    with (
+        patch(
+            "gpustack.worker.cache_service.provisioner.get_cache_provider",
+            return_value=_new_provider(),
+        ),
+        patch(
+            "gpustack.worker.cache_service.provisioner.registration.determine_default_registry",
+            return_value=None,
+        ),
+        patch(
+            "gpustack.worker.cache_service.provisioner.transform_workload_plan",
+            side_effect=lambda cfg, plan, fallback: plan,
+        ),
+        patch("gpustack.worker.cache_service.provisioner.delete_workload"),
+        patch(
+            "gpustack.worker.cache_service.provisioner.create_workload",
+            side_effect=lambda plan: order.append("create"),
+        ),
+        _patch_update() as update,
+    ):
+        update.side_effect = lambda id, **kw: order.append(kw["state"]) or True
+        clientset.cache_services.get.return_value = _new_cache_service()
+        _provision(manager, clientset, _new_instance())
+
+    assert order == [WorkloadStateEnum.STARTING, "create"]
+
+
+def test_start_instance_records_its_ports_with_the_claim():
+    """The ports are the manager's allocation, and a restart prefers the ones
+    already recorded: writing them with the claim means a start that dies
+    during the pull still reuses them."""
+    manager, clientset = _build_manager(worker_id=1)
+    _, update = _run_start(manager, clientset, _new_cache_service(), _new_provider())
+
+    first = update.call_args_list[0][1]
+    assert first["state"] == WorkloadStateEnum.STARTING
+    assert first["ports"] == {"service": 40001, "metrics": 40002}
