@@ -1255,6 +1255,50 @@ def test_launch_releases_the_in_flight_claim():
     assert instance.id not in manager._starting
 
 
+def test_scheduling_a_start_actually_starts_it():
+    """The claim _schedule_start takes to get here lives in the same set that
+    says whether anything is in flight. Reading that set inside the launch
+    finds this very start and skips it -- silently, on every retry, so the
+    instance sits PENDING forever and the log only says a start is already in
+    flight."""
+    manager, clientset = _build_manager(worker_id=1)
+    instance = _new_instance()
+
+    with (
+        patch(
+            "gpustack.worker.controlloop.ports.network.get_free_port",
+            side_effect=[40001, 40002],
+        ),
+        patch.object(manager._provisioning, "start") as start,
+    ):
+        manager._schedule_start(instance)
+
+    start.assert_called_once()
+    assert instance.id not in manager._starting
+
+
+def test_a_stale_pending_instance_is_actually_restarted():
+    """The whole path the sync pass drives: it finds an instance stuck
+    PENDING, schedules a start, and a subprocess is spawned."""
+    manager, clientset = _build_manager(worker_id=1)
+    stale = _new_instance(
+        state=WorkloadStateEnum.PENDING,
+        updated_at=datetime.now(timezone.utc) - timedelta(seconds=90),
+    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=[stale])
+
+    with (
+        patch(
+            "gpustack.worker.controlloop.ports.network.get_free_port",
+            side_effect=[40001, 40002],
+        ),
+        patch.object(manager._provisioning, "start") as start,
+    ):
+        manager.sync_cache_service_instances_state()
+
+    start.assert_called_once()
+
+
 def test_launch_is_not_duplicated_while_the_subprocess_runs():
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance()

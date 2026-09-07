@@ -354,10 +354,15 @@ class CacheServiceManager:
             instance: The cache service instance to start.
         """
         try:
-            if self._is_provisioning(instance.id):
+            # Only the subprocess, not _is_provisioning: the claim taken by
+            # _schedule_start to get here is in _starting, so asking whether
+            # anything is in flight would find this very start and skip it.
+            # What still has to be caught is a previous start whose subprocess
+            # is alive -- the claim is released as soon as one is spawned.
+            if self._provisioning.is_running(instance.id):
                 logger.debug(
                     f"Skipped starting cache service instance {instance.id}: "
-                    "a start is already in flight"
+                    "its previous provisioning subprocess is still running"
                 )
                 return
 
