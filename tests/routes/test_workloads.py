@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine, insert, select
+from sqlalchemy.orm import Session
 
 from gpustack.api.exceptions import ForbiddenException, NotFoundException
 from gpustack.api.tenant import TenantContext
@@ -261,28 +263,57 @@ def test_a_cache_filter_on_an_enum_field_matches():
     workload = _workload()
     queried = WorkloadOwnerKindEnum.CACHE_SERVICE.value
 
-    assert str(getattr(workload, "owner_kind")) == str(queried)
+    # Read through a variable attribute name, as the client's cache filter
+    # does, rather than the field directly.
+    field = "owner_kind"
+    assert str(getattr(workload, field)) == str(queried)
 
 
-def test_a_row_as_the_database_returns_it_carries_plain_strings():
-    """The columns are declared String rather than native enums, so PostgreSQL
-    never renders an enum cast for a type it does not have. The cost is that a
-    row loaded through the ORM has a str where a row validated from the API
-    has an enum, and anything reaching for .value on one crashes on the other."""
-    workload = Workload(
+def _stored_workload(engine, **overrides):
+    """A workload as the database holds it: bare strings in the enum columns,
+    written below the ORM so nothing coerces on the way in."""
+    values = dict(
         id=1,
         name="cache-svc-5-w1",
         owner_kind="cache_service",
         owner_id=5,
         worker_id=1,
         state="running",
+        role="leader",
+        restart_policy="always",
     )
+    values.update(overrides)
+    Workload.__table__.create(engine)
+    with Session(engine) as session:
+        session.execute(insert(Workload.__table__).values(**values))
+        session.commit()
+    with Session(engine) as session:
+        return session.execute(select(Workload)).scalar_one()
 
-    assert isinstance(workload.state, str)
-    assert not hasattr(workload.state, "value")
-    # Comparisons still hold, which is why this stays hidden until something
-    # asks for the enum itself.
-    assert workload.state == WorkloadStateEnum.RUNNING
+
+def test_a_string_in_the_database_loads_as_an_enum():
+    """The column holds VARCHAR, so the database has no enum type to cast --
+    but no reader should have to know that. Converting on load makes an ORM row
+    and an API-validated row the same shape, so .value works on both."""
+    workload = _stored_workload(create_engine("sqlite://"))
+
+    assert workload.state is WorkloadStateEnum.RUNNING
+    assert workload.state.value == "running"
+    assert workload.owner_kind is WorkloadOwnerKindEnum.CACHE_SERVICE
+    assert workload.role is WorkloadRoleEnum.LEADER
+    assert workload.restart_policy is WorkloadRestartPolicyEnum.ALWAYS
+    # The enums mix in str, so a caller comparing against a bare string -- what
+    # every caller did while the column returned one -- gets the same answer.
+    assert workload.state == "running"
+
+
+def test_an_unrecognized_stored_value_stays_readable():
+    """A row written by a newer build, then rolled back to this one. Refusing
+    to load a member this build does not have would take out every reader of
+    the table over one field."""
+    workload = _stored_workload(create_engine("sqlite://"), state="hibernating")
+
+    assert workload.state == "hibernating"
 
 
 def test_the_public_view_accepts_a_row_loaded_from_the_database():

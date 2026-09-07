@@ -14,11 +14,12 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, Column, Index, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from gpustack.mixins import BaseModelMixin
 from gpustack.schemas.common import (
+    EnumString,
     PaginatedList,
     UTCDateTime,
     pydantic_column_type,
@@ -120,7 +121,7 @@ class WorkloadBase(SQLModel):
 
     # -- Ownership -----------------------------------------------------------
     owner_kind: WorkloadOwnerKindEnum = Field(
-        sa_column=Column(String(length=64), nullable=False)
+        sa_column=Column(EnumString(WorkloadOwnerKindEnum), nullable=False)
     )
     owner_id: int
     """The domain resource this was compiled from. Not a foreign key: the
@@ -143,7 +144,9 @@ class WorkloadBase(SQLModel):
 
     role: WorkloadRoleEnum = Field(
         default=WorkloadRoleEnum.LEADER,
-        sa_column=Column(String(length=32), nullable=False, default="leader"),
+        sa_column=Column(
+            EnumString(WorkloadRoleEnum, length=32), nullable=False, default="leader"
+        ),
     )
 
     # -- Binding result ------------------------------------------------------
@@ -161,7 +164,11 @@ class WorkloadBase(SQLModel):
     # -- Spec ----------------------------------------------------------------
     restart_policy: WorkloadRestartPolicyEnum = Field(
         default=WorkloadRestartPolicyEnum.ALWAYS,
-        sa_column=Column(String(length=32), nullable=False, default="always"),
+        sa_column=Column(
+            EnumString(WorkloadRestartPolicyEnum, length=32),
+            nullable=False,
+            default="always",
+        ),
     )
     active_deadline_seconds: Optional[int] = None
     """Wall-clock limit for a task workload. None means no limit, which is
@@ -177,7 +184,7 @@ class WorkloadBase(SQLModel):
     # -- Execution status ----------------------------------------------------
     state: WorkloadStateEnum = Field(
         default=WorkloadStateEnum.PENDING,
-        sa_column=Column(String(length=64), nullable=False),
+        sa_column=Column(EnumString(WorkloadStateEnum), nullable=False),
     )
     state_message: Optional[str] = Field(
         default=None, sa_column=Column(Text, nullable=True)

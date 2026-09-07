@@ -6,11 +6,12 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, Column, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Column, ForeignKey, Integer, UniqueConstraint
 from sqlmodel import Field, SQLModel, Text
 
 from gpustack.mixins import BaseModelMixin
 from gpustack.schemas.common import (
+    EnumString,
     ItemList,
     PaginatedList,
     UTCDateTime,
@@ -159,7 +160,7 @@ class CacheServiceBase(SQLModel):
     # Stored as a plain string (the migration creates VARCHAR, not a native
     # DB enum); the enum type still validates values at the pydantic layer.
     mode: CacheServiceModeEnum = Field(
-        sa_column=Column(String(length=64), nullable=False)
+        sa_column=Column(EnumString(CacheServiceModeEnum), nullable=False)
     )
     cluster_id: int = Field(foreign_key="clusters.id", nullable=False)
     worker_id: Optional[int] = None
@@ -184,7 +185,7 @@ class CacheServiceBase(SQLModel):
 
     state: CacheServiceStateEnum = Field(
         default=CacheServiceStateEnum.PENDING,
-        sa_column=Column(String(length=64), nullable=False),
+        sa_column=Column(EnumString(CacheServiceStateEnum), nullable=False),
     )
     state_message: Optional[str] = Field(
         default=None, sa_column=Column(Text, nullable=True)
@@ -277,9 +278,8 @@ class CacheServiceInstancePublic(BaseModel):
             cluster_id=workload.cluster_id,
             port=ports.get(CACHE_SERVICE_PORT),
             metrics_port=ports.get(CACHE_SERVICE_METRICS_PORT),
-            # Not ``.value``: a row loaded through the ORM carries a plain
-            # string, because the column is declared String rather than a
-            # native enum. The constructor takes either.
+            # The two enums are distinct types over the same values, so
+            # this is a genuine conversion rather than a defensive cast.
             state=CacheServiceStateEnum(str(workload.state)),
             state_message=workload.state_message,
             healthy=workload.healthy,

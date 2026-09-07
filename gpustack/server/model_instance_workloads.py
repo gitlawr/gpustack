@@ -321,10 +321,8 @@ def _to_instance_state(state) -> Optional[ModelInstanceStateEnum]:
     """
     A workload's state as the instance's own.
 
-    Takes a plain string as readily as an enum: a row loaded through the ORM
-    carries the former, because the column is declared String rather than a
-    native enum, while the same row arriving over the API is validated into
-    the latter.
+    The two state enums are distinct types that happen to share most of their
+    values, so this converts through the shared value rather than casting.
     """
     try:
         return ModelInstanceStateEnum(str(state))
