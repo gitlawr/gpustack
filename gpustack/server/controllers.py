@@ -433,6 +433,12 @@ class ModelInstanceWorkloadStateController:
     instances would simply never leave STARTING.
     """
 
+    def __init__(self):
+        self._agreed = 0
+        self._disagreed = 0
+        self._declined = 0
+        self._next_tally_at = 1
+
     async def start(self):
         async for event in Workload.subscribe(
             source="model_instance_workload_state", replay_existing=False
@@ -462,6 +468,7 @@ class ModelInstanceWorkloadStateController:
                 )
                 folded = aggregate_instance_state(workloads)
                 if folded is None:
+                    self._declined += 1
                     return
 
                 if not envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS:
@@ -480,20 +487,48 @@ class ModelInstanceWorkloadStateController:
                 f"{instance_id}: {e}"
             )
 
-    @staticmethod
-    def _report_disagreement(instance: ModelInstance, folded: dict):
-        """Say where the fold would have written something else. Silence here
-        is the evidence that flipping is safe."""
+    def _report_disagreement(self, instance: ModelInstance, folded: dict):
+        """
+        Say where the fold would have written something else.
+
+        Silence is the evidence that flipping is safe, so it has to be
+        distinguishable from silence for other reasons -- the controller not
+        running, no events arriving, the fold declining every group. Hence the
+        running tally: a report of many agreements and no disagreements is
+        evidence, whereas an empty log on its own says nothing.
+        """
         differing = {
             name: (getattr(instance, name, None), value)
             for name, value in folded.items()
             if getattr(instance, name, None) != value
         }
         if not differing:
+            self._agreed += 1
+            logger.debug(
+                f"Workload fold agrees with model instance {instance.name} "
+                f"(id={instance.id}): {folded}"
+            )
+            self._report_tally()
             return
+        self._disagreed += 1
         logger.info(
             f"Workload fold disagrees with model instance {instance.name} "
-            f"(id={instance.id}): {differing}"
+            f"(id={instance.id}): {differing} "
+            f"[agreed={self._agreed} disagreed={self._disagreed} "
+            f"declined={self._declined}]"
+        )
+
+    def _report_tally(self):
+        """Surface the tally at INFO on a widening cadence, so a run that is
+        going well says so without a line per event."""
+        total = self._agreed + self._disagreed
+        if total < self._next_tally_at:
+            return
+        self._next_tally_at = total * 2
+        logger.info(
+            f"Workload fold: agreed={self._agreed} disagreed={self._disagreed} "
+            f"declined={self._declined} (declined = leader still pending, "
+            f"which the fold has nothing to say about)"
         )
 
 

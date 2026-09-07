@@ -227,9 +227,7 @@ async def test_fold_writes_nothing_while_it_is_only_being_compared(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_agreement_is_silent(monkeypatch, caplog):
-    """Silence is the evidence that flipping is safe, so agreement must not
-    add noise to it."""
+async def test_agreement_reports_no_disagreement(monkeypatch, caplog):
     instance = _instance(state="running")
 
     with _fold(monkeypatch, instance, folded={"state": "running"}):
@@ -237,6 +235,42 @@ async def test_agreement_is_silent(monkeypatch, caplog):
             await ModelInstanceWorkloadStateController()._reconcile(3)
 
     assert "disagrees" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_agreement_is_counted_so_an_empty_log_can_be_told_from_a_dead_one(
+    monkeypatch, caplog
+):
+    """The gate for making the fold authoritative is "no disagreements", which
+    a controller that never ran also satisfies. The tally is what separates the
+    two, so agreement has to leave a trace."""
+    instance = _instance(state="running")
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}):
+        with caplog.at_level(logging.INFO):
+            await controller._reconcile(3)
+
+    assert controller._agreed == 1
+    assert controller._disagreed == 0
+    assert "agreed=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_declined_group_is_counted_apart_from_agreement(monkeypatch):
+    """A leader still pending is the fold declining to speak, not the fold
+    agreeing; counting them together would read as coverage it does not have."""
+    instance = _instance()
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(monkeypatch, instance, folded=None):
+        await controller._reconcile(3)
+
+    assert (controller._agreed, controller._disagreed, controller._declined) == (
+        0,
+        0,
+        1,
+    )
 
 
 @pytest.mark.asyncio
