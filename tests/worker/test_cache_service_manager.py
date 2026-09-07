@@ -753,19 +753,53 @@ def test_start_instance_custom_version_without_provider_support_sets_error():
 
 def test_start_instance_custom_version_without_default_version_sets_error():
     """The custom version borrows the default version's templates, so a
-    provider without a resolvable default version cannot serve it."""
+    provider whose declared versions hold no resolvable default cannot
+    serve it."""
     manager, clientset = _build_manager(worker_id=1)
     cache_service = _new_cache_service(
         provider_version="custom",
         config=CacheServiceConfig(ram_size=8, image="myteam/cache-server:dev"),
     )
-    provider = _new_provider(custom_version=True, default_version=None, versions={})
+    provider = _new_provider(custom_version=True, default_version=None)
 
     create, update = _run_start(manager, clientset, cache_service, provider)
 
     create.assert_not_called()
     assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "default version" in update.call_args[1]["state_message"]
+
+
+def test_start_instance_custom_version_without_declared_versions():
+    """A provider publishing no image declares no version at all: the
+    service's own image runs on the provider-level launch arguments."""
+    manager, clientset = _build_manager(worker_id=1)
+    cache_service = _new_cache_service(
+        provider_version="custom",
+        config=CacheServiceConfig(ram_size=8, image="myteam/cache-server:dev"),
+    )
+    provider = _new_provider(
+        custom_version=True,
+        default_version=None,
+        versions={},
+        default_run_args="--host {{host}} --port {{port}} --ram {{ram_size}}",
+    )
+
+    create, update = _run_start(manager, clientset, cache_service, provider)
+
+    container = create.call_args[0][0].containers[0]
+    assert container.image == "myteam/cache-server:dev"
+    # run_args keeps the image's own entrypoint, so the rendered template
+    # lands in the args slot with the platform placeholders filled.
+    assert container.execution.command is None
+    assert container.execution.args == [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "40001",
+        "--ram",
+        "8",
+    ]
+    assert update.call_args[1]["state"] != WorkloadStateEnum.ERROR
 
 
 def test_start_instance_renders_fs_l2_adapter():
@@ -843,6 +877,48 @@ def test_start_instance_without_l2_storage_omits_flag():
 
     command = create.call_args[0][0].containers[0].execution.command
     assert "--l2-adapter" not in command
+
+
+def test_start_instance_xdfs_l2_backend_omits_adapter_flag():
+    """MeshFusion Store owns its L2 setup and must not receive LMCache's
+    generic --l2-adapter JSON argument."""
+    manager, clientset = _build_manager(worker_id=1)
+    cache_service = _new_cache_service(
+        config=CacheServiceConfig(
+            ram_size=8,
+            l2_storages=[
+                CacheServiceL2Storage(
+                    backend="xdfs",
+                    adapter_flag_enabled=False,
+                )
+            ],
+        )
+    )
+    provider = _l2_provider(
+        l2_backends={
+            **_l2_provider().l2_backends,
+            "xdfs": CacheProviderL2Backend(
+                fields=[CacheProviderL2Field(name="tenant_id", required=True)],
+                adapter_flag_optional=True,
+                adapter_flag_default=False,
+            ),
+        }
+    )
+
+    create, update = _run_start(manager, clientset, cache_service, provider)
+
+    command = create.call_args[0][0].containers[0].execution.command
+    assert "--l2-adapter" not in command
+    assert update.call_args[1]["state"] == WorkloadStateEnum.STARTING
+
+    cache_service.config.l2_storages[0].adapter_flag_enabled = True
+    cache_service.config.l2_storages[0].params = {"tenant_id": "nixl"}
+    create, _ = _run_start(manager, clientset, cache_service, provider)
+    command = create.call_args[0][0].containers[0].execution.command
+    assert command[-2:] == [
+        "--l2-adapter",
+        '{"type":"xdfs","tenant_id":"nixl"}',
+    ]
 
 
 def test_start_instance_renders_l2_cascade_in_declared_order():
@@ -994,7 +1070,16 @@ def test_start_instance_l2_without_provider_support_sets_error():
         )
     )
 
-    create, update = _run_start(manager, clientset, cache_service, _new_provider())
+    # Keep the backend declaration so this exercises the provider-level
+    # "no adapter flag" branch rather than the unknown-backend validation.
+    provider = _new_provider(
+        l2_backends={
+            "fs": CacheProviderL2Backend(
+                fields=[CacheProviderL2Field(name="base_path", required=True)]
+            )
+        }
+    )
+    create, update = _run_start(manager, clientset, cache_service, provider)
 
     create.assert_not_called()
     assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR

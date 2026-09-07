@@ -306,10 +306,10 @@ class CacheServiceProvisioner:
         """
         Resolve the (version config, version identifier, container image)
         the instance runs with. The reserved "custom" version keeps the
-        default version's run command and env templates but takes the
-        image from the service config, so the image must be
-        command-compatible with the default declaration. Raises ValueError
-        when the catalog or the service config cannot serve the request.
+        provider's run command and env templates but takes the image from
+        the service config, so the image must be command-compatible with
+        that declaration. Raises ValueError when the catalog or the service
+        config cannot serve the request.
         """
         if cache_service.provider_version == CUSTOM_VERSION:
             if not provider.custom_version:
@@ -317,7 +317,7 @@ class CacheServiceProvisioner:
                     f"Cache provider {cache_service.provider_name} does not "
                     f"allow the custom version"
                 )
-            version_config, _ = provider.get_version_config(None)
+            version_config = provider.custom_version_config()
             if version_config is None:
                 raise ValueError(
                     f"Cache provider {cache_service.provider_name} has no "
@@ -456,7 +456,10 @@ class CacheServiceProvisioner:
         env_sources: Dict[str, str] = {}
         for l2_storage in l2_storages:
             entry_args, entry_env = render_l2_adapter(
-                provider, l2_storage.backend, l2_storage.params or {}
+                provider,
+                l2_storage.backend,
+                l2_storage.params or {},
+                l2_storage.adapter_flag_enabled,
             )
             for env_name, value in entry_env.items():
                 if env_name in env_sources:

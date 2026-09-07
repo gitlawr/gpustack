@@ -118,6 +118,11 @@ class CacheServiceL2Storage(BaseModel):
     params: Dict[str, Any] = {}
     """Backend field name -> value, per the provider's field declarations."""
 
+    adapter_flag_enabled: Optional[bool] = None
+    """Optional per-backend switch. When the provider marks its adapter flag
+    optional, ``None`` uses the catalog default; false tells the UI to hide
+    the backend fields and does not emit the adapter flag."""
+
 
 class CacheServiceConfig(BaseModel):
     ram_size: Optional[int] = None
@@ -145,6 +150,11 @@ class CacheServiceConfig(BaseModel):
     l2_storages: Optional[List[CacheServiceL2Storage]] = None
     """Managed mode only: ordered L2 storage backends forming a cascade.
     The first entry is the preferred read tier; all entries receive writes."""
+
+    management_url: Optional[str] = None
+    """Link to the cache engine's own management UI, rendered beside the
+    service name in the list and detail views. Display-only: the
+    platform never calls it."""
 
 
 @dataclass
@@ -318,6 +328,57 @@ class TestCacheServiceConnectionRequest(BaseModel):
 class TestCacheServiceConnectionResponse(BaseModel):
     reachable: bool
     message: Optional[str] = None
+
+
+class CacheServiceMetricSeries(BaseModel):
+    """One chartable series of a semantic metric: filtered identifying
+    labels (worker/instance) plus [timestamp, value] points; value is
+    None where the sample is non-finite (chart gap)."""
+
+    labels: Dict[str, str] = {}
+    points: List[List[Optional[float]]] = []
+
+
+class CacheServiceMetricChart(BaseModel):
+    """One semantic metric, charted at two granularities: the
+    service-level aggregate (ratios weighted by actual traffic — the
+    default view, readable at any fleet size) and the per-instance
+    breakdown behind a toggle."""
+
+    aggregate: List[CacheServiceMetricSeries] = []
+    instances: List[CacheServiceMetricSeries] = []
+
+
+class CacheServiceAttachedMetrics(BaseModel):
+    """External-cache hit accounting of one attached engine instance
+    over the requested window. The row set is database-enumerated; the
+    numbers come from the engine's own counters (vLLM's
+    external_prefix_cache_*), so an instance whose engine exports none
+    keeps its row with empty values."""
+
+    model_id: Optional[int] = None
+    model_name: Optional[str] = None
+    model_instance_name: Optional[str] = None
+    worker_name: Optional[str] = None
+    hit_tokens: Optional[float] = None
+    queried_tokens: Optional[float] = None
+    hit_rate: Optional[float] = None
+
+
+class CacheServiceMetricsPublic(BaseModel):
+    """Semantic metric series for one cache service, translated from the
+    provider's declared mappings and queried from the built-in
+    Prometheus. available=False carries why charts cannot render (no
+    declaration / observability disabled / Prometheus unreachable)."""
+
+    available: bool = False
+    reason: Optional[str] = None
+    start: Optional[float] = None
+    end: Optional[float] = None
+    step: Optional[int] = None
+    mappings: Dict[str, CacheServiceMetricChart] = {}
+    throughput: Dict[str, CacheServiceMetricChart] = {}
+    attached: List[CacheServiceAttachedMetrics] = []
 
 
 def cache_service_spec_digest(service: "CacheService") -> str:

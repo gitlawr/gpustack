@@ -1,7 +1,7 @@
 import json
 import re
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, model_validator
 
@@ -10,6 +10,53 @@ from gpustack.utils.version import pick_runtime_version
 CUSTOM_VERSION = "custom"
 """Reserved provider_version identifier: the service pins a user-supplied
 container image (config.image) instead of a declared version."""
+
+LocalizedText = Union[str, Dict[str, str]]
+"""A user-facing string, either bare or keyed by locale.
+
+A bare string is the text in every locale. A mapping carries one entry per
+locale plus the required "default" fallback:
+
+    description:
+      default: XSKY MeshFusion Store distributed storage as the L2 tier.
+      zh-CN: 以 XSKY MeshFusion Store 分布式存储作为 L2 层。
+
+Only display text is localizable. Identity a declaration renders or
+validates against — field ``name``, ``options`` values, catalog keys — stays
+verbatim, so a translated catalog produces byte-identical connector config.
+
+The API serves the mapping as declared and the UI resolves it against the
+locale the user picked, which the request carries no reliable signal of.
+"""
+
+DEFAULT_LOCALE = "default"
+"""Locale key every localized mapping must carry: what the UI falls back to
+for a locale the declaration does not translate, and the text non-UI
+consumers (catalog search, logs) read."""
+
+# BCP 47 shape, loose enough to admit any real tag: a two- or three-letter
+# primary subtag (ISO 639-1 "zh", 639-2/3 "yue") plus any number of script,
+# region or variant subtags. Its job is to catch a typo like "ZH_cn", which
+# would otherwise be text that renders for nobody — a tag it rejects costs
+# the whole provider, so it must not reject one a UI could legitimately ask
+# for.
+LOCALE_PATTERN = re.compile(r"^(default|[a-z]{2,3}(-[A-Za-z0-9]+)*)$")
+
+
+def localized_default(value: Optional[LocalizedText]) -> Optional[str]:
+    """The declaration's fallback text: the bare string, or the mapping's
+    "default" entry."""
+    if isinstance(value, dict):
+        return value.get(DEFAULT_LOCALE)
+    return value
+
+
+def localized_values(value: Optional[LocalizedText]) -> List[str]:
+    """Every translation of a localized string, for consumers matching
+    against text in a locale they do not know (catalog search)."""
+    if isinstance(value, dict):
+        return [text for text in value.values() if text]
+    return [value] if value else []
 
 
 class CacheProviderSourceEnum(str, Enum):
@@ -22,7 +69,7 @@ class CacheProviderLink(BaseModel):
     """A brand link (docs, product page, support) rendered on the
     provider's catalog card."""
 
-    label: str
+    label: LocalizedText
     url: str
 
 
@@ -74,6 +121,13 @@ class CacheProviderVersionConfig(BaseModel):
     env: Optional[Dict[str, str]] = None
     """Env template for the managed container. Values support {{placeholder}}."""
 
+    metrics: Optional["CacheProviderMetrics"] = None
+    """Overrides the provider-level metrics declaration for this version,
+    whole — declared when the version's exposition renames metrics (an
+    exporter change typically renames a family at once, so per-key
+    inheritance would hide half the picture). Undeclared versions read
+    the provider default."""
+
     def supports_runtime(self, backend: Optional[str]) -> bool:
         """Whether the version can run on the node's accelerator.
         runtime_images doubles as the support matrix: a node with a
@@ -117,6 +171,10 @@ class CacheProviderKVTransferConfig(BaseModel):
     """Engine argument that carries the serialized payload."""
 
     kv_connector: str
+    kv_connector_module_path: Optional[str] = None
+    """Optional Python module path for engines that load the connector
+    implementation outside their default registry."""
+
     kv_role: str = "kv_both"
     kv_connector_extra_config: Dict[str, Any] = {}
     """Connector-specific settings. String values support {{placeholder}};
@@ -181,8 +239,62 @@ class CacheProviderResourceProfile(BaseModel):
     cpu: Optional[float] = None
 
 
+class CacheProviderMetricValue(BaseModel):
+    """How to extract one semantic metric value from the provider's
+    Prometheus exposition. At most one of the forms is set (validated —
+    the query builder would otherwise silently pick one of several).
+    Consumed by the cache-service metrics endpoint, which translates the
+    form into a PromQL query over the service's scrape series."""
+
+    gauge: Optional[str] = None
+    """Gauge metric name; charted as-is."""
+
+    rate: Optional[str] = None
+    """Counter metric name; charted as its per-second rate over the
+    chart's rate window (e.g. lookup traffic in tokens per second)."""
+
+    ratio: Optional[Dict[str, str]] = None
+    """{"numerator": counter, "denominator": counter}: the ratio of the
+    two counters' increases over the chart's rate window."""
+
+    gauge_ratio: Optional[Dict[str, str]] = None
+    """{"numerator": gauge, "denominator": gauge}: the instantaneous ratio
+    of two gauges (e.g. allocated / capacity)."""
+
+    histogram_avg: Optional[str] = None
+    """Histogram base name: increase(_sum) / increase(_count) over the
+    rate window, i.e. the average observed value."""
+
+    aggregate: Optional[str] = None
+    """How gauge values combine into the service-level series: "sum"
+    (default — capacities, byte counts) or "avg" (ratios). Only valid
+    with the gauge form: the other forms aggregate naturally (operands
+    sum before dividing, weighting instances by their actual traffic)."""
+
+    @model_validator(mode="after")
+    def _validate_forms(self):
+        forms = [
+            name
+            for name in ("gauge", "rate", "ratio", "gauge_ratio", "histogram_avg")
+            if getattr(self, name)
+        ]
+        if len(forms) > 1:
+            raise ValueError(
+                f"metric rule sets multiple extraction forms: {', '.join(forms)}"
+            )
+        if self.aggregate is not None:
+            if self.aggregate not in ("sum", "avg"):
+                raise ValueError(
+                    f"aggregate must be 'sum' or 'avg', got '{self.aggregate}'"
+                )
+            if not self.gauge:
+                raise ValueError("aggregate applies only to the gauge form")
+        return self
+
+
 class CacheProviderMetrics(BaseModel):
-    """Where a cache service's Prometheus exposition is scraped."""
+    """Where a cache service's Prometheus exposition is scraped, and how
+    its semantic metrics are extracted from it."""
 
     path: str = "/metrics"
     """HTTP path of the Prometheus exposition on the metrics port."""
@@ -191,12 +303,27 @@ class CacheProviderMetrics(BaseModel):
     """The engine's conventional metrics port (external mode: seeds the
     registration form's metrics-port field)."""
 
+    mappings: Dict[str, CacheProviderMetricValue] = {}
+    """Semantic key -> extraction rule. Keys use the platform's tier
+    vocabulary — L1 is the memory (near) tier, L2 the capacity tier
+    (disk/remote) — regardless of the provider's own naming: hit_rate,
+    l1_usage_bytes, l1_usage_ratio, l2_usage_bytes. A provider with
+    several L2 backends keeps them apart by series label, not by key."""
+
+    throughput: Dict[str, CacheProviderMetricValue] = {}
+    """Named throughput series (unit: GB/s) -> extraction rule."""
+
+
+# CacheProviderVersionConfig.metrics forward-references this module's
+# tail; resolve it now that the metrics classes exist.
+CacheProviderVersionConfig.model_rebuild()
+
 
 class CacheProviderL2Field(BaseModel):
     """One configurable parameter of an L2 storage backend."""
 
     name: str
-    label: Optional[str] = None
+    label: Optional[LocalizedText] = None
     """UI label; defaults to name."""
 
     type: str = "string"
@@ -218,10 +345,33 @@ class CacheProviderL2Field(BaseModel):
 class CacheProviderL2Backend(BaseModel):
     """A storage backend the provider's L2 adapter can spill KV cache to."""
 
-    display_name: Optional[str] = None
-    description: Optional[str] = None
+    display_name: Optional[LocalizedText] = None
+    description: Optional[LocalizedText] = None
     icon: Optional[str] = None
     """Logo URL for brand display; the UI falls back to a generic icon."""
+
+    adapter_flag_optional: bool = False
+    """Whether the UI should offer a separate switch for enabling the
+    provider's ``l2_adapter_flag`` for this backend."""
+
+    adapter_flag_default: bool = True
+    """Default state of the optional adapter-flag switch."""
+
+    adapter_flag_label: Optional[LocalizedText] = None
+    """Label for the optional adapter-flag switch."""
+
+    adapter_type: Optional[str] = None
+    """JSON ``type`` emitted for this backend; defaults to its catalog key."""
+
+    adapter_backend: Optional[str] = None
+    """Optional JSON ``backend`` value for adapters with a second type."""
+
+    adapter_params: Dict[str, str] = {}
+    """Mapping of nested ``backend_params`` keys to declared field names.
+
+    When set, field values are emitted under ``backend_params`` instead of
+    being placed directly on the adapter object.
+    """
 
     fields: List[CacheProviderL2Field] = []
 
@@ -239,8 +389,8 @@ class CacheProviderField(BaseModel):
     """Placeholder name; must not collide with the reserved platform
     placeholders (host/port/metrics_port/ram_size/chunk_size)."""
 
-    label: Optional[str] = None
-    description: Optional[str] = None
+    label: Optional[LocalizedText] = None
+    description: Optional[LocalizedText] = None
 
     type: str = "string"
     """Value type: "string" | "number" | "boolean" (booleans render as
@@ -265,10 +415,10 @@ class CacheProviderExternalField(BaseModel):
     (host/port) instead, not here."""
 
     name: str
-    label: Optional[str] = None
+    label: Optional[LocalizedText] = None
     """UI label; defaults to name."""
 
-    description: Optional[str] = None
+    description: Optional[LocalizedText] = None
 
     type: str = "string"
     """Value type: "string" | "number" | "boolean" | "password"."""
@@ -288,9 +438,9 @@ class CacheProviderExternalField(BaseModel):
 
 class CacheProvider(BaseModel):
     name: str
-    display_name: Optional[str] = None
+    display_name: Optional[LocalizedText] = None
     source: CacheProviderSourceEnum = CacheProviderSourceEnum.BUILT_IN
-    description: Optional[str] = None
+    description: Optional[LocalizedText] = None
     icon: Optional[str] = None
 
     links: List[CacheProviderLink] = []
@@ -319,6 +469,11 @@ class CacheProvider(BaseModel):
     ``topology``: placement and attach contract only coincide for
     LMCache-style providers — a distributed pool may run per-node data
     components while engines attach its cluster-wide endpoint."""
+
+    management_url: bool = False
+    """Whether the engine ships its own management UI worth linking to:
+    the service form then offers a management_url config field, rendered
+    as a link beside the service name."""
 
     default_version: Optional[str] = None
     versions: Dict[str, CacheProviderVersionConfig] = {}
@@ -364,7 +519,12 @@ class CacheProvider(BaseModel):
 
     resource_profile: Optional[CacheProviderResourceProfile] = None
     health_check: CacheProviderHealthCheck = CacheProviderHealthCheck()
-    metrics: Optional[CacheProviderMetrics] = None
+    default_metrics: Optional[CacheProviderMetrics] = None
+    """The all-version default declaration, named like the other
+    provider-level defaults (default_image, default_run_command). Do not
+    read it directly for a service — a version may carry its own metrics
+    block; metrics_for() resolves the effective one."""
+
     inference_backend_integrations: List[CacheProviderIntegration] = []
 
     common_parameters: List[str] = []
@@ -379,6 +539,21 @@ class CacheProvider(BaseModel):
     l2_backends: Dict[str, CacheProviderL2Backend] = {}
     """Adapter type identifier (the "type" value in the adapter JSON)
     -> backend declaration."""
+
+    def metrics_for(self, version: Optional[str]) -> Optional[CacheProviderMetrics]:
+        """The effective metrics declaration for a service pinned to
+        ``version``. Resolution rides get_version_config, so None falls
+        back to the default version like everywhere else (a managed
+        service created without an explicit version stores None). A
+        resolved version owns its block whole; versions without one —
+        and the custom version, whose image ships unknown metrics — fall
+        back to the provider default (best effort, and a mismatch
+        surfaces as a reasoned all-queries-failed degradation rather
+        than silently empty charts)."""
+        config, _ = self.get_version_config(version)
+        if config is not None and config.metrics is not None:
+            return config.metrics
+        return self.default_metrics
 
     @model_validator(mode="after")
     def resolve_version_defaults(self) -> "CacheProvider":
@@ -428,7 +603,41 @@ class CacheProvider(BaseModel):
                     "neither image nor runtime_images and inherit the "
                     "provider's default_image"
                 )
+        if not self.versions and "managed" in self.supported_modes:
+            # A provider with no release line to declare (an image that is
+            # not published, so every service names its own) still needs a
+            # way to reach an image: the custom version is it.
+            if not self.custom_version:
+                raise ValueError(
+                    f"Cache provider '{self.name}' declares no versions: a "
+                    "managed provider then resolves no image at all unless "
+                    "it allows the custom version"
+                )
+            if self.default_run_command and self.default_run_args:
+                raise ValueError(
+                    f"Cache provider '{self.name}' declares both "
+                    "default_run_command and default_run_args: a command and "
+                    "its arguments form one vector, so state it as whichever "
+                    "one the image's entrypoint calls for"
+                )
         return self
+
+    def custom_version_config(self) -> Optional[CacheProviderVersionConfig]:
+        """The launch template a service pinning the reserved "custom"
+        version runs with: the default version's config, or — for a provider
+        declaring no versions at all — one built from the provider-level
+        launch defaults, the only launch declaration such a catalog entry
+        has. None when the provider declares versions but no usable default,
+        which leaves the custom version nothing to template."""
+        config, _ = self.get_version_config(None)
+        if config is not None:
+            return config
+        if self.versions:
+            return None
+        return CacheProviderVersionConfig(
+            run_command=self.default_run_command,
+            run_args=self.default_run_args,
+        )
 
     def get_version_config(
         self, version: Optional[str] = None
@@ -502,8 +711,77 @@ def _coerce_l2_field_value(field: CacheProviderL2Field, value: Any) -> Any:
     return value
 
 
+def _l2_adapter_output_name(
+    backend_spec: CacheProviderL2Backend, field_name: str
+) -> Optional[str]:
+    output_name = next(
+        (
+            name
+            for name, mapped_field in backend_spec.adapter_params.items()
+            if mapped_field == field_name
+        ),
+        None,
+    )
+    if output_name is not None:
+        return output_name
+    if field_name in backend_spec.adapter_params:
+        return backend_spec.adapter_params[field_name]
+    if backend_spec.adapter_backend is not None and not backend_spec.adapter_params:
+        return field_name
+    return None
+
+
+def _render_l2_adapter_fields(
+    backend_spec: CacheProviderL2Backend,
+    params: Dict[str, Any],
+    adapter: Dict[str, Any],
+    nested_values: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    for field in backend_spec.fields:
+        if field.metrics_target:
+            continue
+        value = params.get(field.name, field.default)
+        if value is None or value == "":
+            continue
+        value = _coerce_l2_field_value(field, value)
+        if field.env_name:
+            env[field.env_name] = str(value)
+            continue
+        if nested_values is None:
+            adapter[field.name] = value
+            continue
+
+        output_name = _l2_adapter_output_name(backend_spec, field.name)
+        if output_name is not None:
+            # NIXL plugin backend_params are string-valued, even for values
+            # that look numeric (for example capacity in GiB).
+            nested_values[output_name] = str(value)
+    return env
+
+
+def _attach_l2_backend_params(
+    backend_spec: CacheProviderL2Backend,
+    adapter: Dict[str, Any],
+    nested_values: Optional[Dict[str, Any]],
+) -> None:
+    if nested_values is None:
+        return
+    if backend_spec.adapter_params:
+        adapter["backend_params"] = {
+            name: nested_values[name]
+            for name in backend_spec.adapter_params
+            if name in nested_values
+        }
+    else:
+        adapter["backend_params"] = nested_values
+
+
 def render_l2_adapter(
-    provider: CacheProvider, backend: str, params: Dict[str, Any]
+    provider: CacheProvider,
+    backend: str,
+    params: Dict[str, Any],
+    adapter_flag_enabled: Optional[bool] = None,
 ) -> Tuple[List[str], Dict[str, str]]:
     """
     Build the (command args, container env) that configure a managed cache
@@ -513,32 +791,37 @@ def render_l2_adapter(
     omitted from both. Raises ValueError when the provider has no L2 support
     or does not declare the backend.
     """
-    if not provider.l2_adapter_flag:
-        raise ValueError(
-            f"Cache provider '{provider.name}' does not support L2 storage"
-        )
     backend_spec = provider.l2_backends.get(backend)
     if backend_spec is None:
         raise ValueError(
             f"Cache provider '{provider.name}' has no L2 storage "
             f"backend '{backend}'"
         )
+    if not provider.l2_adapter_flag:
+        raise ValueError(
+            f"Cache provider '{provider.name}' does not support L2 storage"
+        )
 
-    adapter: Dict[str, Any] = {"type": backend}
-    env: Dict[str, str] = {}
-    for field in backend_spec.fields:
-        if field.metrics_target:
-            # Scrape-address fields configure GPUStack's metrics
-            # collection, not the cache server.
-            continue
-        value = params.get(field.name, field.default)
-        if value is None or value == "":
-            continue
-        value = _coerce_l2_field_value(field, value)
-        if field.env_name:
-            env[field.env_name] = str(value)
-        else:
-            adapter[field.name] = value
+    flag_enabled = (
+        backend_spec.adapter_flag_default
+        if adapter_flag_enabled is None
+        else bool(adapter_flag_enabled)
+    )
+    if backend_spec.adapter_flag_optional and not flag_enabled:
+        return [], {}
+
+    adapter: Dict[str, Any] = {
+        "type": backend_spec.adapter_type or backend,
+    }
+    if backend_spec.adapter_backend is not None:
+        adapter["backend"] = backend_spec.adapter_backend
+    nested_values: Optional[Dict[str, Any]] = (
+        {}
+        if (backend_spec.adapter_backend is not None or backend_spec.adapter_params)
+        else None
+    )
+    env = _render_l2_adapter_fields(backend_spec, params, adapter, nested_values)
+    _attach_l2_backend_params(backend_spec, adapter, nested_values)
 
     args = [provider.l2_adapter_flag, json.dumps(adapter, separators=(",", ":"))]
     return args, env
@@ -620,6 +903,74 @@ def validate_injection_templates(provider: "CacheProvider") -> List[str]:
     return errors
 
 
+def _localized_violations(value: Any, where: str) -> List[str]:
+    """Check one localized slot against the mapping contract."""
+    if not isinstance(value, dict):
+        return []
+    if not value:
+        return [f"{where} is an empty locale mapping"]
+    errors: List[str] = []
+    if not value.get(DEFAULT_LOCALE):
+        # Without a fallback, a locale the declaration skips has nothing
+        # to render and the slot reads as untranslated rather than as
+        # the author's canonical text.
+        errors.append(f"{where} has no '{DEFAULT_LOCALE}' entry")
+    for locale in sorted(value):
+        if not LOCALE_PATTERN.match(locale):
+            errors.append(f"{where} has invalid locale key '{locale}'")
+    return errors
+
+
+def validate_localized_text(provider: "CacheProvider") -> List[str]:
+    """
+    Check every localizable slot of a provider against the LocalizedText
+    contract; returns human-readable violations (empty when clean).
+
+    Enforced at load time because the UI resolves these mappings itself:
+    a slot missing its "default" degrades to whatever key the fallback
+    chain lands on, differently per locale, and a typo'd locale key is
+    text that simply never appears for anyone.
+    """
+    errors: List[str] = []
+    prefix = f"'{provider.name}'"
+    errors.extend(
+        _localized_violations(provider.display_name, f"{prefix} display_name")
+    )
+    errors.extend(_localized_violations(provider.description, f"{prefix} description"))
+    for index, link in enumerate(provider.links):
+        errors.extend(
+            _localized_violations(link.label, f"{prefix} link #{index} label")
+        )
+    for field in provider.external_fields:
+        where = f"{prefix} external field '{field.name}'"
+        errors.extend(_localized_violations(field.label, f"{where} label"))
+        errors.extend(_localized_violations(field.description, f"{where} description"))
+    for field in provider.managed_fields:
+        where = f"{prefix} managed field '{field.name}'"
+        errors.extend(_localized_violations(field.label, f"{where} label"))
+        errors.extend(_localized_violations(field.description, f"{where} description"))
+    for key, backend in provider.l2_backends.items():
+        where = f"{prefix} l2 backend '{key}'"
+        errors.extend(
+            _localized_violations(backend.display_name, f"{where} display_name")
+        )
+        errors.extend(
+            _localized_violations(backend.description, f"{where} description")
+        )
+        errors.extend(
+            _localized_violations(
+                backend.adapter_flag_label, f"{where} adapter_flag_label"
+            )
+        )
+        for field in backend.fields:
+            errors.extend(
+                _localized_violations(
+                    field.label, f"{where} field '{field.name}' label"
+                )
+            )
+    return errors
+
+
 def render_typed_template(value: Any, params: Dict[str, Any]) -> Any:
     """
     Render a template value preserving parameter types: a string that is
@@ -642,8 +993,12 @@ def render_kv_transfer_config(
     [flag, compact JSON payload]."""
     payload: Dict[str, Any] = {
         "kv_connector": config.kv_connector,
-        "kv_role": config.kv_role,
     }
+    if config.kv_connector_module_path:
+        payload["kv_connector_module_path"] = render_typed_template(
+            config.kv_connector_module_path, params
+        )
+    payload["kv_role"] = config.kv_role
     if config.kv_connector_extra_config:
         payload["kv_connector_extra_config"] = {
             key: render_typed_template(value, params)

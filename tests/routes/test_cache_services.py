@@ -75,7 +75,10 @@ def _system_ctx() -> TenantContext:
 
 
 def _provider(
-    supported_modes=None, topology="singleton", custom_version=False
+    supported_modes=None,
+    topology="singleton",
+    custom_version=False,
+    management_url=False,
 ) -> CacheProvider:
     return CacheProvider(
         name="LMCache",
@@ -84,6 +87,7 @@ def _provider(
         default_version="v1",
         versions={"v1": CacheProviderVersionConfig(image="lmcache:v1")},
         custom_version=custom_version,
+        management_url=management_url,
         inference_backend_integrations=[CacheProviderIntegration(backend="vLLM")],
     )
 
@@ -110,6 +114,17 @@ def _provider_with_l2(supported_modes=None) -> CacheProvider:
             ]
         ),
     }
+    return provider
+
+
+def _provider_with_optional_l2_adapter() -> CacheProvider:
+    provider = _provider_with_l2()
+    provider.l2_backends["xdfs"] = CacheProviderL2Backend(
+        adapter_flag_optional=True,
+        adapter_flag_default=False,
+        adapter_flag_label="Enable L2 Adapter Flag",
+        fields=[CacheProviderL2Field(name="tenant_id", required=True)],
+    )
     return provider
 
 
@@ -284,6 +299,55 @@ async def test_create_rejects_custom_version_without_image(monkeypatch, config):
 
 
 @pytest.mark.asyncio
+async def test_create_defaults_to_custom_version_without_declared_versions(monkeypatch):
+    """A provider publishing no image declares no version to name, so an
+    omitted provider_version reads as the custom one."""
+    worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
+    _patch_create_prereqs(monkeypatch, worker=worker)
+    provider = _provider(custom_version=True)
+    provider.versions = {}
+    provider.default_version = None
+    _patch_provider(monkeypatch, provider)
+    monkeypatch.setattr(
+        cache_services_route.CacheService,
+        "create",
+        AsyncMock(side_effect=lambda session, source: SimpleNamespace(**source)),
+    )
+
+    created = await cache_services_route.create_cache_service(
+        session=MagicMock(),
+        ctx=_user_ctx(),
+        cache_service_in=_managed_create(
+            config=CacheServiceConfig(ram_size=20, image="myteam/meshfusion:dev"),
+        ),
+    )
+
+    assert created.provider_version == "custom"
+    assert created.config["image"] == "myteam/meshfusion:dev"
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_missing_image_without_declared_versions(monkeypatch):
+    """The image is the only way such a provider reaches one, so leaving
+    it out fails as a missing custom-version image."""
+    worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
+    _patch_create_prereqs(monkeypatch, worker=worker)
+    provider = _provider(custom_version=True)
+    provider.versions = {}
+    provider.default_version = None
+    _patch_provider(monkeypatch, provider)
+
+    with pytest.raises(BadRequestException) as exc_info:
+        await cache_services_route.create_cache_service(
+            session=MagicMock(),
+            ctx=_user_ctx(),
+            cache_service_in=_managed_create(config=CacheServiceConfig(ram_size=20)),
+        )
+
+    assert "config.image is required" in exc_info.value.message
+
+
+@pytest.mark.asyncio
 async def test_create_rejects_custom_version_without_provider_opt_in(monkeypatch):
     _patch_create_prereqs(monkeypatch)
     _patch_provider(monkeypatch, _provider())
@@ -338,6 +402,157 @@ async def test_create_rejects_custom_version_for_external_mode(monkeypatch):
         )
 
     assert "managed" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_management_url_without_provider_support(monkeypatch):
+    _patch_create_prereqs(monkeypatch)
+    _patch_provider(monkeypatch, _provider())
+
+    with pytest.raises(BadRequestException) as exc_info:
+        await cache_services_route.create_cache_service(
+            session=MagicMock(),
+            ctx=_user_ctx(),
+            cache_service_in=_managed_create(
+                config=CacheServiceConfig(
+                    ram_size=20, management_url="https://console.example.com"
+                ),
+            ),
+        )
+
+    assert "not supported by cache provider" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_management_url_for_external_mode_too(monkeypatch):
+    """The field rides config, which external services also accept."""
+    _patch_create_prereqs(monkeypatch)
+    _patch_provider(monkeypatch, _provider())
+
+    with pytest.raises(BadRequestException) as exc_info:
+        await cache_services_route.create_cache_service(
+            session=MagicMock(),
+            ctx=_user_ctx(),
+            cache_service_in=_external_create(
+                config=CacheServiceConfig(management_url="https://console.example.com"),
+            ),
+        )
+
+    assert "not supported by cache provider" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "https://",  # no host
+        "ftp://console.example.com",  # wrong scheme
+        "console.example.com",  # no scheme
+        "https://console example.com",  # space breaks the netloc
+    ],
+)
+async def test_create_rejects_malformed_management_url(monkeypatch, bad_url):
+    _patch_create_prereqs(monkeypatch)
+    _patch_provider(monkeypatch, _provider(management_url=True))
+
+    with pytest.raises(BadRequestException) as exc_info:
+        await cache_services_route.create_cache_service(
+            session=MagicMock(),
+            ctx=_user_ctx(),
+            cache_service_in=_managed_create(
+                config=CacheServiceConfig(ram_size=20, management_url=bad_url),
+            ),
+        )
+
+    assert "valid http(s) URL" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_management_url_with_credentials(monkeypatch):
+    """A display-only link must not smuggle credentials into stored config."""
+    _patch_create_prereqs(monkeypatch)
+    _patch_provider(monkeypatch, _provider(management_url=True))
+
+    with pytest.raises(BadRequestException) as exc_info:
+        await cache_services_route.create_cache_service(
+            session=MagicMock(),
+            ctx=_user_ctx(),
+            cache_service_in=_managed_create(
+                config=CacheServiceConfig(
+                    ram_size=20,
+                    management_url="https://user:pass@console.example.com",
+                ),
+            ),
+        )
+
+    assert "must not embed credentials" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_overlong_management_url(monkeypatch):
+    _patch_create_prereqs(monkeypatch)
+    _patch_provider(monkeypatch, _provider(management_url=True))
+
+    with pytest.raises(BadRequestException) as exc_info:
+        await cache_services_route.create_cache_service(
+            session=MagicMock(),
+            ctx=_user_ctx(),
+            cache_service_in=_managed_create(
+                config=CacheServiceConfig(
+                    ram_size=20,
+                    management_url="https://console.example.com/" + "a" * 2048,
+                ),
+            ),
+        )
+
+    assert "at most 2048 characters" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_create_accepts_management_url_with_provider_support(monkeypatch):
+    worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
+    _patch_create_prereqs(monkeypatch, worker=worker)
+    _patch_provider(monkeypatch, _provider(management_url=True))
+    monkeypatch.setattr(
+        cache_services_route.CacheService,
+        "create",
+        AsyncMock(side_effect=lambda session, source: SimpleNamespace(**source)),
+    )
+
+    created = await cache_services_route.create_cache_service(
+        session=MagicMock(),
+        ctx=_user_ctx(),
+        cache_service_in=_managed_create(
+            config=CacheServiceConfig(
+                ram_size=20, management_url="https://console.example.com"
+            ),
+        ),
+    )
+
+    assert created.config["management_url"] == "https://console.example.com"
+
+
+@pytest.mark.asyncio
+async def test_create_canonicalizes_blank_management_url(monkeypatch):
+    """Whitespace-only values store as None instead of tripping validation."""
+    worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
+    _patch_create_prereqs(monkeypatch, worker=worker)
+    _patch_provider(monkeypatch, _provider())
+    monkeypatch.setattr(
+        cache_services_route.CacheService,
+        "create",
+        AsyncMock(side_effect=lambda session, source: SimpleNamespace(**source)),
+    )
+
+    created = await cache_services_route.create_cache_service(
+        session=MagicMock(),
+        ctx=_user_ctx(),
+        cache_service_in=_managed_create(
+            config=CacheServiceConfig(ram_size=20, management_url="   "),
+        ),
+    )
+
+    assert created.config["management_url"] is None
 
 
 @pytest.mark.asyncio
@@ -1149,6 +1364,59 @@ async def test_create_accepts_valid_l2_storage(monkeypatch, config):
     assert created.config["l2_storages"] == [
         entry.model_dump() for entry in config.l2_storages
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_optional_l2_adapter_can_be_disabled_without_fields(
+    monkeypatch,
+):
+    worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
+    _patch_create_prereqs(monkeypatch, worker=worker)
+    _patch_provider(monkeypatch, _provider_with_optional_l2_adapter())
+    monkeypatch.setattr(
+        cache_services_route.CacheService,
+        "create",
+        AsyncMock(side_effect=lambda session, source: SimpleNamespace(**source)),
+    )
+    storage = CacheServiceL2Storage(
+        backend="xdfs", adapter_flag_enabled=False, params={}
+    )
+
+    created = await cache_services_route.create_cache_service(
+        session=MagicMock(),
+        ctx=_user_ctx(),
+        cache_service_in=_managed_create(
+            config=CacheServiceConfig(ram_size=20, l2_storages=[storage])
+        ),
+    )
+
+    assert created.config["l2_storages"][0]["adapter_flag_enabled"] is False
+    assert created.config["l2_storages"][0]["params"] == {}
+
+
+@pytest.mark.asyncio
+async def test_create_optional_l2_adapter_requires_fields_when_enabled(monkeypatch):
+    worker = SimpleNamespace(id=5, deleted_at=None, cluster_id=1)
+    _patch_create_prereqs(monkeypatch, worker=worker)
+    _patch_provider(monkeypatch, _provider_with_optional_l2_adapter())
+
+    with pytest.raises(BadRequestException) as exc_info:
+        await cache_services_route.create_cache_service(
+            session=MagicMock(),
+            ctx=_user_ctx(),
+            cache_service_in=_managed_create(
+                config=CacheServiceConfig(
+                    ram_size=20,
+                    l2_storages=[
+                        CacheServiceL2Storage(
+                            backend="xdfs", adapter_flag_enabled=True, params={}
+                        )
+                    ],
+                )
+            ),
+        )
+
+    assert "tenant_id" in exc_info.value.message
 
 
 @pytest.mark.asyncio
@@ -2014,7 +2282,7 @@ def _secretful_service(**overrides):
         **fields,
         # mirrors pydantic's recursive model_dump so the detached-copy
         # guarantee of the redaction path is actually exercised
-        model_dump=lambda: {
+        model_dump=lambda **kwargs: {
             k: (v.model_dump() if hasattr(v, "model_dump") else v)
             for k, v in fields.items()
             if k not in ("update", "delete")

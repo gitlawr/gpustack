@@ -5,9 +5,14 @@ from pydantic import ValidationError
 
 from gpustack.schemas.cache_providers import (
     CacheProvider,
+    CacheProviderL2Backend,
+    CacheProviderL2Field,
     CacheProviderVersionConfig,
+    localized_default,
+    localized_values,
     render_l2_adapter,
     validate_injection_templates,
+    validate_localized_text,
 )
 from gpustack.schemas.cache_services import CacheServiceModeEnum
 from gpustack.server import cache_provider_catalog
@@ -120,6 +125,29 @@ def test_version_without_any_image_is_rejected():
     starts."""
     with pytest.raises(ValidationError):
         CacheProvider(name="Imageless", versions={"v1.0": {}})
+
+
+def test_managed_provider_without_versions_must_allow_the_custom_version():
+    """A provider declaring no release line resolves no image of its own;
+    without the custom version its managed services could never start."""
+    with pytest.raises(ValidationError):
+        CacheProvider(name="Versionless", supported_modes=["managed"])
+
+    provider = CacheProvider(
+        name="Versionless",
+        supported_modes=["managed"],
+        custom_version=True,
+        default_run_args="--port {{port}}",
+    )
+    # The provider-level launch declaration is what the service's own
+    # image runs on, reached through the same version-config contract.
+    template = provider.custom_version_config()
+    assert template.run_args == "--port {{port}}"
+    assert template.run_command is None
+
+    # An external-only provider runs no container at all, so declaring no
+    # version says nothing about images.
+    CacheProvider(name="Registered", supported_modes=["external"])
 
 
 def test_own_launch_takes_over_the_pair_whole():
@@ -253,16 +281,76 @@ def test_lmcache_provider_declaration():
     assert compat is not None
 
 
+def test_metrics_for_resolves_version_override():
+    """A version carrying its own metrics block owns it whole; versions
+    without one and the custom version read the provider default — and
+    a service stored without an explicit version (None) resolves through
+    the default version like every other version lookup, so an override
+    on the default version reaches the services actually running it."""
+    from gpustack.schemas.cache_providers import (
+        CacheProvider,
+        CacheProviderMetrics,
+        CacheProviderMetricValue,
+        CacheProviderVersionConfig,
+    )
+
+    default = CacheProviderMetrics(
+        mappings={"hit_rate": CacheProviderMetricValue(gauge="old_name")}
+    )
+    renamed = CacheProviderMetrics(
+        mappings={"hit_rate": CacheProviderMetricValue(gauge="new_name")}
+    )
+    provider = CacheProvider(
+        name="X",
+        default_version="v2",
+        versions={
+            "v1": CacheProviderVersionConfig(image="img:v1"),
+            "v2": CacheProviderVersionConfig(image="img:v2", metrics=renamed),
+        },
+        default_metrics=default,
+    )
+
+    assert provider.metrics_for("v1").mappings["hit_rate"].gauge == "old_name"
+    assert provider.metrics_for("v2").mappings["hit_rate"].gauge == "new_name"
+    assert provider.metrics_for("custom").mappings["hit_rate"].gauge == "old_name"
+    assert provider.metrics_for("v9-unknown").mappings["hit_rate"].gauge == "old_name"
+    assert provider.metrics_for(None).mappings["hit_rate"].gauge == "new_name"
+
+
 def test_lmcache_metrics_declaration():
     provider = get_cache_provider("LMCache")
     assert provider is not None
 
-    # The declaration only locates the exposition (scrape targets ride
-    # on it); semantic metric mappings return with the native-UI
-    # metrics integration.
-    metrics = provider.metrics
+    metrics = provider.default_metrics
     assert metrics is not None
     assert metrics.path == "/metrics"
+
+    hit_rate = metrics.mappings["hit_rate"]
+    assert hit_rate.ratio == {
+        "numerator": "lmcache_mp_lookup_hit_tokens_total",
+        "denominator": "lmcache_mp_lookup_requested_tokens_total",
+    }
+    assert (
+        metrics.mappings["l1_usage_bytes"].gauge == "lmcache_mp_l1_memory_usage_bytes"
+    )
+    assert metrics.mappings["l1_usage_ratio"].gauge == "lmcache_mp_l1_usage_ratio"
+    assert metrics.mappings["l2_usage_bytes"].gauge == "lmcache_mp_l2_usage_bytes"
+
+    assert set(metrics.throughput) == {
+        "l0_l1_store",
+        "l0_l1_load",
+        "l2_store",
+        "l2_load",
+    }
+    for rule in metrics.throughput.values():
+        assert rule.histogram_avg
+        assert rule.gauge is None and rule.ratio is None
+    # The OTel Prometheus exporter appends the histograms' "GB/s" unit to
+    # the exported name; the declaration must carry the exported form.
+    assert (
+        metrics.throughput["l0_l1_store"].histogram_avg
+        == "lmcache_mp_l0_l1_store_throughput_GB_per_second"
+    )
 
 
 def test_lmcache_l2_declaration():
@@ -280,6 +368,10 @@ def test_lmcache_l2_declaration():
         "use_odirect",
     }
     assert fs_fields["base_path"].required is True
+    # seeded into the form so a plain "add Local Filesystem" works
+    # without inventing a path; lands in the platform data dir, which
+    # the mirrored deployment mounts from the host
+    assert fs_fields["base_path"].default == "/var/lib/gpustack/cache/lmcache/l2"
     assert fs_fields["max_capacity_gb"].type == "number"
     assert fs_fields["num_workers"].type == "number"
     assert fs_fields["use_odirect"].type == "boolean"
@@ -342,12 +434,19 @@ def test_mooncake_provider_declaration():
     assert provider.versions == {}
     assert provider.health_check.scheme == "tcp"
 
-    # Master-side exposition on the master's conventional metrics port;
-    # default_port seeds the registration form's metrics-port field.
-    metrics = provider.metrics
+    # Master-side metrics: the pool's allocated/capacity view on the
+    # master's Prometheus endpoint (conventionally port 9003). Lookup-hit
+    # accounting lives in the engine-side connector, so no hit_rate.
+    metrics = provider.default_metrics
     assert metrics is not None
     assert metrics.path == "/metrics"
     assert metrics.default_port == 9003
+    assert "hit_rate" not in metrics.mappings
+    assert metrics.mappings["l1_usage_bytes"].gauge == "master_allocated_bytes"
+    assert metrics.mappings["l1_usage_ratio"].gauge_ratio == {
+        "numerator": "master_allocated_bytes",
+        "denominator": "master_total_capacity_bytes",
+    }
     assert provider.dashboard_uid == "gpustack-mooncake"
 
     fields = {field.name: field for field in provider.external_fields}
@@ -433,13 +532,17 @@ def test_meshfusion_provider_is_a_branded_lmcache_clone():
         "description",
         "links",
         "dashboard_uid",
+        # whether a vendor ships its own management UI is branding, not
+        # an engine trait the clone would inherit
+        "management_url",
     }
     diverging_fields = {
         "l2_backends",
         "versions",
         "default_version",
-        # The staged Ascend build lives in the image templates; the CUDA
-        # layout and the run command are asserted equal below.
+        # MeshFusion images are not published, so it declares no image
+        # layout at all; the custom version carries the service's own.
+        "default_image",
         "default_runtime_images",
         # The two launch through different slots: MeshFusion's image is
         # expected to start the cache server itself.
@@ -457,21 +560,24 @@ def test_meshfusion_provider_is_a_branded_lmcache_clone():
     }
     assert differing == set()
 
-    # The versions diverge from LMCache's only by the staged Ascend
-    # build (an assumed image for XSKY to correct) and by which version
-    # each provider defaults to; at a given version the CUDA builds stay
-    # LMCache's.
-    mf_version = meshfusion.versions[meshfusion.default_version]
-    lm_version = lmcache.versions[meshfusion.default_version]
-    assert mf_version.runtime_images["cuda"] == lm_version.runtime_images["cuda"]
-    assert "cann" in mf_version.runtime_images
-    assert "cann" not in lm_version.runtime_images
+    # No release line to declare: services name the image themselves under
+    # the reserved custom version, which runs on the provider-level launch
+    # arguments — the entry's only launch declaration.
+    assert meshfusion.versions == {}
+    assert meshfusion.default_version is None
+    assert meshfusion.custom_version is True
+    custom_config = meshfusion.custom_version_config()
+    assert custom_config.run_command is None
+    assert custom_config.run_args == meshfusion.default_run_args
+    assert "--supported-transfer-mode auto" not in custom_config.run_args
+    assert lmcache.versions
 
     # Every integration is framework-scoped — the catalog is the single
     # accelerator gate. MeshFusion diverges from LMCache only by the
     # extra cann-scoped vLLM entry (an assumed placeholder for XSKY;
     # vllm-ascend trails vLLM, so its attachable range is declared
-    # separately). The cuda entries mirror LMCache's.
+    # separately). The connector settings mirror LMCache's, while MeshFusion
+    # omits the non-hybrid manager flag because its image owns that setup.
     vllm_entries = [
         c for c in meshfusion.inference_backend_integrations if c.backend == "vLLM"
     ]
@@ -481,8 +587,27 @@ def test_meshfusion_provider_is_a_branded_lmcache_clone():
     ]
     lm_vllm = lmcache.integration_for("vLLM", "cuda")
     assert lm_vllm.frameworks == ["cuda"]
+    assert [
+        entry.injection.locality_params["node_local"]["mp_transfer_mode"]
+        for entry in vllm_entries
+    ] == ["auto", "engine_driven"]
     for entry in vllm_entries:
-        assert entry.injection == lm_vllm.injection
+        mesh_injection = entry.injection.model_dump()
+        lm_injection = lm_vllm.injection.model_dump()
+        mesh_injection.pop("locality_params", None)
+        lm_injection.pop("locality_params", None)
+        mesh_kv_config = mesh_injection["kv_transfer_config"]
+        lm_kv_config = lm_injection["kv_transfer_config"]
+        mesh_kv_config.pop("kv_connector_module_path", None)
+        lm_kv_config.pop("kv_connector_module_path", None)
+        assert {
+            key: value for key, value in mesh_injection.items() if key != "args"
+        } == {key: value for key, value in lm_injection.items() if key != "args"}
+        assert entry.injection.args == ["--shutdown-timeout", "20"]
+        assert (
+            entry.injection.kv_transfer_config.kv_connector_module_path
+            == "lmcache.integration.vllm.lmcache_mp_connector"
+        )
     sglang_entries = [
         c for c in meshfusion.inference_backend_integrations if c.backend == "SGLang"
     ]
@@ -498,40 +623,87 @@ def test_meshfusion_provider_is_a_branded_lmcache_clone():
     assert meshfusion.integration_for("SGLang", "cann") is None
     assert all(c.frameworks == ["cuda"] for c in lmcache.inference_backend_integrations)
 
-    # MeshFusion adds XSKY's store L2 backend (adapter type "xdfs",
-    # branded with the XSKY icon) on top of the LMCache-inherited
-    # backends; LMCache has none of it.
+    # XSKY's store (catalog key "xdfs", rendered as the NIXL dynamic
+    # adapter and branded with the XSKY icon) is the only L2 tier
+    # MeshFusion is deployed with, and LMCache has none of it.
     assert "xdfs" not in lmcache.l2_backends
-    # The inherited backends must stay byte-identical, not just share keys.
-    for key, backend in lmcache.l2_backends.items():
-        assert meshfusion.l2_backends[key] == backend
+    assert set(meshfusion.l2_backends) == {"xdfs"}
     xdfs = meshfusion.l2_backends["xdfs"]
     assert xdfs.icon == "/static/catalog_icons/xsky.png"
+    assert xdfs.adapter_flag_optional is True
+    assert xdfs.adapter_flag_default is False
+    assert localized_default(xdfs.adapter_flag_label) == "Enable L2 Adapter Flag"
+    assert xdfs.adapter_type == "nixl_store_dynamic"
+    assert xdfs.adapter_backend == "XDFS_KV"
+    assert xdfs.adapter_params == {
+        "conf": "conf",
+        "params_file": "params_file",
+        "tenant_id": "tenant_id",
+        "max_capacity_gb": "max_capacity_gb",
+    }
     xdfs_fields = {field.name for field in xdfs.fields}
-    assert {"metadata_endpoint", "sdk_config_file", "max_write_inflight_bytes"} <= (
-        xdfs_fields
-    )
-    assert next(f for f in xdfs.fields if f.name == "metadata_endpoint").required
-    # No store-side metrics scrape this version: L2 observability rides on
-    # the cache server's own lmcache_mp_* metrics.
-    assert all(field.metrics_target is False for field in xdfs.fields)
+    # MeshFusion supplies the plugin files from its image; the service form
+    # exposes only the tenant override.
+    assert xdfs_fields == {"tenant_id"}
+    assert next(f for f in xdfs.fields if f.name == "tenant_id").default == "nixl"
 
     args, env = render_l2_adapter(
         meshfusion,
         "xdfs",
-        {"metadata_endpoint": "10.0.0.20:8000"},
+        {},
+        adapter_flag_enabled=False,
     )
-    assert '"metadata_endpoint":"10.0.0.20:8000"' in args[1]
+    # MeshFusion Store is configured by the image itself; the backend must
+    # not emit the generic LMCache adapter flag or JSON payload.
+    assert args == []
+    assert env == {}
+
+    args, env = render_l2_adapter(
+        meshfusion,
+        "xdfs",
+        {
+            "tenant_id": "glmint4mix-1787763619",
+        },
+        adapter_flag_enabled=True,
+    )
+    assert args == [
+        "--l2-adapter",
+        '{"type":"nixl_store_dynamic","backend":"XDFS_KV",'
+        '"backend_params":{"tenant_id":"glmint4mix-1787763619"}}',
+    ]
+    assert env == {}
+
+
+def test_render_l2_adapter_stringifies_nested_backend_params():
+    provider = CacheProvider(
+        name="nested-adapter",
+        l2_adapter_flag="--l2-adapter",
+        l2_backends={
+            "store": CacheProviderL2Backend(
+                adapter_type="dynamic",
+                adapter_backend="STORE",
+                adapter_params={"capacity": "max_capacity_gb"},
+                fields=[CacheProviderL2Field(name="max_capacity_gb", type="number")],
+            )
+        },
+    )
+
+    args, env = render_l2_adapter(provider, "store", {"max_capacity_gb": 1048576})
+
+    assert json.loads(args[1])["backend_params"] == {"capacity": "1048576"}
     assert env == {}
 
 
 def test_provider_brand_links():
+    def labels(provider):
+        return {localized_default(link.label) for link in provider.links}
+
     lmcache = get_cache_provider("LMCache")
-    assert {link.label for link in lmcache.links} == {"Documentation", "GitHub"}
+    assert labels(lmcache) == {"Documentation", "GitHub"}
     assert all(link.url.startswith("https://") for link in lmcache.links)
 
     mooncake = get_cache_provider("Mooncake")
-    assert {link.label for link in mooncake.links} == {"Documentation", "GitHub"}
+    assert labels(mooncake) == {"Documentation", "GitHub"}
 
     meshfusion = get_cache_provider("XSKY MeshFusion")
     assert meshfusion.links, "partner card needs at least one brand link"
@@ -603,6 +775,41 @@ def test_render_injection_substitutes_host_and_port():
     # engine-driven copies since IPC handles cannot cross hosts.
     assert '"lmcache.mp.mp_transfer_mode":"auto"' in args[1]
     assert args[2] == "--disable-hybrid-kv-cache-manager"
+
+
+def test_meshfusion_vllm_injection_includes_connector_module_path():
+    provider = get_cache_provider("XSKY MeshFusion")
+    rendered = render_injection(
+        provider,
+        "vLLM",
+        {"host": "127.0.0.1", "port": 5556, "locality": "node_local"},
+    )
+    assert rendered is not None
+    _, args, _ = rendered
+    payload = json.loads(args[1])
+    assert payload["kv_connector"] == "LMCacheMPConnector"
+    assert (
+        payload["kv_connector_module_path"]
+        == "lmcache.integration.vllm.lmcache_mp_connector"
+    )
+    assert payload["kv_role"] == "kv_both"
+    assert payload["kv_connector_extra_config"]["lmcache.mp.host"] == "tcp://127.0.0.1"
+    assert payload["kv_connector_extra_config"]["lmcache.mp.port"] == 5556
+    assert args[2:] == ["--shutdown-timeout", "20"]
+
+    rendered_cann = render_injection(
+        provider,
+        "vLLM",
+        {"host": "127.0.0.1", "port": 5556, "locality": "node_local"},
+        framework="cann",
+    )
+    assert rendered_cann is not None
+    _, cann_args, _ = rendered_cann
+    cann_payload = json.loads(cann_args[1])
+    assert (
+        cann_payload["kv_connector_extra_config"]["lmcache.mp.mp_transfer_mode"]
+        == "engine_driven"
+    )
 
 
 def test_kv_transfer_config_renders_structured_slot_with_types():
@@ -850,3 +1057,129 @@ def test_injection_contract_flags_violations():
     # "mode" is not present in every locality bucket, so it is
     # unresolvable on the remote path and must be flagged.
     assert "placeholder 'mode'" in joined
+
+
+def test_bare_string_and_locale_mapping_are_both_accepted():
+    """A declaration written before the catalog had locales stays valid:
+    a bare string is the text in every locale, so translating a slot is
+    additive rather than a rewrite."""
+    provider = CacheProvider(
+        name="localized",
+        display_name="Localized",
+        description={"default": "A cache", "zh-CN": "一个缓存"},
+        links=[{"label": {"default": "Docs", "zh-CN": "文档"}, "url": "https://x"}],
+        managed_fields=[
+            {"name": "size", "label": {"default": "Size", "ja-JP": "サイズ"}}
+        ],
+    )
+    assert validate_localized_text(provider) == []
+    assert localized_default(provider.display_name) == "Localized"
+    assert localized_default(provider.description) == "A cache"
+    assert localized_values(provider.display_name) == ["Localized"]
+    assert sorted(localized_values(provider.description)) == ["A cache", "一个缓存"]
+
+
+def test_localized_slot_without_a_default_is_a_violation():
+    """Every locale mapping needs the fallback entry: without it a locale
+    the declaration skips has no text to render, so the slot reads as
+    untranslated instead of as the author's canonical wording."""
+    provider = CacheProvider(
+        name="no-default",
+        display_name={"zh-CN": "只有中文"},
+        description={},
+        l2_backends={
+            "b": CacheProviderL2Backend(
+                description={"zh-CN": "只有中文"},
+                fields=[CacheProviderL2Field(name="x", label={"zh-CN": "只有中文"})],
+            )
+        },
+    )
+    joined = "\n".join(validate_localized_text(provider))
+    assert "display_name has no 'default' entry" in joined
+    assert "description is an empty locale mapping" in joined
+    assert "l2 backend 'b' description has no 'default' entry" in joined
+    assert "l2 backend 'b' field 'x' label has no 'default' entry" in joined
+
+
+def test_invalid_locale_key_is_a_violation():
+    """A key that no locale resolves to is text that renders for nobody;
+    it is caught at load time rather than silently never appearing.
+
+    Rejection costs the whole provider, so the check admits every real tag
+    shape: a script or region suffix, and the three-letter primary subtags
+    of ISO 639-2/3 alongside 639-1's two."""
+    provider = CacheProvider(
+        name="bad-locale",
+        external_fields=[
+            {
+                "name": "protocol",
+                "label": {
+                    "default": "Protocol",
+                    "ZH_cn": "协议",
+                    "zh-Hant": "協議",
+                    "yue": "協議",
+                    "fil-PH": "Protocol",
+                },
+            }
+        ],
+    )
+    joined = "\n".join(validate_localized_text(provider))
+    assert "invalid locale key 'ZH_cn'" in joined
+    for valid in ("zh-Hant", "yue", "fil-PH"):
+        assert valid not in joined
+
+
+def test_localized_violation_costs_only_its_own_provider(monkeypatch):
+    """The localized-text contract is enforced with the same blast radius
+    as the injection contract: the offending provider drops out, the rest
+    of the catalog still serves."""
+    asset = (
+        "- name: Broken\n"
+        '  default_image: "repo/cache:{{version}}"\n'
+        "  description:\n"
+        "    zh-CN: 没有默认文案\n"
+        "  versions:\n"
+        '    "v1.0": {}\n'
+        "- name: Good\n"
+        '  default_image: "repo/cache:{{version}}"\n'
+        "  description:\n"
+        "    default: A cache\n"
+        "    zh-CN: 一个缓存\n"
+        "  versions:\n"
+        '    "v1.0": {}\n'
+    )
+
+    class _Asset:
+        def is_file(self):
+            return True
+
+        def read_text(self, encoding=None):
+            return asset
+
+    try:
+        monkeypatch.setattr(cache_provider_catalog, "files", lambda _package: _Asset())
+        monkeypatch.setattr(_Asset, "joinpath", lambda self, _name: self, raising=False)
+        providers = load_cache_providers(reload=True)
+        assert [provider.name for provider in providers] == ["Good"]
+    finally:
+        monkeypatch.undo()
+        load_cache_providers(reload=True)
+
+
+def test_every_form_field_declares_a_label():
+    """The UI humanizes a missing label from the field name, which is an
+    English identifier: a field without a label is a slot that stays
+    English in every other locale."""
+    missing = []
+    for provider in load_cache_providers(reload=True):
+        for field in provider.external_fields:
+            if field.label is None:
+                missing.append(f"{provider.name} external field '{field.name}'")
+        for field in provider.managed_fields:
+            if field.label is None:
+                missing.append(f"{provider.name} managed field '{field.name}'")
+        for key, backend in provider.l2_backends.items():
+            for field in backend.fields:
+                if field.label is None:
+                    missing.append(f"{provider.name} l2 '{key}' field '{field.name}'")
+    assert not missing, "fields missing a label: " + ", ".join(missing)

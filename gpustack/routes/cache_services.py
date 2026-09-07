@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import aiohttp
 from fastapi import APIRouter, Request, status
@@ -21,9 +21,14 @@ from gpustack.api.tenant import (
     tenant_list_conditions,
 )
 from gpustack.routes.models import assert_cluster_belongs_to_org
-from gpustack.schemas.cache_providers import CUSTOM_VERSION
+from gpustack.schemas.cache_providers import (
+    CUSTOM_VERSION,
+    CacheProviderL2Backend,
+)
 from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 from gpustack.schemas.cache_services import (
+    CacheServiceAttachedMetrics,
+    CacheServiceMetricsPublic,
     CacheService,
     CacheServiceBase,
     CacheServiceConfig,
@@ -31,6 +36,7 @@ from gpustack.schemas.cache_services import (
     CacheServiceEndpoint,
     CacheServiceInstancePublic,
     CacheServiceInstancesPublic,
+    CacheServiceL2Storage,
     CacheServiceModeEnum,
     CacheServiceModelSummary,
     CacheServiceModelsPublic,
@@ -44,12 +50,17 @@ from gpustack.schemas.cache_services import (
 from gpustack.schemas.common import Pagination
 from gpustack.config.config import get_global_config
 from gpustack.schemas.clusters import Cluster
-from gpustack.schemas.models import Model, get_backend
+from gpustack.schemas.models import Model, ModelInstance, get_backend
 from gpustack.schemas.principals import PrincipalType, platform_principal_id
 from gpustack.schemas.workers import Worker
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.server.cache_services import probe_cache_service
 from gpustack.server.db import async_session
+from gpustack.schemas.principals import OrgRole
+from gpustack.server.cache_service_metrics import (
+    collect_cache_service_metrics,
+    parse_window as parse_metrics_window,
+)
 from gpustack.server.deps import ListParamsDep, SessionDep, TenantContextDep
 from gpustack.server.worker_request import request_to_worker, stream_to_worker
 from gpustack.utils.grafana import resolve_grafana_base_url
@@ -96,7 +107,13 @@ def _redacted_for_user(cache_service) -> CacheServicePublic:
     write through to the row (or to the event payload other stream
     subscribers see)."""
     data = (
-        cache_service.model_dump()
+        # The dump-then-validate pair is the deep copy (validating from
+        # attributes would pass nested objects through by reference and
+        # let the redaction write through to the row). The dump itself
+        # would warn on every call: the enum-typed columns deliberately
+        # store plain strings (no DB enum casts), so ORM rows carry str
+        # values that the validation below coerces — expected, not a bug.
+        cache_service.model_dump(warnings=False)
         if hasattr(cache_service, "model_dump")
         else cache_service
     )
@@ -533,6 +550,91 @@ async def get_cache_service_dashboard(
     return RedirectResponse(url=dashboard_url, status_code=302)
 
 
+@router.get("/{id}/metrics", response_model=CacheServiceMetricsPublic)
+async def get_cache_service_metrics(
+    request: Request,
+    session: SessionDep,
+    ctx: TenantContextDep,
+    id: int,
+    window: str = "1h",
+    workers: Optional[str] = None,
+):
+    """Chartable semantic metric series for the service, translated from
+    the provider's catalog declaration and queried from the built-in
+    Prometheus with a server-injected service-label selector. The whole
+    router mounts Org-owner-only; the explicit assertion below keeps
+    this telemetry gated on its own, independent of the mount policy."""
+    cache_service = await CacheService.one_by_id(session, id)
+    assert_resource_visible(
+        ctx, cache_service, not_found_message="Cache service not found"
+    )
+    ctx.assert_org_role(OrgRole.OWNER)
+    try:
+        window_seconds = parse_metrics_window(window)
+    except ValueError as e:
+        raise BadRequestException(message=str(e))
+    provider = get_cache_provider(cache_service.provider_name)
+    # The database enumerates the attached deployments' instances (the
+    # rows the UI shows); metrics only fill their numbers. The model-id
+    # scope also bounds the Prometheus queries, so a caller only ever
+    # reads the engines wired to this service. The cluster's models load
+    # whole and filter in Python: extended_kv_cache is a JSON column and
+    # the platform convention keeps JSON predicates out of SQL (the set
+    # is bounded by one cluster's deployments).
+    models = await Model.all_by_fields(
+        session,
+        fields={"cluster_id": cache_service.cluster_id},
+        extra_conditions=[Model.deleted_at.is_(None)],
+    )
+    attached_models = {
+        model.id: model
+        for model in models
+        if model.extended_kv_cache
+        and model.extended_kv_cache.is_shared()
+        and model.extended_kv_cache.cache_service_id == cache_service.id
+    }
+    attached = []
+    if attached_models:
+        instances = await ModelInstance.all_by_fields(
+            session,
+            extra_conditions=[ModelInstance.model_id.in_(attached_models.keys())],
+        )
+        attached = [
+            CacheServiceAttachedMetrics(
+                model_id=instance.model_id,
+                model_name=attached_models[instance.model_id].name,
+                model_instance_name=instance.name,
+                worker_name=instance.worker_name,
+            )
+            for instance in instances
+        ]
+        # a stable row order regardless of how the batched query returns
+        attached.sort(
+            key=lambda row: (row.model_name or "", row.model_instance_name or "")
+        )
+    worker_names = (
+        [name.strip() for name in workers.split(",") if name.strip()]
+        if workers
+        else None
+    )
+    if worker_names and len(worker_names) > 100:
+        raise BadRequestException(message="workers filter accepts at most 100 names")
+    if worker_names:
+        # the worker scope applies to the whole response: charts filter
+        # inside PromQL, the row set filters here
+        selected = set(worker_names)
+        attached = [row for row in attached if row.worker_name in selected]
+    return await collect_cache_service_metrics(
+        provider.metrics_for(cache_service.provider_version) if provider else None,
+        cache_service.id,
+        window_seconds,
+        cluster_id=cache_service.cluster_id,
+        attached=attached,
+        worker_names=worker_names,
+        client=getattr(request.app.state, "http_client_no_proxy", None),
+    )
+
+
 @router.get("/{id}", response_model=CacheServicePublic)
 async def get_cache_service(
     session: SessionDep,
@@ -563,6 +665,19 @@ def _validate_cache_service_provider(cache_service_in: CacheServiceCreate) -> No
                 f"mode '{cache_service_in.mode}'"
             )
         )
+
+    # A provider declaring no versions publishes no image of its own, so
+    # every managed service supplies one — which is what the reserved
+    # "custom" identifier stands for. Naming it is then redundant: an
+    # omitted version reads as it, instead of failing a version lookup
+    # that could never resolve.
+    if (
+        cache_service_in.mode == CacheServiceModeEnum.MANAGED
+        and not provider.versions
+        and provider.custom_version
+        and not cache_service_in.provider_version
+    ):
+        cache_service_in.provider_version = CUSTOM_VERSION
 
     # The reserved "custom" identifier is not a catalog version; it is
     # checked by _validate_cache_service_custom_version.
@@ -646,11 +761,115 @@ def _validate_cache_service_config(config: Optional[CacheServiceConfig]) -> None
             )
 
 
+def _l2_adapter_enabled(
+    storage: CacheServiceL2Storage,
+    backend_key: str,
+    backend_spec: CacheProviderL2Backend,
+) -> bool:
+    if not backend_spec.adapter_flag_optional:
+        if storage.adapter_flag_enabled is not None:
+            raise BadRequestException(
+                message=(
+                    f"adapter_flag_enabled is not applicable to L2 "
+                    f"backend '{backend_key}'"
+                )
+            )
+        return True
+
+    enabled = (
+        backend_spec.adapter_flag_default
+        if storage.adapter_flag_enabled is None
+        else storage.adapter_flag_enabled
+    )
+    if not enabled:
+        # Hidden fields have no runtime meaning while the adapter is disabled.
+        storage.params = {}
+    return enabled
+
+
+def _l2_required_fields(backend_spec: CacheProviderL2Backend):
+    mapped_names = set(backend_spec.adapter_params.values())
+    if backend_spec.adapter_backend and not mapped_names:
+        mapped_names = {field.name for field in backend_spec.fields}
+    if backend_spec.adapter_params or backend_spec.adapter_backend:
+        return [
+            field
+            for field in backend_spec.fields
+            if field.name in mapped_names or field.env_name
+        ]
+    return backend_spec.fields
+
+
+def _validate_l2_storage_params(
+    backend_key: str,
+    backend_spec: CacheProviderL2Backend,
+    params: Dict[str, Any],
+) -> None:
+    declared = {field.name: field for field in backend_spec.fields}
+    unknown = sorted(set(params) - set(declared))
+    if unknown:
+        raise BadRequestException(
+            message=(
+                f"Unknown L2 storage parameter(s) for backend "
+                f"'{backend_key}': " + ", ".join(unknown)
+            )
+        )
+
+    missing = [
+        field.name
+        for field in _l2_required_fields(backend_spec)
+        if field.required
+        and (params.get(field.name) is None or params.get(field.name) == "")
+    ]
+    if missing:
+        raise BadRequestException(
+            message=(
+                f"Missing required L2 storage parameter(s) for backend "
+                f"'{backend_key}': " + ", ".join(missing)
+            )
+        )
+
+    for name, value in params.items():
+        field = declared[name]
+        if (
+            field.type == "number"
+            and value is not None
+            and (isinstance(value, bool) or not isinstance(value, (int, float)))
+        ):
+            raise BadRequestException(
+                message=f"L2 storage parameter '{name}' must be a number"
+            )
+
+
+def _record_l2_env_sources(
+    backend_key: str,
+    backend_spec: CacheProviderL2Backend,
+    params: Dict[str, Any],
+    env_sources: Dict[str, str],
+) -> None:
+    for field in backend_spec.fields:
+        if not field.env_name:
+            continue
+        value = params.get(field.name, field.default)
+        if value is None or value == "":
+            continue
+        if field.env_name in env_sources:
+            raise BadRequestException(
+                message=(
+                    f"L2 storage entries '{env_sources[field.env_name]}' "
+                    f"and '{backend_key}' both deliver the env var "
+                    f"'{field.env_name}'; only one entry may set it"
+                )
+            )
+        env_sources[field.env_name] = backend_key
+
+
 def _validate_cache_service_l2_storage(cache_service_in: CacheServiceBase) -> None:
     """L2 storage config only applies to managed services and must match the
     provider's declared adapter backends. Each entry is checked for a known
     backend key, all required fields set, no undeclared parameter names
-    (typo guard), and numeric values for number-typed fields; across entries,
+    (typo guard), and numeric values for number-typed fields; optional adapter
+    backends skip and clear their hidden fields while disabled. Across entries,
     no two may deliver a value through the same env var — env vars are
     process-global, so the values would clobber each other."""
     config = cache_service_in.config
@@ -688,60 +907,12 @@ def _validate_cache_service_l2_storage(cache_service_in: CacheServiceBase) -> No
                 )
             )
 
+        if not _l2_adapter_enabled(l2_storage, backend_key, backend_spec):
+            continue
+
         params = l2_storage.params or {}
-        declared = {field.name: field for field in backend_spec.fields}
-
-        unknown = sorted(set(params) - set(declared))
-        if unknown:
-            raise BadRequestException(
-                message=(
-                    f"Unknown L2 storage parameter(s) for backend "
-                    f"'{backend_key}': " + ", ".join(unknown)
-                )
-            )
-
-        missing = [
-            field.name
-            for field in backend_spec.fields
-            if field.required
-            and (params.get(field.name) is None or params.get(field.name) == "")
-        ]
-        if missing:
-            raise BadRequestException(
-                message=(
-                    f"Missing required L2 storage parameter(s) for backend "
-                    f"'{backend_key}': " + ", ".join(missing)
-                )
-            )
-
-        for name, value in params.items():
-            field = declared[name]
-            if (
-                field.type == "number"
-                and value is not None
-                and (isinstance(value, bool) or not isinstance(value, (int, float)))
-            ):
-                raise BadRequestException(
-                    message=f"L2 storage parameter '{name}' must be a number"
-                )
-
-        # Mirror the rendering rule: only fields that resolve to a value
-        # (explicitly or via default) reach the container env.
-        for field in backend_spec.fields:
-            if not field.env_name:
-                continue
-            value = params.get(field.name, field.default)
-            if value is None or value == "":
-                continue
-            if field.env_name in env_sources:
-                raise BadRequestException(
-                    message=(
-                        f"L2 storage entries '{env_sources[field.env_name]}' "
-                        f"and '{backend_key}' both deliver the env var "
-                        f"'{field.env_name}'; only one entry may set it"
-                    )
-                )
-            env_sources[field.env_name] = backend_key
+        _validate_l2_storage_params(backend_key, backend_spec, params)
+        _record_l2_env_sources(backend_key, backend_spec, params, env_sources)
 
 
 def _validate_cache_service_worker_selector(
@@ -780,6 +951,49 @@ def _validate_cache_service_worker_selector(
         )
 
 
+def _validate_management_url(cache_service_in: CacheServiceCreate) -> None:
+    """Validate the engine-management link and canonicalize blanks to None.
+
+    The field rides ``config``, which managed and external services both
+    accept, so this runs with the top-level validators for either mode —
+    after ``_validate_cache_service_provider``, which already rejected
+    unknown providers.
+    """
+    if cache_service_in.config is None:
+        return
+    management_url = (cache_service_in.config.management_url or "").strip()
+    cache_service_in.config.management_url = management_url or None
+    if not management_url:
+        return
+    provider = get_cache_provider(cache_service_in.provider_name)
+    if provider is None or not provider.management_url:
+        raise BadRequestException(
+            message=(
+                f"config.management_url is not supported by cache "
+                f"provider '{cache_service_in.provider_name}'"
+            )
+        )
+    if len(management_url) > 2048:
+        raise BadRequestException(
+            message="config.management_url must be at most 2048 characters"
+        )
+    # urlparse accepts whitespace inside the netloc, so guard separately
+    parsed = urlparse(management_url)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.netloc
+        or any(ch.isspace() for ch in management_url)
+    ):
+        raise BadRequestException(
+            message="config.management_url must be a valid http(s) URL"
+        )
+    # a display-only link must not smuggle credentials into stored config
+    if parsed.username or parsed.password:
+        raise BadRequestException(
+            message="config.management_url must not embed credentials"
+        )
+
+
 async def _validate_cache_service_mode(
     session, cache_service_in: CacheServiceCreate
 ) -> None:
@@ -801,7 +1015,6 @@ async def _validate_cache_service_mode(
             raise BadRequestException(
                 message="config.ram_size is required for managed cache services"
             )
-
         provider = get_cache_provider(cache_service_in.provider_name)
         topology = provider.topology if provider else "singleton"
         if topology == "per_node":
@@ -1001,6 +1214,7 @@ async def create_cache_service(
     _validate_cache_service_provider(cache_service_in)
     _validate_cache_service_custom_version(cache_service_in)
     _validate_cache_service_config(cache_service_in.config)
+    _validate_management_url(cache_service_in)
     _validate_managed_fields(cache_service_in)
     _validate_cache_service_l2_storage(cache_service_in)
     _validate_cache_service_worker_selector(cache_service_in)
@@ -1081,6 +1295,7 @@ async def update_cache_service(
     _validate_cache_service_provider(cache_service_in)
     _validate_cache_service_custom_version(cache_service_in)
     _validate_cache_service_config(cache_service_in.config)
+    _validate_management_url(cache_service_in)
     _validate_managed_fields(cache_service_in)
     _validate_cache_service_l2_storage(cache_service_in)
     _validate_cache_service_worker_selector(cache_service_in)
