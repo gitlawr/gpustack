@@ -308,10 +308,30 @@ def aggregate_instance_state(workloads: List[Workload]) -> Optional[dict]:
     if override is _HOLD:
         return None
 
-    fields = dict(override) if override else {"state": leader.state.value}
-    if not override:
-        fields["state_message"] = leader.state_message
-    return fields
+    if override:
+        return dict(override)
+
+    state = _to_instance_state(leader.state)
+    if state is None:
+        return None
+    return {"state": state, "state_message": leader.state_message}
+
+
+def _to_instance_state(state) -> Optional[ModelInstanceStateEnum]:
+    """
+    A workload's state as the instance's own.
+
+    Takes a plain string as readily as an enum: a row loaded through the ORM
+    carries the former, because the column is declared String rather than a
+    native enum, while the same row arriving over the API is validated into
+    the latter.
+    """
+    try:
+        return ModelInstanceStateEnum(str(state))
+    except ValueError:
+        # succeeded, which a service-shaped workload never reaches and the
+        # instance has no name for.
+        return None
 
 
 _HOLD = object()

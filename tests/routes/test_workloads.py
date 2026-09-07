@@ -262,3 +262,48 @@ def test_a_cache_filter_on_an_enum_field_matches():
     queried = WorkloadOwnerKindEnum.CACHE_SERVICE.value
 
     assert str(getattr(workload, "owner_kind")) == str(queried)
+
+
+def test_a_row_as_the_database_returns_it_carries_plain_strings():
+    """The columns are declared String rather than native enums, so PostgreSQL
+    never renders an enum cast for a type it does not have. The cost is that a
+    row loaded through the ORM has a str where a row validated from the API
+    has an enum, and anything reaching for .value on one crashes on the other."""
+    workload = Workload(
+        id=1,
+        name="cache-svc-5-w1",
+        owner_kind="cache_service",
+        owner_id=5,
+        worker_id=1,
+        state="running",
+    )
+
+    assert isinstance(workload.state, str)
+    assert not hasattr(workload.state, "value")
+    # Comparisons still hold, which is why this stays hidden until something
+    # asks for the enum itself.
+    assert workload.state == WorkloadStateEnum.RUNNING
+
+
+def test_the_public_view_accepts_a_row_loaded_from_the_database():
+    from datetime import datetime, timezone
+
+    from gpustack.schemas.cache_services import CacheServiceInstancePublic
+
+    now = datetime.now(timezone.utc)
+    workload = Workload(
+        id=1,
+        name="cache-svc-5-w1",
+        owner_kind="cache_service",
+        owner_id=5,
+        worker_id=1,
+        state="running",
+        ports={"service": 40001, "metrics": 40002},
+        created_at=now,
+        updated_at=now,
+    )
+
+    view = CacheServiceInstancePublic.from_workload(workload)
+
+    assert view.state == "running"
+    assert (view.port, view.metrics_port) == (40001, 40002)

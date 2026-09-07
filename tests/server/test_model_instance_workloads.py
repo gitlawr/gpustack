@@ -498,3 +498,35 @@ async def test_sync_writes_when_the_binding_moved(monkeypatch):
     await sync_model_instance_workloads(MagicMock(), instance)
 
     current.update.assert_awaited_once()
+
+
+def test_the_fold_accepts_a_row_loaded_from_the_database():
+    """A row loaded through the ORM carries a plain string, not an enum: the
+    column is declared String so PostgreSQL never renders an enum cast."""
+    leader = Workload(
+        name="mi-0",
+        owner_kind=WorkloadOwnerKindEnum.MODEL_INSTANCE,
+        owner_id=1,
+        group_index=0,
+        state="running",
+        state_message="",
+    )
+
+    assert aggregate_instance_state([leader]) == {
+        "state": ModelInstanceStateEnum.RUNNING,
+        "state_message": "",
+    }
+
+
+def test_a_state_the_instance_has_no_name_for_folds_to_nothing():
+    """succeeded is task-shaped; a model instance workload never reaches it,
+    and inventing an instance state for it would be worse than silence."""
+    leader = Workload(
+        name="mi-0",
+        owner_kind=WorkloadOwnerKindEnum.MODEL_INSTANCE,
+        owner_id=1,
+        group_index=0,
+        state="succeeded",
+    )
+
+    assert aggregate_instance_state([leader]) is None

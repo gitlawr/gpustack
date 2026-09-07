@@ -277,7 +277,10 @@ class CacheServiceInstancePublic(BaseModel):
             cluster_id=workload.cluster_id,
             port=ports.get(CACHE_SERVICE_PORT),
             metrics_port=ports.get(CACHE_SERVICE_METRICS_PORT),
-            state=CacheServiceStateEnum(workload.state.value),
+            # Not ``.value``: a row loaded through the ORM carries a plain
+            # string, because the column is declared String rather than a
+            # native enum. The constructor takes either.
+            state=CacheServiceStateEnum(str(workload.state)),
             state_message=workload.state_message,
             healthy=workload.healthy,
             last_check_at=workload.last_check_at,
