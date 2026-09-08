@@ -535,3 +535,36 @@ def test_the_confirm_wait_outlasts_the_pass_it_is_compared_against():
         controllers_module._FOLD_CONFIRM_SECONDS
         > envs.MODEL_INSTANCE_HEALTH_CHECK_INTERVAL
     )
+
+
+@pytest.mark.asyncio
+async def test_an_authoritative_fold_reports_what_it_overruled(monkeypatch, caplog):
+    """Turning the flag on stops the comparison being reported, at the point
+    where it matters most: the worker still writes the instance, so every
+    change the fold makes is it overruling the writer it is replacing."""
+    instance = _instance(state="starting")
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}, authoritative=True):
+        with caplog.at_level(logging.INFO):
+            await controller._reconcile(3)
+
+    instance.update.assert_awaited_once()
+    assert controller._corrected == 1
+    assert "corrected model instance mi" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_authoritative_fold_that_changes_nothing_is_still_counted(
+    monkeypatch,
+):
+    """Agreement has to stay visible once the flag is on, or the tally goes
+    quiet exactly when the fold starts deciding things."""
+    instance = _instance(state="running")
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}, authoritative=True):
+        await controller._reconcile(3)
+
+    instance.update.assert_not_awaited()
+    assert controller._agreed == {"running": 1}

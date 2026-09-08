@@ -504,6 +504,9 @@ class ModelInstanceWorkloadStateController:
         # One it resolved the other way: the proposal never came true, so the
         # fold would have written something the instance never reached.
         self._overtaken = 0
+        # Only once authoritative: what the fold wrote over what the worker
+        # had put there.
+        self._corrected = 0
         self._confirming: Set[int] = set()
         self._confirm_tasks: Set[asyncio.Task] = set()
         self._next_tally_at = 1
@@ -585,11 +588,24 @@ class ModelInstanceWorkloadStateController:
                     self._compare(instance, folded, result.distributed)
                     return
 
-                if all(
-                    getattr(instance, name, None) == value
-                    for name, value in folded.items()
-                ):
+                changing = _differing(instance, folded)
+                if not changing:
+                    self._agreed[folded.get("state")] = (
+                        self._agreed.get(folded.get("state"), 0) + 1
+                    )
+                    self._report_tally()
                     return
+                # The worker still writes the instance too, so this is the
+                # fold overruling it -- the same comparison the flag turns off
+                # reporting for, and the window where it matters most. Once
+                # the worker writes only workloads there is no second writer
+                # to overrule and this goes quiet on its own.
+                self._corrected += 1
+                logger.info(
+                    f"Workload fold corrected model instance {instance.name} "
+                    f"(id={instance.id}): {changing} "
+                    f"[agreed={_tally(self._agreed)} corrected={self._corrected}]"
+                )
                 await instance.update(session, folded)
         except Exception as e:
             logger.error(
