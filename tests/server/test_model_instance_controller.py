@@ -468,48 +468,62 @@ def _group(followers: int):
 # ---------------------------------------------------------------------------
 
 
+def _row(state, group_index=0):
+    return SimpleNamespace(state=state, group_index=group_index, update=AsyncMock())
+
+
+async def _mark(monkeypatch, rows):
+    monkeypatch.setattr(
+        controllers_module.Workload, "all_by_fields", AsyncMock(return_value=rows)
+    )
+    await controllers_module._mark_workloads_unreachable(MagicMock(), 3, 7)
+
+
 @pytest.mark.asyncio
-async def test_a_lost_workers_workloads_are_marked_unreachable(monkeypatch):
+async def test_a_lost_workers_running_leader_is_marked_unreachable(monkeypatch):
     """The server marks an instance unreachable when it loses the worker, and
     the worker is precisely what cannot mirror that onto the workload rows.
     Left reporting RUNNING they would have the fold put the instance back to
     RUNNING and undo the outage."""
-    running = SimpleNamespace(
-        state=WorkloadStateEnum.RUNNING, update=AsyncMock(), worker_id=7
-    )
-    starting = SimpleNamespace(
-        state=WorkloadStateEnum.STARTING, update=AsyncMock(), worker_id=7
-    )
-    monkeypatch.setattr(
-        controllers_module.Workload,
-        "all_by_fields",
-        AsyncMock(return_value=[running, starting]),
-    )
+    leader = _row(WorkloadStateEnum.RUNNING)
 
-    await controllers_module._mark_workloads_unreachable(MagicMock(), 3, 7)
+    await _mark(monkeypatch, [leader])
 
-    for workload in (running, starting):
-        applied = workload.update.await_args[0][1]
-        assert applied["state"] == WorkloadStateEnum.UNREACHABLE
-        assert applied["state_message"] == "Worker is unreachable from the server"
+    applied = leader.update.await_args[0][1]
+    assert applied["state"] == WorkloadStateEnum.UNREACHABLE
+    assert applied["state_message"] == "Worker is unreachable from the server"
 
 
 @pytest.mark.asyncio
-async def test_an_outage_does_not_overwrite_a_failure_of_its_own(monkeypatch):
-    """A workload that already reports why it failed says more than the
-    outage does, and a pending one had nothing up to lose."""
-    failed = SimpleNamespace(state=WorkloadStateEnum.ERROR, update=AsyncMock())
-    pending = SimpleNamespace(state=WorkloadStateEnum.PENDING, update=AsyncMock())
-    monkeypatch.setattr(
-        controllers_module.Workload,
-        "all_by_fields",
-        AsyncMock(return_value=[failed, pending]),
-    )
+async def test_a_leader_still_coming_up_is_left_alone(monkeypatch):
+    """The instance-side rule moves the main worker's entry only out of
+    RUNNING, so marking a leader that is still starting says something the
+    instance never will -- and the fold reading it reports a disagreement."""
+    leader = _row(WorkloadStateEnum.STARTING)
 
-    await controllers_module._mark_workloads_unreachable(MagicMock(), 3, 7)
+    await _mark(monkeypatch, [leader])
 
-    failed.update.assert_not_awaited()
-    pending.update.assert_not_awaited()
+    leader.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_follower_is_marked_from_any_state(monkeypatch):
+    """The rule for subordinates is the broader one, and the fold has to
+    reproduce what the instance says rather than what is tidier."""
+    follower = _row(WorkloadStateEnum.STARTING, group_index=1)
+
+    await _mark(monkeypatch, [follower])
+
+    assert follower.update.await_args[0][1]["state"] == WorkloadStateEnum.UNREACHABLE
+
+
+@pytest.mark.asyncio
+async def test_an_outage_is_not_written_twice(monkeypatch):
+    already = _row(WorkloadStateEnum.UNREACHABLE, group_index=1)
+
+    await _mark(monkeypatch, [already])
+
+    already.update.assert_not_awaited()
 
 
 def test_the_confirm_wait_outlasts_the_pass_it_is_compared_against():

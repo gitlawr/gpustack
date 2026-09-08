@@ -2395,12 +2395,17 @@ async def _mark_workloads_unreachable(session, instance_id: int, worker_id: int)
         return
 
     for workload in workloads:
-        if workload.state not in (
-            WorkloadStateEnum.RUNNING,
-            WorkloadStateEnum.STARTING,
-        ):
-            # Nothing was up on it, or it already reports a failure of its own,
-            # which says more than the outage does.
+        # Which rows change is copied from the rule applied to the instance
+        # just above, asymmetry included: the main worker's entry moves only
+        # out of RUNNING, a subordinate's from anything it is not already. The
+        # fold has to reproduce what the instance says, so a row marked here
+        # that the instance-side rule would have left alone becomes a
+        # disagreement -- which is exactly what marking a leader still coming
+        # up produced.
+        if workload.group_index == 0:
+            if workload.state != WorkloadStateEnum.RUNNING:
+                continue
+        elif workload.state == WorkloadStateEnum.UNREACHABLE:
             continue
         await workload.update(
             session,
