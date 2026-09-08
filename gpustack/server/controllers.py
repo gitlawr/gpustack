@@ -156,7 +156,11 @@ from gpustack.server.services import (
     revoke_model_access_cache,
 )
 from gpustack.server.lora_model_routes import cleanup_orphan_lora_routes
-from gpustack.utils.model_instance_workers import get_model_instance_worker_match
+from gpustack.utils.model_instance_workers import (
+    get_model_instance_worker_match,
+    get_worker_matches_from_workloads,
+    report_match_disagreement,
+)
 from gpustack.cloud_providers.common import (
     get_client_from_provider,
     construct_cloud_instance,
@@ -2496,12 +2500,18 @@ class WorkerController:
             )
             if not all_instances:
                 return
+            from_workloads = (
+                await get_worker_matches_from_workloads(session, [worker.id])
+            ).get(worker.id, {})
             matched_instances = []
             for instance in all_instances:
                 match = get_model_instance_worker_match(
                     instance,
                     worker_name=worker.name,
                     worker_id=worker.id,
+                )
+                report_match_disagreement(
+                    instance, worker.id, match, from_workloads.get(instance.id)
                 )
                 if match.matched:
                     matched_instances.append((instance, match))

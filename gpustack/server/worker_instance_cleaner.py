@@ -8,7 +8,11 @@ from gpustack.schemas.workers import Worker, WorkerStateEnum
 from gpustack.server.db import async_session
 
 from gpustack.server.services import ModelInstanceService
-from gpustack.utils.model_instance_workers import get_model_instance_worker_match
+from gpustack.utils.model_instance_workers import (
+    get_model_instance_worker_match,
+    get_worker_matches_from_workloads,
+    report_match_disagreement,
+)
 from gpustack.utils.network import is_offline
 
 
@@ -75,6 +79,9 @@ class WorkerInstanceCleaner:
             if not instances:
                 return
 
+            from_workloads = await get_worker_matches_from_workloads(
+                session, [info["id"] for info in offline_workers.values()]
+            )
             instances_to_delete = []
             impacted_instances_by_worker = defaultdict(list)
             for instance in instances:
@@ -84,6 +91,12 @@ class WorkerInstanceCleaner:
                         instance,
                         worker_name=worker_name,
                         worker_id=worker_info["id"],
+                    )
+                    report_match_disagreement(
+                        instance,
+                        worker_info["id"],
+                        match,
+                        from_workloads.get(worker_info["id"], {}).get(instance.id),
                     )
                     if match.matched:
                         impacted_worker_names.append(worker_name)
