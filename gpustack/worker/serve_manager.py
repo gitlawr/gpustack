@@ -606,14 +606,13 @@ class ServeManager:
                         continue
                 # Get patch dict for subordinate worker.
                 else:
-                    # For initialize later mode, the state is set to RUNNING directly,
-                    # which means the subordinate worker doesn't need to wait for the main worker to be healthy.
-                    if (
-                        model_instance.distributed_servers.mode
-                        == DistributedServerCoordinateModeEnum.INITIALIZE_LATER
-                    ):
-                        continue
-                    # Otherwise, update subordinate worker state to RUNNING.
+                    # Every mode, including initialize_later: that one writes
+                    # RUNNING once when it spawns the process and never again,
+                    # so a lost write left the subordinate reported as pending
+                    # for good and the main worker holding the instance in
+                    # STARTING forever. The branch above already marks a
+                    # subordinate ERROR whatever its mode, so skipping this one
+                    # also made the reporting one-way.
                     sw_pos = next(
                         (
                             i

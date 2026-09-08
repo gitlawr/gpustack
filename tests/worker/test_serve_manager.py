@@ -990,3 +990,80 @@ def test_mirror_is_silent_when_the_instance_has_no_workload_row_yet():
         manager._mirror_execution_state(5, {"state": ModelInstanceStateEnum.RUNNING})
 
     update.assert_not_called()
+
+
+def _distributed_subordinate_view(subordinate_state):
+    """The instance as the subordinate worker on worker 2 sees it: itself in
+    the subordinate list, its own container running."""
+    model_instance = new_model_instance(
+        1,
+        "distributed-instance",
+        1,
+        worker_id=1,
+        state=ModelInstanceStateEnum.STARTING,
+    )
+    model_instance.worker_ip = "10.0.0.1"
+    model_instance.port = 8000
+    model_instance.distributed_servers = DistributedServers(
+        mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER,
+        subordinate_workers=[
+            ModelInstanceSubordinateWorker(
+                worker_id=2,
+                worker_name="worker-2",
+                worker_ip="10.0.0.2",
+                state=subordinate_state,
+            )
+        ],
+    )
+    return model_instance
+
+
+def _sync_as_subordinate(manager, clientset, model_instance):
+    clientset.model_instances.list.return_value = SimpleNamespace(
+        items=[model_instance]
+    )
+    model = new_model(1, "test", 1, huggingface_repo_id="Qwen/Qwen2.5-0.5B-Instruct")
+    model.backend = BackendEnum.VLLM
+    model.backend_version = "0.8.0"
+
+    with (
+        patch(
+            "gpustack.worker.serve_manager.get_workload",
+            return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
+        ),
+        patch.object(manager, "_is_provisioning", return_value=False),
+        patch.object(manager, "_get_model", return_value=model),
+        patch.object(manager, "_update_model_instance") as update_model_instance,
+    ):
+        manager.sync_model_instances_state()
+    return update_model_instance
+
+
+def test_an_initialize_later_subordinate_re_reports_a_lost_running():
+    """initialize_later writes RUNNING once, when it spawns the process. If
+    that write is lost -- two workers read-modify-writing the same row drop
+    each other's fields -- the main worker sees a subordinate that never came
+    up and holds the instance in STARTING for good. The sync pass is the only
+    thing that can notice, so it has to look."""
+    manager, clientset = _build_serve_manager(worker_id=2)
+    model_instance = _distributed_subordinate_view(ModelInstanceStateEnum.PENDING)
+
+    update_model_instance = _sync_as_subordinate(manager, clientset, model_instance)
+
+    update_model_instance.assert_called_once()
+    patched = update_model_instance.call_args[1][
+        "distributed_servers.subordinate_workers.0"
+    ]
+    assert patched.state == ModelInstanceStateEnum.RUNNING
+
+
+def test_a_subordinate_already_reported_running_writes_nothing():
+    """The re-report is level-triggered, so it must be silent in the steady
+    state: a write per sync pass would publish an event per pass to everything
+    watching instances."""
+    manager, clientset = _build_serve_manager(worker_id=2)
+    model_instance = _distributed_subordinate_view(ModelInstanceStateEnum.RUNNING)
+
+    update_model_instance = _sync_as_subordinate(manager, clientset, model_instance)
+
+    update_model_instance.assert_not_called()
