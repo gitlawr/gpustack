@@ -276,9 +276,16 @@ def workload_spec(workload: Workload) -> WorkloadUpdate:
     )
 
 
-def aggregate_instance_state(workloads: List[Workload]) -> Optional[dict]:
+def aggregate_instance_state(
+    workloads: List[Workload], worker_ips: Optional[Dict[int, str]] = None
+) -> Optional[dict]:
     """
     Fold a group's execution state back onto its model instance.
+
+    ``worker_ips`` names the workers a failing follower runs on. The message
+    the worker writes today identifies them by IP, and a workload row carries
+    only the id, so the caller resolves them; without the map the id is used,
+    which changes a user-visible string and is only acceptable in tests.
 
     The leader reports the instance's own state; the followers can override it,
     reproducing what the worker decides today in
@@ -305,7 +312,7 @@ def aggregate_instance_state(workloads: List[Workload]) -> Optional[dict]:
     followers = sorted(
         (w for w in workloads if w.group_index != 0), key=lambda w: w.group_index
     )
-    override = _distributed_override(followers)
+    override = _distributed_override(followers, worker_ips or {})
     if override is _HOLD:
         return None
 
@@ -347,7 +354,7 @@ def fold_decline_reason(workloads: List[Workload]) -> Optional[FoldDeclineReason
     followers = sorted(
         (w for w in workloads if w.group_index != 0), key=lambda w: w.group_index
     )
-    if _distributed_override(followers) is _HOLD:
+    if _distributed_override(followers, {}) is _HOLD:
         return FoldDeclineReason.FOLLOWERS_NOT_READY
     if _to_instance_state(leader.state) is None:
         return FoldDeclineReason.NOT_AN_INSTANCE_STATE
@@ -369,11 +376,21 @@ def _to_instance_state(state) -> Optional[ModelInstanceStateEnum]:
         return None
 
 
+def _worker_label(workload: Workload, worker_ips: Dict[int, str]) -> str:
+    """How the failing worker is named in the instance's state message. The
+    worker writes the IP, so the fold has to as well or every follower failure
+    reads as a disagreement -- and flipping the fold on would reword a message
+    users already see."""
+    return str(worker_ips.get(workload.worker_id, workload.worker_id))
+
+
 _HOLD = object()
 """A group that is still coming up: the instance keeps whatever it says."""
 
 
-def _distributed_override(followers: List[Workload]) -> Optional[dict]:
+def _distributed_override(
+    followers: List[Workload], worker_ips: Dict[int, str]
+) -> Optional[dict]:
     if not followers:
         return None
 
@@ -383,7 +400,7 @@ def _distributed_override(followers: List[Workload]) -> Optional[dict]:
             "state": ModelInstanceStateEnum.ERROR,
             "state_message": (
                 f"Distributed serving error in subordinate worker "
-                f"{error.worker_id}: {error.state_message}."
+                f"{_worker_label(error, worker_ips)}: {error.state_message}."
             ),
         }
 
@@ -397,7 +414,8 @@ def _distributed_override(followers: List[Workload]) -> Optional[dict]:
             "state": ModelInstanceStateEnum.UNREACHABLE,
             "state_message": (
                 f"Distributed serving unreachable in subordinate worker "
-                f"{unreachable.worker_id}: {unreachable.state_message}."
+                f"{_worker_label(unreachable, worker_ips)}: "
+                f"{unreachable.state_message}."
             ),
         }
 

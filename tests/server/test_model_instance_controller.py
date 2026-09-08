@@ -196,7 +196,8 @@ def _fold(monkeypatch, instance, folded, authoritative=False):
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(
-        "gpustack.server.controllers.aggregate_instance_state", lambda workloads: folded
+        "gpustack.server.controllers.aggregate_instance_state",
+        lambda workloads, worker_ips=None: folded,
     )
     monkeypatch.setattr(
         "gpustack.server.controllers.envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS",

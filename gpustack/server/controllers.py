@@ -468,7 +468,9 @@ class ModelInstanceWorkloadStateController:
                         "owner_id": instance_id,
                     },
                 )
-                folded = aggregate_instance_state(workloads)
+                folded = aggregate_instance_state(
+                    workloads, await self._follower_worker_ips(session, workloads)
+                )
                 if folded is None:
                     reason = fold_decline_reason(workloads)
                     self._declined[reason] = self._declined.get(reason, 0) + 1
@@ -500,6 +502,26 @@ class ModelInstanceWorkloadStateController:
                 f"Failed to fold workload state onto model instance "
                 f"{instance_id}: {e}"
             )
+
+    @staticmethod
+    async def _follower_worker_ips(session, workloads) -> Dict[int, str]:
+        """
+        The IPs of the workers a group's followers run on.
+
+        Only a follower's failure puts a worker in the instance's state
+        message, so a group without followers -- every single-worker instance,
+        which is most of them -- skips the query entirely rather than paying
+        for it on each of its events.
+        """
+        worker_ids = {
+            w.worker_id
+            for w in workloads
+            if w.group_index != 0 and w.worker_id is not None
+        }
+        if not worker_ids:
+            return {}
+        workers = await Worker.all_by_fields(session, {})
+        return {worker.id: worker.ip for worker in workers if worker.id in worker_ids}
 
     def _report_disagreement(self, instance: ModelInstance, folded: dict):
         """

@@ -584,3 +584,73 @@ def test_every_decline_branch_reports_its_reason(workloads, expected):
 def test_a_fold_that_speaks_reports_no_reason(workloads):
     assert aggregate_instance_state(workloads) is not None
     assert fold_decline_reason(workloads) is None
+
+
+# ---------------------------------------------------------------------------
+# The fold against the worker it has to reproduce
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "follower_state,instance_state",
+    [
+        (WorkloadStateEnum.ERROR, ModelInstanceStateEnum.ERROR),
+        (WorkloadStateEnum.UNREACHABLE, ModelInstanceStateEnum.UNREACHABLE),
+    ],
+)
+def test_the_fold_words_a_follower_failure_the_way_the_worker_does(
+    follower_state, instance_state
+):
+    """The fold is meant to replace ``_get_main_worker_distributed_state``, so
+    it has to produce the same message, not merely the same state. The worker
+    names the failing node by IP; a workload row carries only the id, and using
+    it would both read as a disagreement here and reword a message users see
+    once the fold is authoritative."""
+    from gpustack.worker.serve_manager import ServeManager
+
+    failure = "CUDA out of memory"
+    instance = ModelInstance(
+        id=1,
+        name="mi",
+        worker_id=100,
+        state=ModelInstanceStateEnum.RUNNING,
+        distributed_servers=DistributedServers(
+            mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER,
+            subordinate_workers=[
+                ModelInstanceSubordinateWorker(
+                    worker_id=101,
+                    worker_name="worker-101",
+                    worker_ip="10.0.0.101",
+                    state=ModelInstanceStateEnum(instance_state),
+                    state_message=failure,
+                )
+            ],
+        ),
+    )
+    from_worker = ServeManager._get_main_worker_distributed_state(instance)
+
+    folded = aggregate_instance_state(
+        [
+            _workload(0, WorkloadStateEnum.RUNNING),
+            _workload(1, follower_state, state_message=failure, worker_id=101),
+        ],
+        worker_ips={101: "10.0.0.101"},
+    )
+
+    assert folded["state"] == from_worker["state"]
+    assert folded["state_message"] == from_worker["state_message"]
+    assert "10.0.0.101" in folded["state_message"]
+
+
+def test_an_unresolvable_worker_falls_back_to_its_id():
+    """A worker row deleted out from under a running group still has to yield
+    a message rather than an exception."""
+    folded = aggregate_instance_state(
+        [
+            _workload(0, WorkloadStateEnum.RUNNING),
+            _workload(1, WorkloadStateEnum.ERROR, state_message="boom", worker_id=101),
+        ],
+        worker_ips={},
+    )
+
+    assert "subordinate worker 101: boom." in folded["state_message"]
