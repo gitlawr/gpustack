@@ -2329,6 +2329,50 @@ async def calculate_model_destinations(
     )
 
 
+async def _mark_workloads_unreachable(session, instance_id: int, worker_id: int):
+    """
+    Report the same outage on the workload rows the worker was running.
+
+    A workload describes a container on one worker, so a worker the server
+    cannot reach makes its containers unreachable by definition. Nothing else
+    can write it: the mirror only runs when the worker writes, and the worker
+    is what is missing. Left alone the rows keep reporting RUNNING, and the
+    fold reading them would put the instance back to RUNNING and undo the
+    outage the moment it becomes authoritative.
+    """
+    try:
+        workloads = await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                "owner_id": instance_id,
+                "worker_id": worker_id,
+            },
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to read workloads of model instance {instance_id} on "
+            f"worker {worker_id} to mark them unreachable: {e}"
+        )
+        return
+
+    for workload in workloads:
+        if workload.state not in (
+            WorkloadStateEnum.RUNNING,
+            WorkloadStateEnum.STARTING,
+        ):
+            # Nothing was up on it, or it already reports a failure of its own,
+            # which says more than the outage does.
+            continue
+        await workload.update(
+            session,
+            {
+                "state": WorkloadStateEnum.UNREACHABLE,
+                "state_message": "Worker is unreachable from the server",
+            },
+        )
+
+
 class WorkerController:
     def __init__(self, cfg: Config):
         self._provisioning = WorkerProvisioningController(cfg)
@@ -2418,6 +2462,7 @@ class WorkerController:
                     session,
                     matched_instances,
                     worker.name,
+                    worker.id,
                 )
                 return
 
@@ -2426,6 +2471,7 @@ class WorkerController:
         session,
         matched_instances,
         worker_name,
+        worker_id=None,
     ):
         instance_names = set()
         subordinate_worker_names = set()
@@ -2461,6 +2507,9 @@ class WorkerController:
 
             if patch:
                 await ModelInstanceService(session).update(instance, patch)
+
+            if worker_id is not None:
+                await _mark_workloads_unreachable(session, instance.id, worker_id)
         if instance_names:
             logger.info(
                 f"Marked instance {', '.join(instance_names)} unreachable "

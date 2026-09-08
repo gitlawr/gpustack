@@ -441,3 +441,52 @@ def _group(followers: int):
     return [
         SimpleNamespace(group_index=i, worker_id=100 + i) for i in range(followers + 1)
     ]
+
+
+# ---------------------------------------------------------------------------
+# An outage the worker cannot report
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_lost_workers_workloads_are_marked_unreachable(monkeypatch):
+    """The server marks an instance unreachable when it loses the worker, and
+    the worker is precisely what cannot mirror that onto the workload rows.
+    Left reporting RUNNING they would have the fold put the instance back to
+    RUNNING and undo the outage."""
+    running = SimpleNamespace(
+        state=WorkloadStateEnum.RUNNING, update=AsyncMock(), worker_id=7
+    )
+    starting = SimpleNamespace(
+        state=WorkloadStateEnum.STARTING, update=AsyncMock(), worker_id=7
+    )
+    monkeypatch.setattr(
+        controllers_module.Workload,
+        "all_by_fields",
+        AsyncMock(return_value=[running, starting]),
+    )
+
+    await controllers_module._mark_workloads_unreachable(MagicMock(), 3, 7)
+
+    for workload in (running, starting):
+        applied = workload.update.await_args[0][1]
+        assert applied["state"] == WorkloadStateEnum.UNREACHABLE
+        assert applied["state_message"] == "Worker is unreachable from the server"
+
+
+@pytest.mark.asyncio
+async def test_an_outage_does_not_overwrite_a_failure_of_its_own(monkeypatch):
+    """A workload that already reports why it failed says more than the
+    outage does, and a pending one had nothing up to lose."""
+    failed = SimpleNamespace(state=WorkloadStateEnum.ERROR, update=AsyncMock())
+    pending = SimpleNamespace(state=WorkloadStateEnum.PENDING, update=AsyncMock())
+    monkeypatch.setattr(
+        controllers_module.Workload,
+        "all_by_fields",
+        AsyncMock(return_value=[failed, pending]),
+    )
+
+    await controllers_module._mark_workloads_unreachable(MagicMock(), 3, 7)
+
+    failed.update.assert_not_awaited()
+    pending.update.assert_not_awaited()
