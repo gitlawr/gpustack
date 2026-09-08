@@ -33,6 +33,7 @@ from gpustack.server.model_instance_workloads import (
     PRE_EXECUTION_STATES,
     FoldDeclineReason,
     aggregate_instance_state,
+    SPEC_FIELDS,
     fold_decline_reason,
     to_workload_state,
     compile_model_instance,
@@ -705,3 +706,46 @@ def test_an_unresolvable_worker_falls_back_to_its_id():
     )
 
     assert "subordinate worker 101: boom." in folded["state_message"]
+
+
+# ---------------------------------------------------------------------------
+# The worker as the container has to name it
+# ---------------------------------------------------------------------------
+
+
+def test_a_group_carries_the_addresses_its_containers_need():
+    """A backend building an argument vector for a distributed run needs its
+    peers by address, and it runs on the worker with no session to join
+    ``workers`` with. That is why the embedded list denormalises these, and
+    the rows replacing it have to as well."""
+    mi = _instance(
+        mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER, followers=1
+    )
+    mi.worker_name, mi.worker_ip, mi.worker_ifname = "w-main", "10.0.0.1", "eth0"
+    sw = mi.distributed_servers.subordinate_workers[0]
+
+    leader, follower = compile_model_instance(mi)
+
+    assert (leader.worker_name, leader.worker_ip, leader.worker_ifname) == (
+        "w-main",
+        "10.0.0.1",
+        "eth0",
+    )
+    assert (follower.worker_name, follower.worker_ip, follower.worker_ifname) == (
+        sw.worker_name,
+        sw.worker_ip,
+        sw.worker_ifname,
+    )
+
+
+def test_a_worker_that_changes_address_propagates():
+    """They are part of the spec, so a reconcile rewrites them. The embedded
+    list is only written when the binding is, which leaves it as it was when
+    the instance was scheduled."""
+    assert {"worker_name", "worker_ip", "worker_ifname"} <= SPEC_FIELDS
+
+    mi = _instance()
+    mi.worker_ip = "10.0.0.9"
+    spec = workload_spec(compile_model_instance(mi)[0])
+
+    assert spec.worker_ip == "10.0.0.9"

@@ -151,6 +151,17 @@ class WorkloadBase(SQLModel):
 
     # -- Binding result ------------------------------------------------------
     worker_id: Optional[int] = None
+    worker_name: Optional[str] = None
+    worker_ip: Optional[str] = None
+    worker_ifname: Optional[str] = None
+    """The worker as the container needs to name it. Denormalised because the
+    readers that need it are on the worker -- a backend building an argument
+    vector for a distributed run has no session to join with, and reaching the
+    API for it would put a round trip in the launch path. Kept fresh by being
+    part of the spec: the controller re-syncs it, so a worker that changes
+    address propagates on the next reconcile rather than staying as it was when
+    the row was compiled."""
+
     gpu_type: Optional[str] = None
     gpu_indexes: Optional[List[int]] = Field(sa_column=Column(JSON), default=None)
     gpu_addresses: Optional[List[str]] = Field(sa_column=Column(JSON), default=None)
