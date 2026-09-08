@@ -65,8 +65,12 @@ _TO_WORKLOAD_STATE = {
 the two names that coincide do not mean the same thing, which is why neither
 direction is derived from the other."""
 
+_NOT_REVERSIBLE = frozenset({WorkloadStateEnum.PENDING, WorkloadStateEnum.STARTING})
+"""Workload states that more than one instance state maps onto."""
+
 _TO_INSTANCE_STATE = {
-    WorkloadStateEnum.STARTING: ModelInstanceStateEnum.INITIALIZING,
+    # No entry for STARTING: two instance states mirror onto it and _HOLD
+    # below turns it away before it gets here.
     WorkloadStateEnum.RUNNING: ModelInstanceStateEnum.RUNNING,
     WorkloadStateEnum.UNREACHABLE: ModelInstanceStateEnum.UNREACHABLE,
     WorkloadStateEnum.ERROR: ModelInstanceStateEnum.ERROR,
@@ -314,12 +318,16 @@ def aggregate_instance_state(
     if leader is None:
         return None
 
-    if leader.state == WorkloadStateEnum.PENDING:
-        # The mapping is not reversible here: scheduling, initializing and
-        # downloading all mirror onto a pending workload, so folding that back
-        # would replace the instance's richer state with the poorer one. Those
-        # states belong to the instance's own lifecycle; the workload has
-        # nothing to say until its container exists.
+    if leader.state in _NOT_REVERSIBLE:
+        # Coming up is where the instance's lifecycle is richer than the
+        # workload's, and the mapping back is not a function. Scheduling and
+        # file preparation all mirror onto a pending workload; INITIALIZING
+        # and the instance's own STARTING both mirror onto a starting one,
+        # since the workload has a single state for "launched, not yet
+        # healthy". Folding either back would pick one of the two and
+        # overwrite the other. Those states belong to the domain resource,
+        # which keeps writing them; the workload speaks once it is running,
+        # failed or unreachable.
         return None
 
     followers = sorted(
@@ -335,7 +343,11 @@ def aggregate_instance_state(
     state = _to_instance_state(leader.state)
     if state is None:
         return None
-    return {"state": state, "state_message": leader.state_message}
+    # "" rather than None: an instance with no message carries the empty
+    # string, and a workload that was never given one carries NULL. They mean
+    # the same thing, and the fold has to produce the spelling the instance
+    # already uses or every healthy instance reports a difference.
+    return {"state": state, "state_message": leader.state_message or ""}
 
 
 class FoldDeclineReason(str, Enum):
@@ -345,6 +357,7 @@ class FoldDeclineReason(str, Enum):
 
     NO_LEADER = "no_leader"
     LEADER_PENDING = "leader_pending"
+    LEADER_STARTING = "leader_starting"
     FOLLOWERS_NOT_READY = "followers_not_ready"
     NOT_AN_INSTANCE_STATE = "not_an_instance_state"
 
@@ -363,6 +376,8 @@ def fold_decline_reason(workloads: List[Workload]) -> Optional[FoldDeclineReason
         return FoldDeclineReason.NO_LEADER
     if leader.state == WorkloadStateEnum.PENDING:
         return FoldDeclineReason.LEADER_PENDING
+    if leader.state == WorkloadStateEnum.STARTING:
+        return FoldDeclineReason.LEADER_STARTING
 
     followers = sorted(
         (w for w in workloads if w.group_index != 0), key=lambda w: w.group_index
@@ -378,15 +393,13 @@ def _to_instance_state(state) -> Optional[ModelInstanceStateEnum]:
     """
     A workload's state as the instance's own.
 
-    Not a cast through the shared value: the two enums both have a STARTING,
-    and they do not mean the same thing. A workload is STARTING once its
-    container exists and has not yet passed a health check, which on the
-    instance is INITIALIZING; the instance's own STARTING is set by the server
-    when the model files are ready, before there is anything to run.
+    Not a cast through the shared value: both enums have a STARTING and they
+    do not name the same moment, and the instance has two states -- its own
+    STARTING and INITIALIZING -- where the workload has one.
 
-    None for a workload state the instance has no name for -- succeeded, which
-    only a task-shaped workload reaches -- and for a plain string that names
-    no member, since a row loaded from a rolled-back database can carry one.
+    None for a workload state the instance has no single name for, and for a
+    plain string that names no member, since a row loaded from a rolled-back
+    database can carry one.
     """
     try:
         return _TO_INSTANCE_STATE.get(WorkloadStateEnum(str(state)))

@@ -208,7 +208,6 @@ def test_a_spawned_process_is_a_starting_workload():
 @pytest.mark.parametrize(
     "instance_state",
     [
-        ModelInstanceStateEnum.INITIALIZING,
         ModelInstanceStateEnum.RUNNING,
         ModelInstanceStateEnum.UNREACHABLE,
         ModelInstanceStateEnum.ERROR,
@@ -225,15 +224,30 @@ def test_an_execution_state_survives_the_round_trip(instance_state):
     assert folded["state"] == instance_state
 
 
-def test_the_two_startings_are_not_the_same_state():
-    """Both enums have a STARTING and they name different moments. Converting
-    by value would turn "container up, not yet healthy" into "files ready,
-    nothing launched" and lose INITIALIZING from what a user sees."""
-    assert (
-        to_workload_state(ModelInstanceStateEnum.STARTING) == WorkloadStateEnum.PENDING
+@pytest.mark.parametrize(
+    "coming_up",
+    [ModelInstanceStateEnum.INITIALIZING, ModelInstanceStateEnum.STARTING],
+)
+def test_the_fold_says_nothing_while_an_instance_is_coming_up(coming_up):
+    """Both of these mirror onto a workload that is launched but not yet
+    healthy -- INITIALIZING onto starting, the instance's own STARTING onto
+    pending, since the server sets it before anything is launched. Two states
+    onto one means the way back is not a function, so the fold leaves the
+    instance's own lifecycle alone rather than picking one of them."""
+    workloads = [_workload(0, to_workload_state(coming_up))]
+
+    assert aggregate_instance_state(workloads) is None
+
+
+def test_no_message_has_one_spelling():
+    """An instance with nothing to report carries the empty string and a
+    workload that was never given a message carries NULL. Reporting NULL back
+    would make every healthy instance look like a disagreement."""
+    folded = aggregate_instance_state(
+        [_workload(0, WorkloadStateEnum.RUNNING, state_message=None)]
     )
-    folded = aggregate_instance_state([_workload(0, WorkloadStateEnum.STARTING)])
-    assert folded["state"] == ModelInstanceStateEnum.INITIALIZING
+
+    assert folded["state_message"] == ""
 
 
 def test_the_service_port_is_not_duplicated_under_two_names():
@@ -392,7 +406,7 @@ def test_the_fold_agrees_with_what_the_worker_decides_today(states):
 
     if reference is None:
         # The leader governs; the fold reports its state rather than nothing.
-        assert folded == {"state": "running", "state_message": None}
+        assert folded == {"state": "running", "state_message": ""}
     elif reference.get("state") is None:
         assert folded is None  # hold
     else:
