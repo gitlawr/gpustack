@@ -13,6 +13,7 @@ the ports and the reservations are shaped the way they are.
 """
 
 import logging
+from enum import Enum
 from typing import Dict, List, Optional
 
 from gpustack.schemas.models import (
@@ -315,6 +316,42 @@ def aggregate_instance_state(workloads: List[Workload]) -> Optional[dict]:
     if state is None:
         return None
     return {"state": state, "state_message": leader.state_message}
+
+
+class FoldDeclineReason(str, Enum):
+    """Why the fold had nothing to say. Kept apart because they are not equally
+    benign: two are ordinary points in a start, and one means the group is
+    missing the row everything else is derived from."""
+
+    NO_LEADER = "no_leader"
+    LEADER_PENDING = "leader_pending"
+    FOLLOWERS_NOT_READY = "followers_not_ready"
+    NOT_AN_INSTANCE_STATE = "not_an_instance_state"
+
+
+def fold_decline_reason(workloads: List[Workload]) -> Optional[FoldDeclineReason]:
+    """
+    Which branch of ``aggregate_instance_state`` returned None.
+
+    Diagnostic only: the fold's own silence is the evidence that it can be made
+    authoritative, and silence for these four reasons means four different
+    things. ``test_every_decline_branch_reports_its_reason`` pins this against
+    the branches it describes, so the two cannot drift apart.
+    """
+    leader = next((w for w in workloads if w.group_index == 0), None)
+    if leader is None:
+        return FoldDeclineReason.NO_LEADER
+    if leader.state == WorkloadStateEnum.PENDING:
+        return FoldDeclineReason.LEADER_PENDING
+
+    followers = sorted(
+        (w for w in workloads if w.group_index != 0), key=lambda w: w.group_index
+    )
+    if _distributed_override(followers) is _HOLD:
+        return FoldDeclineReason.FOLLOWERS_NOT_READY
+    if _to_instance_state(leader.state) is None:
+        return FoldDeclineReason.NOT_AN_INSTANCE_STATE
+    return None
 
 
 def _to_instance_state(state) -> Optional[ModelInstanceStateEnum]:

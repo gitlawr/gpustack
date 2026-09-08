@@ -30,7 +30,9 @@ from gpustack.schemas.workloads import (
 from gpustack.worker.serve_manager import ServeManager
 from gpustack.server.model_instance_workloads import (
     SERVICE_PORT,
+    FoldDeclineReason,
     aggregate_instance_state,
+    fold_decline_reason,
     compile_model_instance,
     named_ports,
     sync_model_instance_workloads,
@@ -530,3 +532,55 @@ def test_a_state_the_instance_has_no_name_for_folds_to_nothing():
     )
 
     assert aggregate_instance_state([leader]) is None
+
+
+@pytest.mark.parametrize(
+    "workloads,expected",
+    [
+        ([], FoldDeclineReason.NO_LEADER),
+        (
+            [_workload(1, WorkloadStateEnum.RUNNING)],
+            FoldDeclineReason.NO_LEADER,
+        ),
+        (
+            [_workload(0, WorkloadStateEnum.PENDING)],
+            FoldDeclineReason.LEADER_PENDING,
+        ),
+        (
+            [
+                _workload(0, WorkloadStateEnum.RUNNING),
+                _workload(1, WorkloadStateEnum.STARTING),
+            ],
+            FoldDeclineReason.FOLLOWERS_NOT_READY,
+        ),
+        (
+            [_workload(0, WorkloadStateEnum.SUCCEEDED)],
+            FoldDeclineReason.NOT_AN_INSTANCE_STATE,
+        ),
+    ],
+)
+def test_every_decline_branch_reports_its_reason(workloads, expected):
+    """The reason is read off a second walk of the same conditions, so it can
+    drift from the branch it names. Each case asserts both at once: the fold
+    declines, and the reason says which branch did it."""
+    assert aggregate_instance_state(workloads) is None
+    assert fold_decline_reason(workloads) is expected
+
+
+@pytest.mark.parametrize(
+    "workloads",
+    [
+        [_workload(0, WorkloadStateEnum.RUNNING)],
+        [
+            _workload(0, WorkloadStateEnum.RUNNING),
+            _workload(1, WorkloadStateEnum.RUNNING),
+        ],
+        [
+            _workload(0, WorkloadStateEnum.RUNNING),
+            _workload(1, WorkloadStateEnum.ERROR),
+        ],
+    ],
+)
+def test_a_fold_that_speaks_reports_no_reason(workloads):
+    assert aggregate_instance_state(workloads) is not None
+    assert fold_decline_reason(workloads) is None

@@ -86,7 +86,9 @@ from gpustack.schemas.workloads import (
 from gpustack.schemas.benchmark import Benchmark
 from gpustack.server.benchmark_workloads import compile_benchmark
 from gpustack.server.model_instance_workloads import (
+    FoldDeclineReason,
     aggregate_instance_state,
+    fold_decline_reason,
     spec_differs,
     sync_model_instance_workloads,
     workload_spec,
@@ -436,7 +438,7 @@ class ModelInstanceWorkloadStateController:
     def __init__(self):
         self._agreed = 0
         self._disagreed = 0
-        self._declined = 0
+        self._declined: Dict[Optional[FoldDeclineReason], int] = {}
         self._next_tally_at = 1
 
     async def start(self):
@@ -468,7 +470,19 @@ class ModelInstanceWorkloadStateController:
                 )
                 folded = aggregate_instance_state(workloads)
                 if folded is None:
-                    self._declined += 1
+                    reason = fold_decline_reason(workloads)
+                    self._declined[reason] = self._declined.get(reason, 0) + 1
+                    if reason is FoldDeclineReason.NO_LEADER:
+                        # Not a point in a normal start: every group is
+                        # compiled with a leader at group_index 0, so its
+                        # absence means the rows are wrong, and every other
+                        # fold for this instance will decline for as long as
+                        # they stay that way.
+                        logger.warning(
+                            f"Workload fold found no leader for model instance "
+                            f"{instance.name} (id={instance.id}) among "
+                            f"{len(workloads)} workload(s)"
+                        )
                     return
 
                 if not envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS:
@@ -515,7 +529,7 @@ class ModelInstanceWorkloadStateController:
             f"Workload fold disagrees with model instance {instance.name} "
             f"(id={instance.id}): {differing} "
             f"[agreed={self._agreed} disagreed={self._disagreed} "
-            f"declined={self._declined}]"
+            f"declined={self._declined_summary()}]"
         )
 
     def _report_tally(self):
@@ -527,8 +541,25 @@ class ModelInstanceWorkloadStateController:
         self._next_tally_at = total * 2
         logger.info(
             f"Workload fold: agreed={self._agreed} disagreed={self._disagreed} "
-            f"declined={self._declined} (declined = leader still pending, "
-            f"which the fold has nothing to say about)"
+            f"declined={self._declined_summary()}"
+        )
+
+    def _declined_summary(self) -> str:
+        """Declines by reason. leader_pending and followers_not_ready are
+        ordinary points in a start; no_leader is not, and lumping them together
+        hid that."""
+        if not self._declined:
+            return "{}"
+        return (
+            "{"
+            + ", ".join(
+                f"{(reason.value if reason else 'unknown')}={count}"
+                for reason, count in sorted(
+                    self._declined.items(),
+                    key=lambda kv: (kv[0].value if kv[0] else ""),
+                )
+            )
+            + "}"
         )
 
 

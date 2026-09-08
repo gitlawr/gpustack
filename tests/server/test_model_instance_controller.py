@@ -19,6 +19,7 @@ from gpustack.schemas.workloads import (
     WorkloadStateEnum,
 )
 from gpustack.server.bus import Event, EventType
+from gpustack.server.model_instance_workloads import FoldDeclineReason
 from gpustack.server.controllers import (
     ModelInstanceController,
     ModelInstanceWorkloadStateController,
@@ -266,11 +267,26 @@ async def test_a_declined_group_is_counted_apart_from_agreement(monkeypatch):
     with _fold(monkeypatch, instance, folded=None):
         await controller._reconcile(3)
 
-    assert (controller._agreed, controller._disagreed, controller._declined) == (
-        0,
-        0,
-        1,
-    )
+    assert (controller._agreed, controller._disagreed) == (0, 0)
+    assert sum(controller._declined.values()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_group_with_no_leader_is_reported_rather_than_just_counted(
+    monkeypatch, caplog
+):
+    """Every group is compiled with a leader at group_index 0, so its absence
+    is not a point in a normal start -- and it declines forever, which looks
+    identical to a start that is merely slow."""
+    instance = _instance()
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(monkeypatch, instance, folded=None):
+        with caplog.at_level(logging.WARNING):
+            await controller._reconcile(3)
+
+    assert controller._declined == {FoldDeclineReason.NO_LEADER: 1}
+    assert "found no leader" in caplog.text
 
 
 @pytest.mark.asyncio
