@@ -19,6 +19,7 @@ from gpustack.schemas.workloads import (
     WorkloadStateEnum,
 )
 from gpustack.server.bus import Event, EventType
+from gpustack import envs
 from gpustack.server import controllers as controllers_module
 from gpustack.server.model_instance_workloads import FoldDeclineReason
 from gpustack.server.controllers import (
@@ -490,3 +491,14 @@ async def test_an_outage_does_not_overwrite_a_failure_of_its_own(monkeypatch):
 
     failed.update.assert_not_awaited()
     pending.update.assert_not_awaited()
+
+
+def test_the_confirm_wait_outlasts_the_pass_it_is_compared_against():
+    """A distributed outage does not reach the instance on the event that
+    caused it: the main worker writes it on its next sync pass. Waiting one
+    interval races that pass and reports a difference where the fold had
+    proposed exactly the value the worker went on to write."""
+    assert (
+        controllers_module._FOLD_CONFIRM_SECONDS
+        > envs.MODEL_INSTANCE_HEALTH_CHECK_INTERVAL
+    )

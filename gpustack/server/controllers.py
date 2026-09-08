@@ -427,10 +427,18 @@ class _Fold(NamedTuple):
     distributed: bool
 
 
-_FOLD_CONFIRM_SECONDS = 3
-"""How long a difference has to persist before it counts. Long enough to
-outlast the gap between a worker writing an instance and mirroring it onto
-the workload, short enough that a real disagreement is reported promptly."""
+_FOLD_CONFIRM_SECONDS = 3 * envs.MODEL_INSTANCE_HEALTH_CHECK_INTERVAL
+"""
+How long a difference has to persist before it counts.
+
+Derived from the worker's sync interval rather than picked: the fold is being
+compared against what the worker writes, and for a distributed outage that is
+not written on the event at all but on the main worker's next pass. A wait
+equal to the interval races that pass and reports a difference the pass was
+about to remove -- one where the fold had already proposed exactly the value
+the worker went on to write, only sooner. A few intervals outlast it while
+still reporting a real disagreement promptly.
+"""
 
 
 def _differing(instance, folded: dict) -> dict:
