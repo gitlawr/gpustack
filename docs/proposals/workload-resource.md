@@ -1,10 +1,10 @@
 # 提案：通用 Workload 资源
 
-状态：实施中 —— 阶段 0/1/2 完成，阶段 3 约一半（见 §4）
+状态：实施中 —— 阶段 0/1/2 完成，阶段 3 的折叠已在真实环境生效（见 §4）
 目标：模型实例、基准测试、缓存服务实例三类负载统一编译到一个 Workload 资源
 影响范围：新增 `workloads` 表；三类负载的用户面 API **保持不变**
 
-> 实施中新增的结论散在 §2.6、§3、§4 各阶段小节里，都标了「实施中发现」。它们是这份提案里唯一不来自设计推演、而来自把代码写出来的部分。
+> 实施中新增的结论散在 §2.3、§2.6、§3、§4 各阶段小节里，都标了「实施中发现」。它们是这份提案里唯一不来自设计推演、而来自把代码写出来的部分——其中分量最重的几条来自真实环境，不是测试（§4 阶段 3）。
 
 ## 1. 目标形态
 
@@ -85,6 +85,29 @@ PENDING → ANALYZING → SCHEDULED → INITIALIZING → DOWNLOADING → STARTIN
 - `WorkloadStateEnum` 只覆盖执行子集：`pending` / `starting` / `running` / `unreachable` / `succeeded` / `error`
 - 领域资源保留自己更丰富的生命周期，controller 负责映射
 - worker 侧已有的 `WorkloadPhase`（`worker/controlloop/workload_state.py`）是**容器运行时状态**的中性分类，与上面两者都不同——它读 `WorkloadStatus`，不落库。三者不要合并
+
+#### 映射是两张表，反向是偏函数（**实施中发现**）
+
+写这一节时以为映射可以按名字走：两个枚举都有 `STARTING`，看起来对应。**它们指的不是同一个时刻**：
+
+| 实例状态 | 谁写 | 含义 | → workload |
+|---|---|---|---|
+| `INITIALIZING` | worker | 已拉起供给进程（同时写 `pid`） | `starting` |
+| `STARTING` | **服务端** | 模型文件就绪，还没启动任何东西 | `pending` |
+
+按名字映射的后果是 `INITIALIZING`（容器在跑）被映成 `pending`（无容器），而 `STARTING → starting` 这条**永远不会发生**——写它的是服务端，不经过 worker 的镜像。leader 的 workload 于是只有 `pending → running` 两个状态。
+
+现在是两张独立的表（`_TO_WORKLOAD_STATE` / `_TO_INSTANCE_STATE`），任一方向都不从另一方推导，并有覆盖全部执行态的往返测试。
+
+更要紧的推论：**正向是全映射，反向只有 3/6**。多个领域状态塌缩到同一个 workload 状态，反向就不是函数。折叠在这些位置**弃权**而不是猜：
+
+```
+pending / starting → 弃权（两个实例状态都映到这里）
+running / unreachable / error → 映射回去
+succeeded → 弃权（服务型实例没有这个概念）
+```
+
+代价是折叠对启动全过程沉默，实例的 `INITIALIZING` 和 `STARTING` 仍由领域侧自己写。
 
 ### 2.4 `download_progress` 的归属（POC 已结论）
 
@@ -213,7 +236,7 @@ UNIQUE (owner_kind, owner_id, worker_id, group_index)
 
 **明确不下沉的两样**保持原判:结果收集(领域逻辑)、串行队列(`_active_benchmark_id` 是准入语义,留在 server 侧)。
 
-### 阶段 3：模型实例 —— 约一半 🔶
+### 阶段 3：模型实例 —— 折叠已生效 🔶
 
 提案原本只有三条要求,实施时拆成四步:
 
@@ -221,23 +244,43 @@ UNIQUE (owner_kind, owner_id, worker_id, group_index)
 |---|---|
 | 1. 编译成 Workload 行 | ✅ 写入,无人消费 |
 | 2a. 执行状态镜像到 Workload | ✅ 双写,实例行仍权威 |
-| 2b. 折叠回实例 | 🔶 **代码就位,仅比对,开关关闭** |
+| 2b. 折叠回实例 | ✅ **已翻开关,单机与分布式均验证** |
 | 3. 调度器直接写绑定、`subordinate_workers[]` 变成行 | ⬜ 未开始 |
 | 4. 从 ModelInstance 摘字段(真实数据迁移) | ⬜ 未开始 |
 
-**为什么 2b 不直接翻**:它一旦生效就是实例状态的唯一来源,而折叠错了实例永远出不了 STARTING——第一现场会是生产环境。所以折叠照常运行但只记录分歧:
+**为什么 2b 不直接翻**:它一旦生效就是实例状态的唯一来源,而折叠错了实例永远出不了 STARTING——第一现场会是生产环境。所以折叠照常运行但只记录分歧,**沉默就是可以翻转的证据**。
 
-```
-Workload fold disagrees with model instance ...
-```
+折叠逻辑对着 `_get_main_worker_distributed_state` 逐项验证:两个 follower 的 16 种状态组合全部与生产实现比对,失败消息则由一个同时驱动两边、比对输出的测试钉住。
 
-**沉默就是可以翻转的证据。** `GPUSTACK_MODEL_INSTANCE_STATE_FROM_WORKLOADS=true` 是开关,它随步骤 4 一起消失。
-
-折叠逻辑对着 `_get_main_worker_distributed_state` 逐项验证:两个 follower 的 16 种状态组合全部与生产实现比对。
-
-**`pending` 折不回去**(**实施中发现**):`scheduled` / `initializing` / `downloading` 三个实例状态全都镜像成 workload 的 `pending`,折回去会把更丰富的实例状态替换成更贫乏的。这些状态属于实例自己的生命周期——正是 §2.3 那条边界从另一侧看的样子,也是它第一次被动验证。
+`GPUSTACK_MODEL_INSTANCE_STATE_FROM_WORKLOADS=true` 是开关,它随步骤 4 一起消失。
 
 步骤 3 的规模需要预先知道:**68 个文件引用 `ModelInstance`**,`distributed_servers` 散在 20 个文件里,含调度器、全部候选选择器、放置打分器、资源核算和四个 backend。
+
+#### 这套比对装置抓到了什么
+
+真实环境跑下来,闸门在翻开关前拦下 **5 个会造成事故的缺陷**。单测一个都没抓到——它们全部来自"两个写者、不同时刻"这个结构,而不是某段逻辑本身:
+
+| 分歧 | 若直接翻开关 |
+|---|---|
+| 实例 `SCHEDULED` vs 折叠 `ERROR` | 失败后重新调度被**撤销**(workload 还留着上一次运行的 ERROR) |
+| 实例 `UNREACHABLE` vs 折叠 `RUNNING` | worker 失联标记被**撤销** |
+| 实例 `STARTING` vs 折叠 `INITIALIZING` | 见 §2.3,映射按名字走 |
+| `state_message` `''` vs `None` | 每个健康实例都报分歧,闸门永远过不去 |
+| 标记失联时多标了 `STARTING` 的 leader | 修第 2 条时引入的,标记范围比服务端既有规则宽 |
+
+**规律**:凡是 **worker 不参与**的状态变更(重新调度、worker 失联),镜像就跟不上——镜像只在 worker 写回时触发。这类只能由服务端在写实例的同时一并写 workload 行,而且范围要逐字照搬既有规则(最后一行就是没照搬的后果)。第 4 步之后问题消失:那时 workload 是执行状态的唯一去处。
+
+还有一个不是这套装置抓的,但它的后果正是**让这套装置失效**:`.value` 作用在 ORM 读回的字符串上会抛 `AttributeError`(列声明成 `String`,读回是 `str`,而 API 校验回来的是枚举)。折叠对每个实例崩溃,分歧日志恒空——**闸门会读成通过**。根因已在 `EnumString` 里消除(读出时转回枚举),但仓库里另有 19 列同样的不对称。
+
+#### 仪表本身的三次修正
+
+闸门的判据是"日志为空",所以**空日志必须只有一种解释**。三次发现它不是:
+
+1. **只在分歧时打日志** —— 空日志同时意味着"处处一致""控制器没跑""事件没到"。加了计数 tally。
+2. **弃权不计入 tally** —— 启动全程弃权时仍然一行不打,和控制器停摆输出相同。弃权计入节奏。
+3. **一致只有总数,不分状态** —— 只见过 `running` 的一轮,和覆盖了 error/unreachable 的一轮读起来一样;分布式和单机也都只贡献 `running`。改成按状态计数,并单列 `of which distributed`。
+
+**判据本身也改过一次。** 起初是"等 N 秒后是否仍有差异"——但比较两个最终一致的写者,任何在窗口内自行消解的东西都能通过,包括两个写者来回翻转这种真缺陷,调大窗口只会让盲区更大。改成看**收敛到哪里**:实例最终是否到达折叠提出的那个值。到了就是折叠对且更早(读到失联的瞬间就报,不必等主 worker 那一轮);没到就是提议从未成真,单列为 `overtaken`——旧判据会把它当成干净的 settle 放过。时间参数还在,但降级成"隔多久再问",不再是判据。
 
 ### 与 worker 控制回路抽取的关系 —— 已完成 ✅
 
@@ -305,7 +348,7 @@ Workload fold disagrees with model instance ...
 
 ## 7. 风险与取舍
 
-1. **缓存服务刚联测稳定。** 本期修的那批问题（事件丢失、写回竞态、级联删除回收滞后、非优雅终止）都验证在当前行模型上。换模型等于把那批验证重做一遍，且 §5 动的正是其中一条已知不稳的链路。
+1. ~~**缓存服务刚联测稳定。**~~ 已迁移并在真实环境验过:删除的回收从最多约 7 分钟降到秒级,拉镜像过程第一次可见。原风险(那批验证要重做)兑现为实际重做,代价符合预期。
 2. **模型实例的映射是纸面上定不下来的。** 加速器绑定与分布式分组只由它独占，阶段 0 的 POC 就是为此存在。跳过 POC 直接进阶段 1，等于让缓存服务替一个未经验证的模型背书。
 3. **阶段 3 有真实数据迁移。** 模型实例已发布，需要双写、回填、回滚方案。
 
@@ -321,7 +364,8 @@ Workload fold disagrees with model instance ...
 
 **待决的**:
 
-- **翻 `GPUSTACK_MODEL_INSTANCE_STATE_FROM_WORKLOADS`** —— 前提是分歧日志为空。这是阶段 3 往下走的闸门。
+- **`INITIALIZING` 是否可以从用户可见的生命周期里消失** —— 第 4 步之后 worker 不再写实例,而 `INITIALIZING` 正是它写的,序列会变成 `DOWNLOADING → STARTING → RUNNING`。倾向接受(`STARTING` 已经表达"正在起",两者语义重叠),但这是产品可见的变化,需要在第 4 步之前定。若不能少,得让服务端在 workload 转 `starting` 时补写。
+- **`PATCH /workloads/{id}/status`** —— 服务端写 spec、worker 写 status 这条边界目前只是**约定**:worker 的写回是 GET 整行 / 改字段 / PUT 整行,会覆盖服务端并发写入的 spec(重新调度换了 GPU 就会丢)。要求走生成的客户端,所以需要新端点 + 重新生成客户端。这是阶段 3 之后依然存在的缺陷,不是过渡期产物。
 - **基准测试的折叠**是否也做(目前 Benchmark 行仍权威)
 - **两个既存问题是否独立立项**:DELEGATED 从属节点被对账循环写成 ERROR(**可达性待产品确认**:v2 的 `BackendEnum` 里没有 llama-box,GGUF 分布式能否真走到多 worker 调度,代码判断不了);与 leader 同机的 follower 永远不被管理
 - **serve 无重启上限**:缓存服务 5 次后 park 到 ERROR,模型实例永远重启。判断是产品语义不是缺陷(推理服务的失败常常是外部的,且用户能用 `restart_on_error` 关掉),未改
@@ -329,9 +373,27 @@ Workload fold disagrees with model instance ...
 
 ## 9. 验证清单
 
-19 个 commit 全部测试绿,但**没有一行在真实环境跑过**。按信息量排:
+### 已在真实环境验过
 
-1. **缓存服务** —— 唯一完整迁移的。删除服务,容器应秒级消失(原来最多约 7 分钟);`previous=true` 能看到上一次的**容器**日志
-2. **分歧日志** —— 搜 `Workload fold disagrees with model instance`。空 = 折叠站得住
-3. **基准测试超时** —— 设了 `benchmark_max_duration_seconds` 后中途重启 worker,超时应仍触发
-4. **回归面** —— 模型实例和基准测试行为应完全不变(权威数据源都没动)
+| 项 | 结果 |
+|---|---|
+| 缓存服务删除 | 容器秒级消失(原来最多约 7 分钟) |
+| 缓存服务拉镜像 | 供给日志可见——这是统一启动模型的直接收益 |
+| 折叠比对(单机) | `running` / `error` / `unreachable` 全部一致 |
+| 折叠比对(双机分布式) | 同上,`_distributed_override` 三个分支都走到 |
+| 翻开关后 | 单机与分布式均能正常到 RUNNING,不卡 STARTING |
+
+判读用的一行:
+
+```
+Workload fold [authoritative corrected=0]: agreed={running=6, error=1, unreachable=4}
+  of which distributed={...} declined={instance_not_executing=20, leader_starting=33}
+```
+
+模式写在最前面——两种模式在一切正常时计数相同,不标出来就无法判断折叠是在决定还是只在旁观(第一次读的时候就误判了)。
+
+### 尚未验证
+
+1. **基准测试超时** —— 设了 `benchmark_max_duration_seconds` 后中途重启 worker,超时应仍触发
+2. **容器日志 `previous=true`** —— 能看到上一次的容器日志
+3. **回归面** —— 基准测试行为应完全不变(权威数据源没动)
