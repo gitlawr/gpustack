@@ -253,9 +253,9 @@ async def test_agreement_is_counted_so_an_empty_log_can_be_told_from_a_dead_one(
         with caplog.at_level(logging.INFO):
             await controller._reconcile(3)
 
-    assert controller._agreed == 1
+    assert controller._agreed == {"running": 1}
     assert controller._disagreed == 0
-    assert "agreed=1" in caplog.text
+    assert "agreed={running=1}" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -268,7 +268,7 @@ async def test_a_declined_group_is_counted_apart_from_agreement(monkeypatch):
     with _fold(monkeypatch, instance, folded=None):
         await controller._reconcile(3)
 
-    assert (controller._agreed, controller._disagreed) == (0, 0)
+    assert (controller._agreed, controller._disagreed) == ({}, 0)
     assert sum(controller._declined.values()) == 1
 
 
@@ -337,3 +337,22 @@ async def test_a_run_of_declines_still_reports(monkeypatch, caplog):
 
     assert "Workload fold:" in caplog.text
     assert "declined=" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_tally_names_the_states_it_agreed_about(monkeypatch, caplog):
+    """The gate is coverage, not volume: a run that only ever agreed about
+    RUNNING has said nothing about the states an instance passes through on
+    the way there, and a single total cannot tell those apart."""
+    controller = ModelInstanceWorkloadStateController()
+
+    for state in ("initializing", "running", "running"):
+        instance = _instance(state=state)
+        with _fold(monkeypatch, instance, folded={"state": state}):
+            with caplog.at_level(logging.INFO):
+                await controller._reconcile(3)
+
+    assert controller._agreed == {"initializing": 1, "running": 2}
+    # The cadence widens, so the last line printed is the one at two events;
+    # what matters is that a line names the states rather than a total.
+    assert "agreed={initializing=1, running=1}" in caplog.text

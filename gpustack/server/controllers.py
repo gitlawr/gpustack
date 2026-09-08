@@ -419,6 +419,23 @@ class ModelInstanceController:
             )
 
 
+def _tally(counts: Dict[Any, int]) -> str:
+    """A counter as ``{name=n, name=n}``, ordered by name so two runs can be
+    diffed by eye."""
+    if not counts:
+        return "{}"
+    return (
+        "{"
+        + ", ".join(
+            f"{getattr(key, 'value', key)}={count}"
+            for key, count in sorted(
+                counts.items(), key=lambda kv: str(getattr(kv[0], "value", kv[0]))
+            )
+        )
+        + "}"
+    )
+
+
 class ModelInstanceWorkloadStateController:
     """
     Folds a model instance's workload states back onto the instance.
@@ -436,7 +453,11 @@ class ModelInstanceWorkloadStateController:
     """
 
     def __init__(self):
-        self._agreed = 0
+        # Agreements are counted per state rather than in total: the gate is
+        # not "the fold was right N times" but "the fold was right about each
+        # state an instance passes through", and a run that only ever agreed
+        # about RUNNING has not exercised the rest.
+        self._agreed: Dict[Any, int] = {}
         self._disagreed = 0
         self._declined: Dict[Optional[FoldDeclineReason], int] = {}
         self._next_tally_at = 1
@@ -540,7 +561,8 @@ class ModelInstanceWorkloadStateController:
             if getattr(instance, name, None) != value
         }
         if not differing:
-            self._agreed += 1
+            state = folded.get("state")
+            self._agreed[state] = self._agreed.get(state, 0) + 1
             logger.debug(
                 f"Workload fold agrees with model instance {instance.name} "
                 f"(id={instance.id}): {folded}"
@@ -551,7 +573,7 @@ class ModelInstanceWorkloadStateController:
         logger.info(
             f"Workload fold disagrees with model instance {instance.name} "
             f"(id={instance.id}): {differing} "
-            f"[agreed={self._agreed} disagreed={self._disagreed} "
+            f"[agreed={_tally(self._agreed)} disagreed={self._disagreed} "
             f"declined={self._declined_summary()}]"
         )
 
@@ -566,32 +588,22 @@ class ModelInstanceWorkloadStateController:
         was silent, and silence is what a controller that has stopped running
         also looks like.
         """
-        total = self._agreed + self._disagreed + sum(self._declined.values())
+        total = (
+            sum(self._agreed.values()) + self._disagreed + sum(self._declined.values())
+        )
         if total < self._next_tally_at:
             return
         self._next_tally_at = total * 2
         logger.info(
-            f"Workload fold: agreed={self._agreed} disagreed={self._disagreed} "
-            f"declined={self._declined_summary()}"
+            f"Workload fold: agreed={_tally(self._agreed)} "
+            f"disagreed={self._disagreed} declined={self._declined_summary()}"
         )
 
     def _declined_summary(self) -> str:
         """Declines by reason. leader_pending and followers_not_ready are
         ordinary points in a start; no_leader is not, and lumping them together
         hid that."""
-        if not self._declined:
-            return "{}"
-        return (
-            "{"
-            + ", ".join(
-                f"{(reason.value if reason else 'unknown')}={count}"
-                for reason, count in sorted(
-                    self._declined.items(),
-                    key=lambda kv: (kv[0].value if kv[0] else ""),
-                )
-            )
-            + "}"
-        )
+        return _tally(self._declined)
 
 
 class BenchmarkController:
