@@ -4,7 +4,7 @@ import string
 import asyncio
 from importlib.resources import files
 from functools import partial
-from typing import Any, Dict, Iterable, List, Tuple, Optional, Set
+from typing import Any, Dict, Iterable, List, NamedTuple, Tuple, Optional, Set
 from pydantic import BaseModel
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -420,6 +420,13 @@ class ModelInstanceController:
             )
 
 
+class _Fold(NamedTuple):
+    instance: Optional[ModelInstance]
+    folded: Optional[dict]
+    reason: Optional[FoldDeclineReason]
+    distributed: bool
+
+
 _FOLD_CONFIRM_SECONDS = 3
 """How long a difference has to persist before it counts. Long enough to
 outlast the gap between a worker writing an instance and mirroring it onto
@@ -477,8 +484,15 @@ class ModelInstanceWorkloadStateController:
         self._agreed: Dict[Any, int] = {}
         self._disagreed = 0
         self._declined: Dict[Optional[FoldDeclineReason], int] = {}
+        # Agreements about a group that has followers. A single-worker
+        # instance never reaches _distributed_override, so a run made only of
+        # those says nothing about the part of the fold most likely to be
+        # wrong -- and both shapes agree about "running", so one counter
+        # cannot tell them apart.
+        self._agreed_distributed: Dict[Any, int] = {}
         self._settled = 0
         self._confirming: Set[int] = set()
+        self._confirm_tasks: Set[asyncio.Task] = set()
         self._next_tally_at = 1
 
     async def start(self):
@@ -495,12 +509,13 @@ class ModelInstanceWorkloadStateController:
             await self._reconcile(workload.owner_id)
 
     async def _evaluate(self, session, instance_id: int):
-        """Read the group and fold it. Returns (instance, folded, reason);
-        folded is None when the fold has nothing to say, and reason says
-        which condition turned it away."""
+        """Read the group and fold it. ``folded`` is None when the fold has
+        nothing to say and ``reason`` says which condition turned it away;
+        ``distributed`` is whether the group has followers, which is the part
+        of the fold a single-worker instance never exercises."""
         instance = await ModelInstance.one_by_id(session, instance_id)
         if instance is None:
-            return None, None, None
+            return _Fold(None, None, None, False)
 
         if instance.state in AWAITING_EXECUTION_STATES:
             # Nothing is waiting on a container here -- the instance was
@@ -510,7 +525,9 @@ class ModelInstanceWorkloadStateController:
             # back would put the instance into ERROR again and undo the
             # restart. Its own STARTING is deliberately not in that set; that
             # is where it waits for the fold to report the container running.
-            return instance, None, FoldDeclineReason.INSTANCE_NOT_EXECUTING
+            return _Fold(
+                instance, None, FoldDeclineReason.INSTANCE_NOT_EXECUTING, False
+            )
 
         workloads = await Workload.all_by_fields(
             session,
@@ -522,18 +539,21 @@ class ModelInstanceWorkloadStateController:
         folded = aggregate_instance_state(
             workloads, await self._follower_worker_ips(session, workloads)
         )
+        distributed = any(w.group_index != 0 for w in workloads)
         if folded is None:
-            return instance, None, fold_decline_reason(workloads)
-        return instance, folded, None
+            return _Fold(instance, None, fold_decline_reason(workloads), distributed)
+        return _Fold(instance, folded, None, distributed)
 
     async def _reconcile(self, instance_id: int):
         try:
             async with async_session() as session:
-                instance, folded, reason = await self._evaluate(session, instance_id)
+                result = await self._evaluate(session, instance_id)
+                instance, folded = result.instance, result.folded
                 if instance is None:
                     return
 
                 if folded is None:
+                    reason = result.reason
                     self._declined[reason] = self._declined.get(reason, 0) + 1
                     if reason is FoldDeclineReason.NO_LEADER:
                         # Not a point in a normal start: every group is
@@ -549,7 +569,7 @@ class ModelInstanceWorkloadStateController:
                     return
 
                 if not envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS:
-                    self._compare(instance, folded)
+                    self._compare(instance, folded, result.distributed)
                     return
 
                 if all(
@@ -584,7 +604,7 @@ class ModelInstanceWorkloadStateController:
         workers = await Worker.all_by_fields(session, {})
         return {worker.id: worker.ip for worker in workers if worker.id in worker_ids}
 
-    def _compare(self, instance: ModelInstance, folded: dict):
+    def _compare(self, instance: ModelInstance, folded: dict, distributed: bool):
         """
         Say where the fold would have written something else.
 
@@ -604,6 +624,10 @@ class ModelInstanceWorkloadStateController:
         if not differing:
             state = folded.get("state")
             self._agreed[state] = self._agreed.get(state, 0) + 1
+            if distributed:
+                self._agreed_distributed[state] = (
+                    self._agreed_distributed.get(state, 0) + 1
+                )
             logger.debug(
                 f"Workload fold agrees with model instance {instance.name} "
                 f"(id={instance.id}): {folded}"
@@ -612,7 +636,12 @@ class ModelInstanceWorkloadStateController:
             return
         if instance.id not in self._confirming:
             self._confirming.add(instance.id)
-            asyncio.create_task(self._confirm(instance.id, differing))
+            # Held in a set until it finishes: asyncio keeps only a weak
+            # reference to a task, so one whose result nobody awaits can be
+            # collected mid-flight.
+            task = asyncio.create_task(self._confirm(instance.id, differing))
+            self._confirm_tasks.add(task)
+            task.add_done_callback(self._confirm_tasks.discard)
 
     async def _confirm(self, instance_id: int, first: dict):
         """Re-read after the write pair has had time to settle, and report
@@ -620,7 +649,8 @@ class ModelInstanceWorkloadStateController:
         try:
             await asyncio.sleep(_FOLD_CONFIRM_SECONDS)
             async with async_session() as session:
-                instance, folded, _ = await self._evaluate(session, instance_id)
+                result = await self._evaluate(session, instance_id)
+            instance, folded = result.instance, result.folded
             if instance is None or folded is None:
                 return
             differing = _differing(instance, folded)
@@ -661,6 +691,7 @@ class ModelInstanceWorkloadStateController:
         self._next_tally_at = total * 2
         logger.info(
             f"Workload fold: agreed={_tally(self._agreed)} "
+            f"of which distributed={_tally(self._agreed_distributed)} "
             f"disagreed={self._disagreed} settled={self._settled} "
             f"declined={self._declined_summary()}"
         )

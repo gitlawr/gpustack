@@ -184,7 +184,7 @@ async def test_sync_does_not_write_over_what_the_worker_reported(monkeypatch):
 
 
 @contextlib.contextmanager
-def _fold(monkeypatch, instance, folded, authoritative=False):
+def _fold(monkeypatch, instance, folded, authoritative=False, workloads=None):
     monkeypatch.setattr(
         "gpustack.server.controllers.async_session", lambda: _FakeSessionCtx()
     )
@@ -194,6 +194,10 @@ def _fold(monkeypatch, instance, folded, authoritative=False):
     )
     monkeypatch.setattr(
         "gpustack.server.controllers.Workload.all_by_fields",
+        AsyncMock(return_value=workloads if workloads is not None else []),
+    )
+    monkeypatch.setattr(
+        "gpustack.server.controllers.Worker.all_by_fields",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(
@@ -229,6 +233,10 @@ async def test_fold_writes_nothing_while_it_is_only_being_compared(monkeypatch):
     instance.update.assert_not_awaited()
     assert controller._confirming == {3}
     assert controller._disagreed == 0
+    # Nothing may outlive the test: the confirm re-reads through a session the
+    # fixtures have taken away by then.
+    for task in list(controller._confirm_tasks):
+        task.cancel()
 
 
 @pytest.mark.asyncio
@@ -406,3 +414,30 @@ async def test_the_tally_names_the_states_it_agreed_about(monkeypatch, caplog):
     # The cadence widens, so the last line printed is the one at two events;
     # what matters is that a line names the states rather than a total.
     assert "agreed={error=1, running=1}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_tally_separates_agreements_about_a_distributed_group(monkeypatch):
+    """A single-worker instance never reaches _distributed_override, and both
+    shapes agree about "running", so one counter cannot say whether the part
+    of the fold most likely to be wrong was exercised at all."""
+    controller = ModelInstanceWorkloadStateController()
+
+    for followers in (0, 1):
+        instance = _instance(state="running")
+        with _fold(
+            monkeypatch,
+            instance,
+            folded={"state": "running"},
+            workloads=_group(followers),
+        ):
+            await controller._reconcile(3)
+
+    assert controller._agreed == {"running": 2}
+    assert controller._agreed_distributed == {"running": 1}
+
+
+def _group(followers: int):
+    return [
+        SimpleNamespace(group_index=i, worker_id=100 + i) for i in range(followers + 1)
+    ]
