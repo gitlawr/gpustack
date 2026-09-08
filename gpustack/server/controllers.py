@@ -86,6 +86,7 @@ from gpustack.schemas.workloads import (
 from gpustack.schemas.benchmark import Benchmark
 from gpustack.server.benchmark_workloads import compile_benchmark
 from gpustack.server.model_instance_workloads import (
+    AWAITING_EXECUTION_STATES,
     FoldDeclineReason,
     aggregate_instance_state,
     fold_decline_reason,
@@ -419,6 +420,22 @@ class ModelInstanceController:
             )
 
 
+_FOLD_CONFIRM_SECONDS = 3
+"""How long a difference has to persist before it counts. Long enough to
+outlast the gap between a worker writing an instance and mirroring it onto
+the workload, short enough that a real disagreement is reported promptly."""
+
+
+def _differing(instance, folded: dict) -> dict:
+    """The fields where the instance and the fold do not say the same thing,
+    as (what the instance says, what the fold would write)."""
+    return {
+        name: (getattr(instance, name, None), value)
+        for name, value in folded.items()
+        if getattr(instance, name, None) != value
+    }
+
+
 def _tally(counts: Dict[Any, int]) -> str:
     """A counter as ``{name=n, name=n}``, ordered by name so two runs can be
     diffed by eye."""
@@ -460,6 +477,8 @@ class ModelInstanceWorkloadStateController:
         self._agreed: Dict[Any, int] = {}
         self._disagreed = 0
         self._declined: Dict[Optional[FoldDeclineReason], int] = {}
+        self._settled = 0
+        self._confirming: Set[int] = set()
         self._next_tally_at = 1
 
     async def start(self):
@@ -475,25 +494,46 @@ class ModelInstanceWorkloadStateController:
                 continue
             await self._reconcile(workload.owner_id)
 
+    async def _evaluate(self, session, instance_id: int):
+        """Read the group and fold it. Returns (instance, folded, reason);
+        folded is None when the fold has nothing to say, and reason says
+        which condition turned it away."""
+        instance = await ModelInstance.one_by_id(session, instance_id)
+        if instance is None:
+            return None, None, None
+
+        if instance.state in AWAITING_EXECUTION_STATES:
+            # Nothing is waiting on a container here -- the instance was
+            # freshly scheduled, or is preparing model files. Whatever its
+            # workloads say describes a run that is over: after a restart the
+            # rows still carry the failure that caused it, and folding that
+            # back would put the instance into ERROR again and undo the
+            # restart. Its own STARTING is deliberately not in that set; that
+            # is where it waits for the fold to report the container running.
+            return instance, None, FoldDeclineReason.INSTANCE_NOT_EXECUTING
+
+        workloads = await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                "owner_id": instance_id,
+            },
+        )
+        folded = aggregate_instance_state(
+            workloads, await self._follower_worker_ips(session, workloads)
+        )
+        if folded is None:
+            return instance, None, fold_decline_reason(workloads)
+        return instance, folded, None
+
     async def _reconcile(self, instance_id: int):
         try:
             async with async_session() as session:
-                instance = await ModelInstance.one_by_id(session, instance_id)
+                instance, folded, reason = await self._evaluate(session, instance_id)
                 if instance is None:
                     return
 
-                workloads = await Workload.all_by_fields(
-                    session,
-                    {
-                        "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
-                        "owner_id": instance_id,
-                    },
-                )
-                folded = aggregate_instance_state(
-                    workloads, await self._follower_worker_ips(session, workloads)
-                )
                 if folded is None:
-                    reason = fold_decline_reason(workloads)
                     self._declined[reason] = self._declined.get(reason, 0) + 1
                     if reason is FoldDeclineReason.NO_LEADER:
                         # Not a point in a normal start: every group is
@@ -503,14 +543,13 @@ class ModelInstanceWorkloadStateController:
                         # they stay that way.
                         logger.warning(
                             f"Workload fold found no leader for model instance "
-                            f"{instance.name} (id={instance.id}) among "
-                            f"{len(workloads)} workload(s)"
+                            f"{instance.name} (id={instance.id})"
                         )
                     self._report_tally()
                     return
 
                 if not envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS:
-                    self._report_disagreement(instance, folded)
+                    self._compare(instance, folded)
                     return
 
                 if all(
@@ -545,7 +584,7 @@ class ModelInstanceWorkloadStateController:
         workers = await Worker.all_by_fields(session, {})
         return {worker.id: worker.ip for worker in workers if worker.id in worker_ids}
 
-    def _report_disagreement(self, instance: ModelInstance, folded: dict):
+    def _compare(self, instance: ModelInstance, folded: dict):
         """
         Say where the fold would have written something else.
 
@@ -554,12 +593,14 @@ class ModelInstanceWorkloadStateController:
         running, no events arriving, the fold declining every group. Hence the
         running tally: a report of many agreements and no disagreements is
         evidence, whereas an empty log on its own says nothing.
+
+        A difference is not reported until it has been seen twice. The worker
+        writes the instance and then mirrors onto the workload, so between the
+        two the row and its workload genuinely disagree; reading in that window
+        says nothing about whether the fold is right, and it is a window that
+        closes on its own once the worker writes only the workload.
         """
-        differing = {
-            name: (getattr(instance, name, None), value)
-            for name, value in folded.items()
-            if getattr(instance, name, None) != value
-        }
+        differing = _differing(instance, folded)
         if not differing:
             state = folded.get("state")
             self._agreed[state] = self._agreed.get(state, 0) + 1
@@ -569,13 +610,37 @@ class ModelInstanceWorkloadStateController:
             )
             self._report_tally()
             return
-        self._disagreed += 1
-        logger.info(
-            f"Workload fold disagrees with model instance {instance.name} "
-            f"(id={instance.id}): {differing} "
-            f"[agreed={_tally(self._agreed)} disagreed={self._disagreed} "
-            f"declined={self._declined_summary()}]"
-        )
+        if instance.id not in self._confirming:
+            self._confirming.add(instance.id)
+            asyncio.create_task(self._confirm(instance.id, differing))
+
+    async def _confirm(self, instance_id: int, first: dict):
+        """Re-read after the write pair has had time to settle, and report
+        only what is still there."""
+        try:
+            await asyncio.sleep(_FOLD_CONFIRM_SECONDS)
+            async with async_session() as session:
+                instance, folded, _ = await self._evaluate(session, instance_id)
+            if instance is None or folded is None:
+                return
+            differing = _differing(instance, folded)
+            if not differing:
+                self._settled += 1
+                return
+            self._disagreed += 1
+            logger.info(
+                f"Workload fold disagrees with model instance {instance.name} "
+                f"(id={instance.id}): {differing} "
+                f"[agreed={_tally(self._agreed)} disagreed={self._disagreed} "
+                f"settled={self._settled} declined={self._declined_summary()}]"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to confirm a workload fold disagreement for model "
+                f"instance {instance_id}: {e}"
+            )
+        finally:
+            self._confirming.discard(instance_id)
 
     def _report_tally(self):
         """
@@ -596,7 +661,8 @@ class ModelInstanceWorkloadStateController:
         self._next_tally_at = total * 2
         logger.info(
             f"Workload fold: agreed={_tally(self._agreed)} "
-            f"disagreed={self._disagreed} declined={self._declined_summary()}"
+            f"disagreed={self._disagreed} settled={self._settled} "
+            f"declined={self._declined_summary()}"
         )
 
     def _declined_summary(self) -> str:

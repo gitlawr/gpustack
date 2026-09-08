@@ -55,6 +55,23 @@ PRE_EXECUTION_STATES = frozenset(
 preparing model files. A workload has no counterpart for them; it is simply
 pending."""
 
+AWAITING_EXECUTION_STATES = frozenset(
+    {
+        ModelInstanceStateEnum.PENDING,
+        ModelInstanceStateEnum.ANALYZING,
+        ModelInstanceStateEnum.SCHEDULED,
+        ModelInstanceStateEnum.DOWNLOADING,
+        ModelInstanceStateEnum.INITIALIZING,
+    }
+)
+"""Instance states in which nothing is waiting on a container's health, so
+whatever the workloads report is about a run that is over -- after a restart
+they still carry the failure that caused it.
+
+Not the same set as PRE_EXECUTION_STATES, and the difference is the point:
+the instance's own STARTING belongs there and not here, because that is
+exactly where it waits for its container to be reported running."""
+
 _TO_WORKLOAD_STATE = {
     ModelInstanceStateEnum.INITIALIZING: WorkloadStateEnum.STARTING,
     ModelInstanceStateEnum.RUNNING: WorkloadStateEnum.RUNNING,
@@ -356,6 +373,9 @@ class FoldDeclineReason(str, Enum):
     missing the row everything else is derived from."""
 
     NO_LEADER = "no_leader"
+    INSTANCE_NOT_EXECUTING = "instance_not_executing"
+    """The domain resource is before execution -- rescheduled, or preparing
+    model files -- so its workloads describe a run that is over."""
     LEADER_PENDING = "leader_pending"
     LEADER_STARTING = "leader_starting"
     FOLLOWERS_NOT_READY = "followers_not_ready"

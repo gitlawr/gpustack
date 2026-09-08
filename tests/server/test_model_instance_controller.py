@@ -19,6 +19,7 @@ from gpustack.schemas.workloads import (
     WorkloadStateEnum,
 )
 from gpustack.server.bus import Event, EventType
+from gpustack.server import controllers as controllers_module
 from gpustack.server.model_instance_workloads import FoldDeclineReason
 from gpustack.server.controllers import (
     ModelInstanceController,
@@ -215,17 +216,66 @@ def _instance(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_fold_writes_nothing_while_it_is_only_being_compared(monkeypatch, caplog):
+async def test_fold_writes_nothing_while_it_is_only_being_compared(monkeypatch):
     """Off by default: the fold runs so it can be shown correct against real
-    instances, without being the thing that decides them."""
+    instances, without being the thing that decides them. A difference is not
+    reported on sight either -- it is queued for confirmation."""
     instance = _instance(state="starting")
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}):
+        await controller._reconcile(3)
+
+    instance.update.assert_not_awaited()
+    assert controller._confirming == {3}
+    assert controller._disagreed == 0
+
+
+@pytest.mark.asyncio
+async def test_a_difference_that_settles_is_not_reported(monkeypatch, caplog):
+    """The worker writes the instance and then mirrors onto the workload, so
+    the two genuinely disagree in between. Reading in that window says nothing
+    about whether the fold is right, and reporting it would make the log that
+    has to come out empty never do so."""
+    instance = _instance(state="running")
+    controller = ModelInstanceWorkloadStateController()
+    monkeypatch.setattr(controllers_module, "_FOLD_CONFIRM_SECONDS", 0)
 
     with _fold(monkeypatch, instance, folded={"state": "running"}):
         with caplog.at_level(logging.INFO):
-            await ModelInstanceWorkloadStateController()._reconcile(3)
+            await controller._confirm(3, {"state": ("starting", "running")})
+
+    assert controller._settled == 1
+    assert controller._disagreed == 0
+    assert "disagrees" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_difference_that_persists_is_reported(monkeypatch, caplog):
+    instance = _instance(state="starting")
+    controller = ModelInstanceWorkloadStateController()
+    monkeypatch.setattr(controllers_module, "_FOLD_CONFIRM_SECONDS", 0)
+
+    with _fold(monkeypatch, instance, folded={"state": "running"}):
+        with caplog.at_level(logging.INFO):
+            await controller._confirm(3, {"state": ("starting", "running")})
+
+    assert controller._disagreed == 1
+    assert "disagrees with model instance mi" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_rescheduled_instance_is_left_alone(monkeypatch):
+    """Its workloads still carry the failure that caused the restart. Folding
+    that back would put the instance into ERROR again and undo it."""
+    instance = _instance(state="scheduled")
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(monkeypatch, instance, folded={"state": "error"}, authoritative=True):
+        await controller._reconcile(3)
 
     instance.update.assert_not_awaited()
-    assert "disagrees with model instance mi" in caplog.text
+    assert controller._declined == {FoldDeclineReason.INSTANCE_NOT_EXECUTING: 1}
 
 
 @pytest.mark.asyncio
@@ -346,13 +396,13 @@ async def test_the_tally_names_the_states_it_agreed_about(monkeypatch, caplog):
     the way there, and a single total cannot tell those apart."""
     controller = ModelInstanceWorkloadStateController()
 
-    for state in ("initializing", "running", "running"):
+    for state in ("error", "running", "running"):
         instance = _instance(state=state)
         with _fold(monkeypatch, instance, folded={"state": state}):
             with caplog.at_level(logging.INFO):
                 await controller._reconcile(3)
 
-    assert controller._agreed == {"initializing": 1, "running": 2}
+    assert controller._agreed == {"error": 1, "running": 2}
     # The cadence widens, so the last line printed is the one at two events;
     # what matters is that a line names the states rather than a total.
-    assert "agreed={initializing=1, running=1}" in caplog.text
+    assert "agreed={error=1, running=1}" in caplog.text
