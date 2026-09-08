@@ -413,7 +413,7 @@ async def test_a_run_of_declines_still_reports(monkeypatch, caplog):
         with caplog.at_level(logging.INFO):
             await controller._reconcile(3)
 
-    assert "Workload fold:" in caplog.text
+    assert "Workload fold [" in caplog.text
     assert "declined=" in caplog.text
 
 
@@ -568,3 +568,29 @@ async def test_an_authoritative_fold_that_changes_nothing_is_still_counted(
 
     instance.update.assert_not_awaited()
     assert controller._agreed == {"running": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authoritative,expected",
+    [(False, "comparing"), (True, "authoritative")],
+)
+async def test_the_tally_says_which_mode_it_is_in(
+    monkeypatch, caplog, authoritative, expected
+):
+    """Both modes produce the same counters when everything agrees, so a
+    healthy tally cannot otherwise say whether the fold is deciding anything
+    or only watching -- which is the first thing to establish after a flip."""
+    instance = _instance(state="running")
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(
+        monkeypatch,
+        instance,
+        folded={"state": "running"},
+        authoritative=authoritative,
+    ):
+        with caplog.at_level(logging.INFO):
+            await controller._reconcile(3)
+
+    assert f"Workload fold [{expected}" in caplog.text

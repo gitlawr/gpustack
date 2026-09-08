@@ -742,11 +742,18 @@ class ModelInstanceWorkloadStateController:
         if total < self._next_tally_at:
             return
         self._next_tally_at = total * 2
+        # Which mode it is in belongs on the line: the two produce the same
+        # counters when everything agrees, so a healthy tally cannot otherwise
+        # say whether the fold is deciding anything or only watching.
+        mode = (
+            f"authoritative corrected={self._corrected}"
+            if envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS
+            else f"comparing disagreed={self._disagreed} "
+            f"converged={self._converged} overtaken={self._overtaken}"
+        )
         logger.info(
-            f"Workload fold: agreed={_tally(self._agreed)} "
+            f"Workload fold [{mode}]: agreed={_tally(self._agreed)} "
             f"of which distributed={_tally(self._agreed_distributed)} "
-            f"disagreed={self._disagreed} converged={self._converged} "
-            f"overtaken={self._overtaken} "
             f"declined={self._declined_summary()}"
         )
 
