@@ -320,3 +320,20 @@ async def test_a_group_that_says_nothing_leaves_the_instance_alone(monkeypatch):
         await ModelInstanceWorkloadStateController()._reconcile(3)
 
     instance.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_run_of_declines_still_reports(monkeypatch, caplog):
+    """Declines print nothing of their own, and an instance coming up declines
+    on every event. Without the tally that stretch is indistinguishable from a
+    controller that has stopped consuming events -- which is the reading the
+    gate for flipping the fold depends on being able to rule out."""
+    instance = _instance()
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(monkeypatch, instance, folded=None):
+        with caplog.at_level(logging.INFO):
+            await controller._reconcile(3)
+
+    assert "Workload fold:" in caplog.text
+    assert "declined=" in caplog.text

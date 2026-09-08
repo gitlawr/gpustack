@@ -30,9 +30,11 @@ from gpustack.schemas.workloads import (
 from gpustack.worker.serve_manager import ServeManager
 from gpustack.server.model_instance_workloads import (
     SERVICE_PORT,
+    PRE_EXECUTION_STATES,
     FoldDeclineReason,
     aggregate_instance_state,
     fold_decline_reason,
+    to_workload_state,
     compile_model_instance,
     named_ports,
     sync_model_instance_workloads,
@@ -180,23 +182,58 @@ def test_coordinated_subordinates_carry_no_reservations():
     assert all(w.reserved_claims is None for w in workloads)
 
 
-@pytest.mark.parametrize(
-    "state",
-    [
-        ModelInstanceStateEnum.PENDING,
-        ModelInstanceStateEnum.ANALYZING,
-        ModelInstanceStateEnum.SCHEDULED,
-        ModelInstanceStateEnum.INITIALIZING,
-        ModelInstanceStateEnum.DOWNLOADING,
-    ],
-)
+@pytest.mark.parametrize("state", sorted(PRE_EXECUTION_STATES))
 def test_states_before_a_container_exists_map_to_pending(state):
     """Scheduling and model-file preparation are the instance's lifecycle, not
     the workload's; if a workload had to represent them it would be the domain
-    resource."""
+    resource. The instance's own STARTING is one of them -- the server sets it
+    when the model files are ready, with nothing launched yet."""
     leader = compile_model_instance(_instance(state=state))[0]
 
     assert leader.state == WorkloadStateEnum.PENDING
+
+
+def test_a_spawned_process_is_a_starting_workload():
+    """INITIALIZING is what the worker writes when it spawns the process, so
+    by then a container exists and the workload is no longer pending. Mapping
+    it to pending left the leader's workload reporting nothing between
+    scheduling and the first passing health check."""
+    leader = compile_model_instance(
+        _instance(state=ModelInstanceStateEnum.INITIALIZING)
+    )[0]
+
+    assert leader.state == WorkloadStateEnum.STARTING
+
+
+@pytest.mark.parametrize(
+    "instance_state",
+    [
+        ModelInstanceStateEnum.INITIALIZING,
+        ModelInstanceStateEnum.RUNNING,
+        ModelInstanceStateEnum.UNREACHABLE,
+        ModelInstanceStateEnum.ERROR,
+    ],
+)
+def test_an_execution_state_survives_the_round_trip(instance_state):
+    """The worker mirrors the instance onto the workload and the fold reads it
+    back; a state that does not survive both directions would be silently
+    rewritten the moment the fold becomes authoritative."""
+    workloads = [_workload(0, to_workload_state(instance_state))]
+
+    folded = aggregate_instance_state(workloads)
+
+    assert folded["state"] == instance_state
+
+
+def test_the_two_startings_are_not_the_same_state():
+    """Both enums have a STARTING and they name different moments. Converting
+    by value would turn "container up, not yet healthy" into "files ready,
+    nothing launched" and lose INITIALIZING from what a user sees."""
+    assert (
+        to_workload_state(ModelInstanceStateEnum.STARTING) == WorkloadStateEnum.PENDING
+    )
+    folded = aggregate_instance_state([_workload(0, WorkloadStateEnum.STARTING)])
+    assert folded["state"] == ModelInstanceStateEnum.INITIALIZING
 
 
 def test_the_service_port_is_not_duplicated_under_two_names():

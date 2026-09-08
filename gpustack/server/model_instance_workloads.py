@@ -44,8 +44,11 @@ PRE_EXECUTION_STATES = frozenset(
         ModelInstanceStateEnum.PENDING,
         ModelInstanceStateEnum.ANALYZING,
         ModelInstanceStateEnum.SCHEDULED,
-        ModelInstanceStateEnum.INITIALIZING,
         ModelInstanceStateEnum.DOWNLOADING,
+        # Despite the name, the server sets this when the model files are
+        # ready, before any worker has launched anything. The state that means
+        # "the worker spawned the process" is INITIALIZING.
+        ModelInstanceStateEnum.STARTING,
     }
 )
 """Instance states that happen before a container exists -- scheduling, and
@@ -53,10 +56,20 @@ preparing model files. A workload has no counterpart for them; it is simply
 pending."""
 
 _TO_WORKLOAD_STATE = {
-    ModelInstanceStateEnum.STARTING: WorkloadStateEnum.STARTING,
+    ModelInstanceStateEnum.INITIALIZING: WorkloadStateEnum.STARTING,
     ModelInstanceStateEnum.RUNNING: WorkloadStateEnum.RUNNING,
     ModelInstanceStateEnum.UNREACHABLE: WorkloadStateEnum.UNREACHABLE,
     ModelInstanceStateEnum.ERROR: WorkloadStateEnum.ERROR,
+}
+"""Instance state to the workload's. Paired with _TO_INSTANCE_STATE below;
+the two names that coincide do not mean the same thing, which is why neither
+direction is derived from the other."""
+
+_TO_INSTANCE_STATE = {
+    WorkloadStateEnum.STARTING: ModelInstanceStateEnum.INITIALIZING,
+    WorkloadStateEnum.RUNNING: ModelInstanceStateEnum.RUNNING,
+    WorkloadStateEnum.UNREACHABLE: ModelInstanceStateEnum.UNREACHABLE,
+    WorkloadStateEnum.ERROR: ModelInstanceStateEnum.ERROR,
 }
 
 
@@ -365,14 +378,19 @@ def _to_instance_state(state) -> Optional[ModelInstanceStateEnum]:
     """
     A workload's state as the instance's own.
 
-    The two state enums are distinct types that happen to share most of their
-    values, so this converts through the shared value rather than casting.
+    Not a cast through the shared value: the two enums both have a STARTING,
+    and they do not mean the same thing. A workload is STARTING once its
+    container exists and has not yet passed a health check, which on the
+    instance is INITIALIZING; the instance's own STARTING is set by the server
+    when the model files are ready, before there is anything to run.
+
+    None for a workload state the instance has no name for -- succeeded, which
+    only a task-shaped workload reaches -- and for a plain string that names
+    no member, since a row loaded from a rolled-back database can carry one.
     """
     try:
-        return ModelInstanceStateEnum(str(state))
+        return _TO_INSTANCE_STATE.get(WorkloadStateEnum(str(state)))
     except ValueError:
-        # succeeded, which a service-shaped workload never reaches and the
-        # instance has no name for.
         return None
 
 

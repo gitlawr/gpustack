@@ -485,6 +485,7 @@ class ModelInstanceWorkloadStateController:
                             f"{instance.name} (id={instance.id}) among "
                             f"{len(workloads)} workload(s)"
                         )
+                    self._report_tally()
                     return
 
                 if not envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS:
@@ -555,9 +556,17 @@ class ModelInstanceWorkloadStateController:
         )
 
     def _report_tally(self):
-        """Surface the tally at INFO on a widening cadence, so a run that is
-        going well says so without a line per event."""
-        total = self._agreed + self._disagreed
+        """
+        Surface the tally at INFO on a widening cadence, so a run that is going
+        well says so without a line per event.
+
+        Declines count towards the cadence as well as agreements. They produce
+        no output of their own, so a stretch where the fold declines every
+        time -- every instance still coming up, which is most of a start --
+        was silent, and silence is what a controller that has stopped running
+        also looks like.
+        """
+        total = self._agreed + self._disagreed + sum(self._declined.values())
         if total < self._next_tally_at:
             return
         self._next_tally_at = total * 2
