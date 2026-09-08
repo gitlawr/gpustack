@@ -498,7 +498,12 @@ class ModelInstanceWorkloadStateController:
         # wrong -- and both shapes agree about "running", so one counter
         # cannot tell them apart.
         self._agreed_distributed: Dict[Any, int] = {}
-        self._settled = 0
+        # A difference the instance later resolved the fold's way: right, and
+        # ahead of the mechanism it is compared against.
+        self._converged = 0
+        # One it resolved the other way: the proposal never came true, so the
+        # fold would have written something the instance never reached.
+        self._overtaken = 0
         self._confirming: Set[int] = set()
         self._confirm_tasks: Set[asyncio.Task] = set()
         self._next_tally_at = 1
@@ -652,8 +657,22 @@ class ModelInstanceWorkloadStateController:
             task.add_done_callback(self._confirm_tasks.discard)
 
     async def _confirm(self, instance_id: int, first: dict):
-        """Re-read after the write pair has had time to settle, and report
-        only what is still there."""
+        """
+        Re-read once the difference has had time to resolve, and judge it by
+        where the two ended up rather than by whether they still differ.
+
+        "Still different" is a poor question to ask of two writers that are
+        only eventually consistent: a difference that resolves inside the wait
+        passes whatever the wait is, including one caused by two writers
+        flipping a row between them. The question that does not depend on the
+        clock is whether the instance arrived at what the fold proposed. If it
+        did, the fold was right and merely earlier -- which is what a fold that
+        reads an outage the moment the server records it looks like. If it did
+        not, the fold proposed something that never came true: the difference
+        is gone only because the fold changed its mind, and had it been
+        authoritative it would have written the proposal instead.
+        """
+        proposed = {name: value for name, (_, value) in first.items()}
         try:
             await asyncio.sleep(_FOLD_CONFIRM_SECONDS)
             async with async_session() as session:
@@ -663,14 +682,24 @@ class ModelInstanceWorkloadStateController:
                 return
             differing = _differing(instance, folded)
             if not differing:
-                self._settled += 1
+                reached = {name: getattr(instance, name, None) for name in proposed}
+                if reached == proposed:
+                    self._converged += 1
+                else:
+                    self._overtaken += 1
+                    logger.info(
+                        f"Workload fold was overtaken on model instance "
+                        f"{instance.name} (id={instance.id}): proposed "
+                        f"{proposed}, the instance settled on {reached}"
+                    )
                 return
             self._disagreed += 1
             logger.info(
                 f"Workload fold disagrees with model instance {instance.name} "
                 f"(id={instance.id}): {differing} "
                 f"[agreed={_tally(self._agreed)} disagreed={self._disagreed} "
-                f"settled={self._settled} declined={self._declined_summary()}]"
+                f"converged={self._converged} overtaken={self._overtaken} "
+                f"declined={self._declined_summary()}]"
             )
         except Exception as e:
             logger.error(
@@ -700,7 +729,8 @@ class ModelInstanceWorkloadStateController:
         logger.info(
             f"Workload fold: agreed={_tally(self._agreed)} "
             f"of which distributed={_tally(self._agreed_distributed)} "
-            f"disagreed={self._disagreed} settled={self._settled} "
+            f"disagreed={self._disagreed} converged={self._converged} "
+            f"overtaken={self._overtaken} "
             f"declined={self._declined_summary()}"
         )
 

@@ -241,11 +241,12 @@ async def test_fold_writes_nothing_while_it_is_only_being_compared(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_difference_that_settles_is_not_reported(monkeypatch, caplog):
-    """The worker writes the instance and then mirrors onto the workload, so
-    the two genuinely disagree in between. Reading in that window says nothing
-    about whether the fold is right, and reporting it would make the log that
-    has to come out empty never do so."""
+async def test_a_difference_the_instance_comes_round_to_is_not_a_disagreement(
+    monkeypatch, caplog
+):
+    """The fold read an outage the moment the server recorded it, before the
+    pass that puts it on the instance. It proposed what the instance went on
+    to say, so it was right and merely earlier."""
     instance = _instance(state="running")
     controller = ModelInstanceWorkloadStateController()
     monkeypatch.setattr(controllers_module, "_FOLD_CONFIRM_SECONDS", 0)
@@ -254,9 +255,27 @@ async def test_a_difference_that_settles_is_not_reported(monkeypatch, caplog):
         with caplog.at_level(logging.INFO):
             await controller._confirm(3, {"state": ("starting", "running")})
 
-    assert controller._settled == 1
+    assert (controller._converged, controller._overtaken) == (1, 0)
     assert controller._disagreed == 0
     assert "disagrees" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_proposal_that_never_came_true_is_reported(monkeypatch, caplog):
+    """The difference is gone, but the instance never reached what the fold
+    proposed -- the fold changed its mind instead. Judging by "do they still
+    differ" would call this settled, and an authoritative fold would have
+    written the proposal."""
+    instance = _instance(state="error")
+    controller = ModelInstanceWorkloadStateController()
+    monkeypatch.setattr(controllers_module, "_FOLD_CONFIRM_SECONDS", 0)
+
+    with _fold(monkeypatch, instance, folded={"state": "error"}):
+        with caplog.at_level(logging.INFO):
+            await controller._confirm(3, {"state": ("error", "running")})
+
+    assert (controller._converged, controller._overtaken) == (0, 1)
+    assert "was overtaken" in caplog.text
 
 
 @pytest.mark.asyncio
