@@ -606,10 +606,7 @@ def _leader(state):
     return SimpleNamespace(group_index=0, state=state, worker_id=1)
 
 
-@pytest.mark.parametrize(
-    "instance_state",
-    ["pending", "analyzing", "scheduled", "downloading"],
-)
+@pytest.mark.parametrize("instance_state", ["pending", "analyzing", "scheduled"])
 def test_a_spawned_container_reports_initializing(instance_state):
     """The worker writes INITIALIZING today and stops at step 4. Nothing else
     produces it -- the fold is silent through the whole of coming up -- so
@@ -637,10 +634,15 @@ def test_a_rescheduled_instance_is_not_dragged_forward_by_a_stale_row():
     )
 
 
-def test_the_instances_own_starting_is_not_walked_backwards():
-    """The server writes STARTING after INITIALIZING, so reporting
-    INITIALIZING from there would move the lifecycle back a step."""
-    instance = _instance(state="starting")
+@pytest.mark.parametrize("instance_state", ["downloading", "starting"])
+def test_a_state_the_server_writes_later_is_not_walked_backwards(instance_state):
+    """The sequence is INITIALIZING -> DOWNLOADING -> STARTING, all after the
+    container is spawned and its row is starting. Reporting INITIALIZING from
+    either does not just move the lifecycle back a step, it does not settle:
+    the controller writes DOWNLOADING from the file events, the fold puts it
+    back, and the two take turns. Seen as 111 corrections against 2
+    agreements before this was narrowed."""
+    instance = _instance(state=instance_state)
 
     assert (
         controllers_module._spawned_but_not_reported(
@@ -648,3 +650,38 @@ def test_the_instances_own_starting_is_not_walked_backwards():
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_correcting_one_instance_over_and_over_is_named(monkeypatch, caplog):
+    """A fold that keeps rewriting the same row is not winning an argument,
+    it is taking turns with another writer. It shows up as a large count and
+    nothing else, which is how a loop between the fold and the file
+    controller went out and had to be spotted by eye."""
+    controller = ModelInstanceWorkloadStateController()
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(controllers_module._FOLD_FLAPPING_AT):
+            instance = _instance(state="starting")
+            with _fold(
+                monkeypatch, instance, folded={"state": "running"}, authoritative=True
+            ):
+                await controller._reconcile(3)
+
+    assert "taking turns" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_corrections_spread_over_instances_are_not_flapping(monkeypatch, caplog):
+    """Many instances corrected once each is a busy cluster, not a loop."""
+    controller = ModelInstanceWorkloadStateController()
+
+    with caplog.at_level(logging.WARNING):
+        for instance_id in range(controllers_module._FOLD_FLAPPING_AT + 2):
+            instance = _instance(id=instance_id, state="starting")
+            with _fold(
+                monkeypatch, instance, folded={"state": "running"}, authoritative=True
+            ):
+                await controller._reconcile(instance_id)
+
+    assert "taking turns" not in caplog.text

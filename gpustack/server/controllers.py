@@ -432,6 +432,11 @@ class _Fold(NamedTuple):
     distributed: bool
 
 
+_FOLD_FLAPPING_AT = 5
+"""Corrections to one instance before it is called what it is. A start writes
+a handful legitimately; returning to the same row past that means nobody is
+converging."""
+
 _FOLD_CONFIRM_SECONDS = 3 * envs.MODEL_INSTANCE_HEALTH_CHECK_INTERVAL
 """
 How long a difference has to persist before it counts.
@@ -478,12 +483,16 @@ _BEFORE_SPAWNING = frozenset(
         ModelInstanceStateEnum.PENDING,
         ModelInstanceStateEnum.ANALYZING,
         ModelInstanceStateEnum.SCHEDULED,
-        ModelInstanceStateEnum.DOWNLOADING,
     }
 )
-"""Instance states from which INITIALIZING is the next step. Its own STARTING
-is not one: the server writes that after INITIALIZING, so folding back to it
-from there would walk the lifecycle backwards."""
+"""Instance states from which INITIALIZING is the next step, which is only the
+scheduler's three.
+
+Everything the server writes afterwards is excluded, DOWNLOADING as much as
+STARTING: the sequence is INITIALIZING -> DOWNLOADING -> STARTING, so reporting
+INITIALIZING from either walks the lifecycle backwards. Worse, it does not
+settle -- the controller writes DOWNLOADING from the file events, the fold puts
+it back, and the two take turns."""
 
 
 def _spawned_but_not_reported(instance, workloads) -> Optional[dict]:
@@ -551,6 +560,7 @@ class ModelInstanceWorkloadStateController:
         # Only once authoritative: what the fold wrote over what the worker
         # had put there.
         self._corrected = 0
+        self._corrections: Dict[int, int] = {}
         self._confirming: Set[int] = set()
         self._confirm_tasks: Set[asyncio.Task] = set()
         self._next_tally_at = 1
@@ -649,11 +659,26 @@ class ModelInstanceWorkloadStateController:
                 # the worker writes only workloads there is no second writer
                 # to overrule and this goes quiet on its own.
                 self._corrected += 1
+                self._corrections[instance.id] = (
+                    self._corrections.get(instance.id, 0) + 1
+                )
                 logger.info(
                     f"Workload fold corrected model instance {instance.name} "
                     f"(id={instance.id}): {changing} "
                     f"[agreed={_tally(self._agreed)} corrected={self._corrected}]"
                 )
+                if self._corrections[instance.id] == _FOLD_FLAPPING_AT:
+                    # Correcting one instance over and over is not the fold
+                    # winning an argument, it is two writers taking turns: the
+                    # fold writes, the other writer writes back, and the count
+                    # climbs without either state sticking. It reads as a large
+                    # number rather than as a fault unless it is named.
+                    logger.warning(
+                        f"Workload fold has corrected model instance "
+                        f"{instance.name} (id={instance.id}) "
+                        f"{_FOLD_FLAPPING_AT} times; something is writing it "
+                        f"back and the two are taking turns"
+                    )
                 await instance.update(session, folded)
         except Exception as e:
             logger.error(
