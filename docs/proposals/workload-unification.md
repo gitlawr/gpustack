@@ -6,9 +6,9 @@
 
 本文回答三个问题:
 
-1. **Docker 与 k8s 集群分别面向什么场景?** —— 这决定了两者各自应当承担多少调度职责
-2. **当前的扩展遇到了什么问题?** —— 为什么需要 Workload 统一
-3. **k8s 上模型服务与 GPU instance 的调度与账本如何统一?**
+1. **Docker 与 k8s 集群分别面向什么场景?** —— 这决定了两者各自应当承担多少调度职责(见下节「集群形态的定位」)
+2. **当前的扩展遇到了什么问题?** —— 为什么需要 Workload 统一(见「当前的问题」)
+3. **k8s 上模型服务与 GPU instance 的调度与账本如何统一?** —— 见「解决方案 / k8s 上模型服务与 GPU instance 的统一」
 
 ### 集群形态的定位
 
@@ -50,6 +50,8 @@ worker 上跑着三类由它启动的负载——模型实例、基准测试、�
 
 ## 解决方案
 
+### Workload 资源
+
 ```
 Model ──────────┐
 CacheService ───┼── controller 编译 ──> Workload ──> worker 控制回路 ──> 容器
@@ -90,6 +92,29 @@ k8s 集群       （相同）      →   换算成配额单位交给 Kueue →  
 Docker 集群不接这一套:它面向快速验证与小规模部署,自带调度器足够,引入队列与准入只会增加部署负担。
 
 k8s 那一侧不是新架构:**GPU instance 现在就这么工作**——gpustack 写 `Instance` CRD,operator 变成 Pod,gpustack 从 status 读回节点与设备分配。常规模型服务反而是那个特例。
+
+### k8s 上模型服务与 GPU instance 的统一
+
+现状是三本账并存,而 k8s 上已有的机制模型服务大多没接:
+
+| | 设备账本(operator `Devices` CRD) | 准入与配额(Kueue) |
+|---|---|---|
+| GPU instance | ✅ | ✅ |
+| vGPU 模型实例 | ✅ | ❌ |
+| 常规模型实例、缓存服务 | ❌ | ❌ |
+
+Kueue 由 gpustack 分发、operator 安装,按 GPU 型号建 ClusterQueue,operator 的 Pod webhook 折入**以显存为标尺**的 credit 请求。计量层的表述是 **"kueue admits → resource is reserved"**——在 k8s 上,"占住一张卡"的定义就是 Kueue 准入。
+
+因此**统一账本不是新建一本,而是把缺席者接进已有的那套**。不应引入第二个排队器:同一批卡上出现两个互不知情的配额视图,正是要修的问题的翻版。
+
+具体做法:
+
+1. **接入设备账本与 Kueue。** 模型实例把资源估算换算成配额单位提交,由 Kueue 决定准入;容量以 operator 的 `Devices` 为准,不再用我们自己的 `Allocated`。
+2. **binding 从观测中来。** 编译成 Pod 后不填 `worker_id` / `gpu_indexes`,待 k8s 调度完成,从 Pod 的 `nodeName` 与设备分配回写。
+3. **GPU instance 成为第五种 `owner_kind`。** 它已经是 spec/status 加观测回写的形状,并入之后与模型服务共用一本账、一套回收、一套横向能力。
+4. **经 helm 等 k8s 机制部署的 Pod 同步入库。** 账本因此覆盖它们,而它们不必知道 gpustack 的存在。
+
+分步与依赖见「研发计划」第四阶段;`WorkloadPlan` 走不到 operator 这一点见「已知问题和限制」。
 
 ---
 
@@ -286,10 +311,7 @@ class Workload:
 
 **账本收敛的每一步都适用同一方法。**
 
-### k8s 侧的既有机制
-
-| | 设备账本(operator `Devices` CRD) | 准入与配额(Kueue) |
-|---|---|---|
+--|---|
 | GPU instance | ✅ | ✅ |
 | vGPU 模型实例 | ✅ | ❌ |
 | 常规模型实例、缓存服务 | ❌ | ❌ |
