@@ -65,6 +65,18 @@ class ComparisonTally:
         )
         return False
 
+    def reset(self):
+        """Start counting again.
+
+        The tallies are process-global -- the callers are functions with
+        nothing to hang one on -- so a test that asserts on the reporting
+        cadence has to say where its count begins, or it depends on whatever
+        ran before it.
+        """
+        self._agreed = 0
+        self._differed = 0
+        self._next_report_at = 1
+
     def _report(self):
         total = self._agreed + self._differed
         if total < self._next_report_at:

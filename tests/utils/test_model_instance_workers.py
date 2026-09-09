@@ -189,7 +189,11 @@ def test_the_rows_place_the_workers_the_same_way():
 
 def test_the_comparison_is_silent_when_the_two_agree(caplog):
     from gpustack.server.model_instance_workloads import compile_model_instance
+    from gpustack.utils.comparison import tally
 
+    # Process-global, so the reporting cadence carries over from whatever ran
+    # before this.
+    tally("Workload placements").reset()
     instance = _instance_with_follower()
 
     with caplog.at_level(logging.INFO):
