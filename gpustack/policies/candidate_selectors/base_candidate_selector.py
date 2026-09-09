@@ -23,6 +23,7 @@ from gpustack.utils.gpu import (
     group_gpu_indexes_by_gpu_type_and_worker,
 )
 from gpustack.policies.base import Allocatable, ModelInstanceScheduleCandidate
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.policies.utils import (
     ListMessageBuilder,
     get_computed_ram_claim,
@@ -993,14 +994,10 @@ class ScheduleCandidatesSelector(ABC):
         """
         instances = get_worker_model_instances(self._model_instances, worker)
         for instance in instances:
-            if (
-                instance.distributed_servers
-                and instance.distributed_servers.subordinate_workers
-                and (
-                    instance.model
-                    and instance.model.backend
-                    and instance.model.backend == self._model.backend
-                )
+            if subordinate_placements(instance) and (
+                instance.model
+                and instance.model.backend
+                and instance.model.backend == self._model.backend
             ):
                 self._messages = [
                     str(

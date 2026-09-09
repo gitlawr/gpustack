@@ -29,6 +29,7 @@ from gpustack.utils.lora_model_source import (
 )
 
 from gpustack.schemas.workloads import Workload
+from gpustack.utils.model_instance_workers import instance_placements
 
 logger = logging.getLogger(__name__)
 
@@ -584,24 +585,11 @@ def get_worker_model_instances(
     # Filter to get only the relevant instances:
     # 1. Instances assigned to this worker (main worker)
     # 2. Instances that use this worker as a subordinate worker
-    relevant_instances = []
-    for model_instance in all_model_instances:
-        # Check if this is a main worker instance
-        if model_instance.worker_id == worker.id:
-            relevant_instances.append(model_instance)
-        # Check if this worker is used as a subordinate worker
-        elif (
-            model_instance.distributed_servers
-            and model_instance.distributed_servers.subordinate_workers
-        ):
-            for (
-                subordinate_worker
-            ) in model_instance.distributed_servers.subordinate_workers:
-                if subordinate_worker.worker_id == worker.id:
-                    relevant_instances.append(model_instance)
-                    break
-
-    return relevant_instances
+    return [
+        model_instance
+        for model_instance in all_model_instances
+        if any(p.worker_id == worker.id for p in instance_placements(model_instance))
+    ]
 
 
 class ListMessageBuilder:

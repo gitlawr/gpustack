@@ -20,6 +20,7 @@ from gpustack.api.exceptions import (
     InternalServerErrorException,
     NotFoundException,
 )
+from gpustack.utils.model_instance_workers import instance_placements
 from gpustack.schemas.workers import Worker
 from gpustack.schemas.clusters import Cluster
 from gpustack.api.tenant import (
@@ -258,16 +259,8 @@ async def get_serving_logs(  # noqa: C901
                 container_name, model_instance, is_main
             )
 
-        # Build valid worker IDs (main worker + subordinate workers for distributed instances)
-        valid_worker_ids = {model_instance.worker_id}
-        if (
-            model_instance.distributed_servers
-            and model_instance.distributed_servers.subordinate_workers
-        ):
-            valid_worker_ids.update(
-                sw.worker_id
-                for sw in model_instance.distributed_servers.subordinate_workers
-            )
+        # Every worker running part of this instance, its own included.
+        valid_worker_ids = {p.worker_id for p in instance_placements(model_instance)}
 
         # Determine target worker ID
         target_worker_id = worker_id or model_instance.worker_id

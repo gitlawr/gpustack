@@ -18,6 +18,7 @@ from gpustack.api.exceptions import (
 )
 from gpustack.schemas.common import Pagination
 from gpustack.schemas.inference_backend import is_custom_backend
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.models import (
     ModelInstance,
     ModelInstancesPublic,
@@ -718,11 +719,7 @@ async def validate_distributed_vllm_limit_per_worker(
     """
     instances = await ModelInstance.all_by_field(session, "worker_id", worker.id)
     for instance in instances:
-        if (
-            instance.distributed_servers
-            and instance.distributed_servers.subordinate_workers
-            and instance.model_name != model.name
-        ):
+        if subordinate_placements(instance) and instance.model_name != model.name:
             raise BadRequestException(
                 message=f"Each worker can run only one distributed vLLM instance. Worker '{worker.name}' already has '{instance.name}'."
             )

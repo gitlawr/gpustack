@@ -12,6 +12,7 @@ from gpustack.policies.base import (
     ModelInstanceScorer,
     ScheduleCandidatesScorer,
 )
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.policies.utils import (
     get_worker_allocatable_resource,
 )
@@ -208,11 +209,8 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
             )
             final_score = score
 
-            if (
-                instance.distributed_servers
-                and instance.distributed_servers.subordinate_workers
-            ):
-                subordinate_workers = instance.distributed_servers.subordinate_workers
+            subordinate_workers = subordinate_placements(instance)
+            if subordinate_workers:
                 subordinate_worker_score = (
                     await self._score_binpack_subordinate_workers(
                         subordinate_workers, self._scale_type
@@ -583,20 +581,14 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
                     is_current_model,
                 )
 
-            if (
-                model_instance.distributed_servers
-                and model_instance.distributed_servers.subordinate_workers
-            ):
-                for (
-                    subordinate_worker
-                ) in model_instance.distributed_servers.subordinate_workers:
-                    for subordinate_gpu_index in subordinate_worker.gpu_indexes:
-                        update_count(
-                            worker_model_instances_count_map,
-                            subordinate_worker.worker_id,
-                            subordinate_gpu_index,
-                            is_current_model,
-                        )
+            for subordinate_worker in subordinate_placements(model_instance):
+                for subordinate_gpu_index in subordinate_worker.gpu_indexes:
+                    update_count(
+                        worker_model_instances_count_map,
+                        subordinate_worker.worker_id,
+                        subordinate_gpu_index,
+                        is_current_model,
+                    )
 
         return worker_model_instances_count_map
 

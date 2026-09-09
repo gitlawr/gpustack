@@ -30,6 +30,7 @@ from gpustack.schemas.models import (
     is_image_model,
     is_reranker_model,
 )
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.workers import Worker
 from gpustack.server.db import async_session
 from gpustack.server.deps import SessionDep, TenantContextDep
@@ -676,16 +677,15 @@ async def get_benchmark_snapshot(
     if gpus_snapshots is not None:
         gpu_snapshots.update(gpus_snapshots)
 
-    if mi.distributed_servers and mi.distributed_servers.subordinate_workers:
-        for sub in mi.distributed_servers.subordinate_workers:
-            sw: Worker = await WorkerService(session).get_by_id(sub.worker_id)
-            w_snapshot, gpus_snapshots = create_worker_snapshot(
-                sw, sub.gpu_type, sub.gpu_indexes
-            )
-            if w_snapshot is not None:
-                worker_snapshots[sw.name] = w_snapshot
-            if gpus_snapshots is not None:
-                gpu_snapshots.update(gpus_snapshots)
+    for sub in subordinate_placements(mi):
+        sw: Worker = await WorkerService(session).get_by_id(sub.worker_id)
+        w_snapshot, gpus_snapshots = create_worker_snapshot(
+            sw, sub.gpu_type, sub.gpu_indexes
+        )
+        if w_snapshot is not None:
+            worker_snapshots[sw.name] = w_snapshot
+        if gpus_snapshots is not None:
+            gpu_snapshots.update(gpus_snapshots)
 
     return BenchmarkSnapshot(
         instances=instance_snapshots,

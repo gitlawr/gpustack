@@ -21,6 +21,7 @@ from gpustack.schemas.dashboard import (
 from gpustack.api.exceptions import ForbiddenException
 from gpustack.api.tenant import assert_cluster_visible
 from gpustack.schemas.model_usage import ModelUsage
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.models import Model, ModelInstance
 from gpustack.schemas.principals import OrgRole
 from gpustack.schemas.system_load import SystemLoad
@@ -546,15 +547,12 @@ def aggregate_resource_claim(
         for vram in (model_instance.computed_resource_claim.vram or {}).values():
             resource_claim.vram += vram
 
-    if (
-        model_instance.distributed_servers
-        and model_instance.distributed_servers.subordinate_workers
-    ):
-        for subworker in model_instance.distributed_servers.subordinate_workers:
-            if subworker.computed_resource_claim is not None:
-                resource_claim.ram += subworker.computed_resource_claim.ram or 0
-                for vram in (subworker.computed_resource_claim.vram or {}).values():
-                    resource_claim.vram += vram
+    for placement in subordinate_placements(model_instance):
+        claim = placement.computed_resource_claim
+        if claim is not None:
+            resource_claim.ram += claim.ram or 0
+            for vram in (claim.vram or {}).values():
+                resource_claim.vram += vram
 
 
 def active_model_statement(

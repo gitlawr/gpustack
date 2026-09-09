@@ -3,7 +3,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
-from gpustack.schemas.models import ModelInstance
+from gpustack.schemas.models import (
+    ComputedResourceClaim,
+    ModelInstance,
+    ModelInstanceStateEnum,
+)
 from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 
 logger = logging.getLogger(__name__)
@@ -114,3 +118,105 @@ def report_match_disagreement(
         f"{instance.name} (id={instance.id}): embedded {embedded}, "
         f"rows {from_workloads}"
     )
+
+
+@dataclass(frozen=True)
+class InstancePlacement:
+    """
+    One worker's part in a model instance.
+
+    The instance describes its own worker on itself and every other one in an
+    embedded list, so a reader that wants "all of them" has to join the two
+    shapes by hand -- and the ones that only walk the list quietly leave the
+    instance's own worker out. This is the one shape, which is also what a
+    workload row already is.
+    """
+
+    group_index: int
+    """0 is the instance's own worker. Subordinate i is at i + 1, which is the
+    off-by-one between this and the embedded list's own indexing."""
+
+    worker_id: Optional[int] = None
+    worker_name: Optional[str] = None
+    worker_ip: Optional[str] = None
+    worker_ifname: Optional[str] = None
+    gpu_type: Optional[str] = None
+    gpu_indexes: Optional[list] = None
+    gpu_addresses: Optional[list] = None
+    computed_resource_claim: Optional[ComputedResourceClaim] = None
+    ports: Optional[list] = None
+    pid: Optional[int] = None
+    arguments: Optional[list] = None
+    state: Optional[ModelInstanceStateEnum] = None
+    state_message: Optional[str] = None
+    download_progress: Optional[float] = None
+
+    @property
+    def is_leader(self) -> bool:
+        return self.group_index == 0
+
+    @property
+    def subordinate_index(self) -> Optional[int]:
+        """Its position in the embedded list, or None for the leader, which
+        has no entry there."""
+        return None if self.is_leader else self.group_index - 1
+
+
+def instance_placements(instance: ModelInstance) -> list:
+    """
+    Every worker that runs part of this instance, leader first.
+
+    Reads the instance and its embedded subordinate list. The workload rows
+    carry the same thing and will replace this reading; keeping the callers on
+    one shape is what makes that a change here rather than in each of them.
+    """
+    placements = [
+        InstancePlacement(
+            group_index=0,
+            worker_id=instance.worker_id,
+            worker_name=instance.worker_name,
+            worker_ip=instance.worker_ip,
+            worker_ifname=instance.worker_ifname,
+            gpu_type=instance.gpu_type,
+            gpu_indexes=instance.gpu_indexes,
+            gpu_addresses=instance.gpu_addresses,
+            computed_resource_claim=instance.computed_resource_claim,
+            ports=instance.ports,
+            pid=instance.pid,
+            state=instance.state,
+            state_message=instance.state_message,
+            download_progress=instance.download_progress,
+        )
+    ]
+    subordinates = (
+        instance.distributed_servers.subordinate_workers
+        if instance.distributed_servers
+        and instance.distributed_servers.subordinate_workers
+        else []
+    )
+    for index, sw in enumerate(subordinates):
+        placements.append(
+            InstancePlacement(
+                group_index=index + 1,
+                worker_id=sw.worker_id,
+                worker_name=sw.worker_name,
+                worker_ip=sw.worker_ip,
+                worker_ifname=sw.worker_ifname,
+                gpu_type=sw.gpu_type,
+                gpu_indexes=sw.gpu_indexes,
+                gpu_addresses=sw.gpu_addresses,
+                computed_resource_claim=sw.computed_resource_claim,
+                ports=sw.ports,
+                pid=sw.pid,
+                arguments=sw.arguments,
+                state=sw.state,
+                state_message=sw.state_message,
+                download_progress=sw.download_progress,
+            )
+        )
+    return placements
+
+
+def subordinate_placements(instance: ModelInstance) -> list:
+    """Everything but the instance's own worker."""
+    return [p for p in instance_placements(instance) if not p.is_leader]
