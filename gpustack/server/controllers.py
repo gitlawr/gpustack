@@ -91,6 +91,7 @@ from gpustack.server.model_instance_workloads import (
     aggregate_instance_runtime,
     aggregate_instance_state,
     fold_decline_reason,
+    rows_are_behind,
     spec_differs,
     sync_model_instance_workloads,
     workload_spec,
@@ -496,14 +497,14 @@ settle -- the controller writes DOWNLOADING from the file events, the fold puts
 it back, and the two take turns."""
 
 
-def _with_runtime(folded: dict, workloads) -> dict:
+def _with_runtime(folded: dict, workloads, instance=None) -> dict:
     """The fold's verdict plus what the leader's container is.
 
     Carried on the same write rather than separately: they come from one row,
     and splitting them would publish two events per change to everything
     watching instances.
     """
-    return {**aggregate_instance_runtime(workloads), **folded}
+    return {**aggregate_instance_runtime(workloads, instance), **folded}
 
 
 def _spawned_but_not_reported(instance, workloads) -> Optional[dict]:
@@ -611,7 +612,10 @@ class ModelInstanceWorkloadStateController:
             spawned = _spawned_but_not_reported(instance, workloads)
             if spawned is not None:
                 return _Fold(
-                    instance, _with_runtime(spawned, workloads), None, distributed
+                    instance,
+                    _with_runtime(spawned, workloads, instance),
+                    None,
+                    distributed,
                 )
             # Nothing is waiting on a container here -- the instance was
             # freshly scheduled, or is preparing model files. Whatever its
@@ -624,12 +628,17 @@ class ModelInstanceWorkloadStateController:
                 instance, None, FoldDeclineReason.INSTANCE_NOT_EXECUTING, distributed
             )
 
+        if rows_are_behind(instance, workloads):
+            return _Fold(instance, None, FoldDeclineReason.ROWS_BEHIND, distributed)
+
         folded = aggregate_instance_state(
             workloads, await self._follower_worker_ips(session, workloads)
         )
         if folded is None:
             return _Fold(instance, None, fold_decline_reason(workloads), distributed)
-        return _Fold(instance, _with_runtime(folded, workloads), None, distributed)
+        return _Fold(
+            instance, _with_runtime(folded, workloads, instance), None, distributed
+        )
 
     async def _reconcile(self, instance_id: int):
         try:

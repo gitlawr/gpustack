@@ -37,6 +37,7 @@ from gpustack.server.model_instance_workloads import (
     aggregate_instance_runtime,
     fold_decline_reason,
     instance_ports,
+    rows_are_behind,
     to_workload_state,
     compile_model_instance,
     named_ports,
@@ -807,3 +808,69 @@ def test_a_field_the_row_has_nothing_for_is_left_alone():
     assert "port" not in runtime
     assert "ports" not in runtime
     assert "pid" not in runtime
+
+
+# ---------------------------------------------------------------------------
+# Reading rows the instance has already moved past
+# ---------------------------------------------------------------------------
+
+
+def _at(seconds):
+    from datetime import datetime, timedelta, timezone
+
+    return datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=seconds)
+
+
+def test_rows_a_write_behind_are_not_folded():
+    """The worker writes the instance and then mirrors, so in between the two
+    genuinely disagree. Deciding from that window put a container that had
+    just died back to RUNNING for sixty milliseconds on a real run."""
+    instance = _instance()
+    instance.updated_at = _at(10)
+    workload = _workload(0, WorkloadStateEnum.RUNNING)
+    workload.updated_at = _at(5)
+
+    assert rows_are_behind(instance, [workload]) is True
+
+
+def test_a_follower_moving_is_news_too():
+    """Compared against the newest row, not the leader's: a follower changing
+    is something the fold has to be free to act on."""
+    instance = _instance()
+    instance.updated_at = _at(10)
+    leader = _workload(0, WorkloadStateEnum.RUNNING)
+    leader.updated_at = _at(5)
+    follower = _workload(1, WorkloadStateEnum.ERROR)
+    follower.updated_at = _at(20)
+
+    assert rows_are_behind(instance, [leader, follower]) is False
+
+
+def test_a_row_written_after_the_instance_is_not_behind():
+    instance = _instance()
+    instance.updated_at = _at(5)
+    workload = _workload(0, WorkloadStateEnum.RUNNING)
+    workload.updated_at = _at(10)
+
+    assert rows_are_behind(instance, [workload]) is False
+
+
+def test_a_restart_count_is_not_folded_backwards():
+    """The row lags the instance by a write, so it reports the count from
+    before the restart. Folding that back resets what the backoff escalates
+    on and leaves an instance restarting at the base delay for ever."""
+    instance = _instance()
+    instance.restart_count = 1
+    workload = _workload(0, WorkloadStateEnum.RUNNING)
+    workload.restart_count = 0
+
+    assert "restart_count" not in aggregate_instance_runtime([workload], instance)
+
+
+def test_a_restart_count_that_moved_forward_is_folded():
+    instance = _instance()
+    instance.restart_count = 1
+    workload = _workload(0, WorkloadStateEnum.RUNNING)
+    workload.restart_count = 2
+
+    assert aggregate_instance_runtime([workload], instance)["restart_count"] == 2

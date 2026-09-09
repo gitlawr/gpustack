@@ -139,10 +139,16 @@ def instance_ports(named: Optional[Dict[str, int]]):
     return ordered[0], ordered
 
 
-_RUNTIME_FIELDS = ("pid", "restart_count", "last_restart_time")
+_RUNTIME_FIELDS = ("pid",)
+
+_MONOTONIC_RUNTIME_FIELDS = ("restart_count", "last_restart_time")
+"""Restart bookkeeping only ever moves forward. The row is filled by the
+mirror and so lags the instance, and folding it back would reset the count the
+backoff escalates on -- an instance would restart at the base delay for
+ever."""
 
 
-def aggregate_instance_runtime(workloads: List[Workload]) -> dict:
+def aggregate_instance_runtime(workloads: List[Workload], instance=None) -> dict:
     """
     What the leader's container is, as opposed to how it is doing.
 
@@ -154,6 +160,12 @@ def aggregate_instance_runtime(workloads: List[Workload]) -> dict:
     The row is filled by the mirror, so it lags the instance by one write, and
     clearing a live port because the row has not caught up would take the
     instance off the air for a reason that has nothing to do with it.
+
+    The restart bookkeeping is held to moving forward for the same reason,
+    given the instance to compare against: a row a write behind reports the
+    count from before the restart, and folding that back resets what the
+    backoff escalates on, leaving an instance restarting at the base delay for
+    ever. Seen as restart_count going from 1 to 0 on a real run.
     """
     leader = next((w for w in workloads if (w.group_index or 0) == 0), None)
     if leader is None:
@@ -164,6 +176,11 @@ def aggregate_instance_runtime(workloads: List[Workload]) -> dict:
         for name in _RUNTIME_FIELDS
         if getattr(leader, name, None) is not None
     }
+    for name in _MONOTONIC_RUNTIME_FIELDS:
+        value = getattr(leader, name, None)
+        current = getattr(instance, name, None) if instance is not None else None
+        if value is not None and (current is None or value >= current):
+            runtime[name] = value
     port, ports = instance_ports(leader.ports)
     if port is not None:
         runtime["port"] = port
@@ -437,6 +454,10 @@ class FoldDeclineReason(str, Enum):
     missing the row everything else is derived from."""
 
     NO_LEADER = "no_leader"
+    ROWS_BEHIND = "rows_behind"
+    """The instance was written more recently than any of its rows: the worker
+    writes it and then mirrors, so in between the rows describe the run before
+    this one."""
     INSTANCE_NOT_EXECUTING = "instance_not_executing"
     """The domain resource is before execution -- rescheduled, or preparing
     model files -- so its workloads describe a run that is over."""
@@ -537,3 +558,29 @@ def _distributed_override(
     if not all(w.state == WorkloadStateEnum.RUNNING for w in followers):
         return _HOLD
     return None
+
+
+def rows_are_behind(instance, workloads: List[Workload]) -> bool:
+    """
+    Whether the instance has been written since its rows were.
+
+    The worker writes the instance and then mirrors onto the row, so between
+    the two they genuinely disagree, and a fold reading in that window reports
+    the run before this one. While the fold only watched, that cost a logged
+    difference the confirm absorbed; deciding, it writes -- a real run had it
+    put a container that had just died back to RUNNING for sixty milliseconds.
+
+    Comparing against the newest row rather than the leader's: a follower
+    changing is news too, and the fold has to be free to act on it.
+
+    This does not silence the fold in the steady state. Its own write makes
+    the instance newer, so it says nothing until a row moves again -- which is
+    exactly when it has something to say.
+    """
+    newest = max(
+        (w.updated_at for w in workloads if getattr(w, "updated_at", None)),
+        default=None,
+    )
+    if newest is None or getattr(instance, "updated_at", None) is None:
+        return False
+    return newest < instance.updated_at
