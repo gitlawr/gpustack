@@ -20,6 +20,7 @@ from gpustack.api.exceptions import (
     InternalServerErrorException,
     NotFoundException,
 )
+from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 from gpustack.utils.model_instance_workers import instance_placements
 from gpustack.schemas.workers import Worker
 from gpustack.schemas.clusters import Cluster
@@ -259,8 +260,19 @@ async def get_serving_logs(  # noqa: C901
                 container_name, model_instance, is_main
             )
 
-        # Every worker running part of this instance, its own included.
-        valid_worker_ids = {p.worker_id for p in instance_placements(model_instance)}
+        # Every worker running part of this instance, its own included. The
+        # rows are passed so the two readings are compared; the embedded list
+        # still decides until that comparison has been silent.
+        rows = await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                "owner_id": model_instance.id,
+            },
+        )
+        valid_worker_ids = {
+            p.worker_id for p in instance_placements(model_instance, rows)
+        }
 
         # Determine target worker ID
         target_worker_id = worker_id or model_instance.worker_id

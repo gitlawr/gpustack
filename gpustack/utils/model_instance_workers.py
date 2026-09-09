@@ -3,6 +3,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
+from gpustack.server.model_instance_workloads import instance_ports
 from gpustack.schemas.models import (
     ComputedResourceClaim,
     ModelInstance,
@@ -163,13 +164,73 @@ class InstancePlacement:
         return None if self.is_leader else self.group_index - 1
 
 
-def instance_placements(instance: ModelInstance) -> list:
+BINDING_FIELDS = (
+    "group_index",
+    "worker_id",
+    "worker_name",
+    "worker_ip",
+    "worker_ifname",
+    "gpu_type",
+    "gpu_indexes",
+    "gpu_addresses",
+    "computed_resource_claim",
+    "ports",
+    "pid",
+)
+"""What both readings can be held to. State is left out on purpose: several
+instance states map onto one workload state, so a row cannot say which of them
+it came from -- the same asymmetry the fold declines on."""
+
+
+def placements_from_workloads(workloads: list) -> list:
+    """
+    The same shape, read off the rows instead.
+
+    Types are converted rather than passed through: a row stores the resource
+    claim as JSON and the ports as a name -> port map, and callers here expect
+    the instance's spellings of both.
+    """
+    placements = []
+    for row in sorted(workloads or [], key=lambda w: w.group_index or 0):
+        claim = row.computed_resource_claim
+        port, ports = instance_ports(row.ports)
+        placements.append(
+            InstancePlacement(
+                group_index=row.group_index or 0,
+                worker_id=row.worker_id,
+                worker_name=row.worker_name,
+                worker_ip=row.worker_ip,
+                worker_ifname=row.worker_ifname,
+                gpu_type=row.gpu_type,
+                gpu_indexes=row.gpu_indexes,
+                gpu_addresses=row.gpu_addresses,
+                computed_resource_claim=(
+                    ComputedResourceClaim.model_validate(claim) if claim else None
+                ),
+                ports=ports,
+                pid=row.pid,
+                arguments=row.arguments,
+                download_progress=row.progress,
+            )
+        )
+    return placements
+
+
+def _binding_of(placements: list) -> list:
+    return [
+        tuple(getattr(p, name, None) for name in BINDING_FIELDS) for p in placements
+    ]
+
+
+def instance_placements(instance: ModelInstance, workloads: list = None) -> list:
     """
     Every worker that runs part of this instance, leader first.
 
-    Reads the instance and its embedded subordinate list. The workload rows
-    carry the same thing and will replace this reading; keeping the callers on
-    one shape is what makes that a change here rather than in each of them.
+    Reads the instance and its embedded subordinate list. Given the rows as
+    well, reads those too and compares the binding, which is what the callers
+    that have moved onto this actually use -- the embedded list stays
+    authoritative until the comparison has been silent against real
+    instances.
     """
     placements = [
         InstancePlacement(
@@ -189,7 +250,15 @@ def instance_placements(instance: ModelInstance) -> list:
             download_progress=instance.download_progress,
         )
     ]
-    return placements + subordinate_placements(instance)
+    placements = placements + subordinate_placements(instance)
+    if workloads is not None:
+        tally("Workload placements").compare(
+            _binding_of(placements),
+            _binding_of(placements_from_workloads(workloads)),
+            f"model instance {getattr(instance, 'name', None)}",
+            skip_if_none=False,
+        )
+    return placements
 
 
 def subordinate_placements(instance: ModelInstance) -> list:

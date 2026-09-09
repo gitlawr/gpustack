@@ -14,6 +14,9 @@ import pytest
 
 from gpustack.utils.model_instance_workers import (
     ModelInstanceWorkerMatch,
+    _binding_of,
+    instance_placements,
+    placements_from_workloads,
     get_worker_matches_from_workloads,
     report_match_disagreement,
 )
@@ -120,3 +123,92 @@ def test_a_different_placement_is_reported(caplog):
     )
 
     assert "Workload placement differs on worker 7" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The same placements, read off the rows
+# ---------------------------------------------------------------------------
+
+
+def _instance_with_follower():
+    from gpustack.schemas.models import (
+        ComputedResourceClaim,
+        DistributedServerCoordinateModeEnum,
+        DistributedServers,
+        ModelInstance,
+        ModelInstanceSubordinateWorker,
+    )
+
+    return ModelInstance(
+        id=1,
+        name="mi",
+        worker_id=1,
+        worker_name="w1",
+        worker_ip="10.0.0.1",
+        worker_ifname="eth0",
+        gpu_type="cuda",
+        gpu_indexes=[0],
+        gpu_addresses=["0000:01:00.0"],
+        computed_resource_claim=ComputedResourceClaim(vram={0: 100}),
+        port=8000,
+        ports=[8000, 8001],
+        pid=42,
+        distributed_servers=DistributedServers(
+            mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER,
+            subordinate_workers=[
+                ModelInstanceSubordinateWorker(
+                    worker_id=2,
+                    worker_name="w2",
+                    worker_ip="10.0.0.2",
+                    worker_ifname="eth1",
+                    gpu_type="cuda",
+                    gpu_indexes=[1],
+                    gpu_addresses=["0000:02:00.0"],
+                    computed_resource_claim=ComputedResourceClaim(vram={1: 200}),
+                    ports=[9000],
+                    pid=43,
+                )
+            ],
+        ),
+    )
+
+
+def test_the_rows_place_the_workers_the_same_way():
+    """The binding is what the readers moved onto this actually use, and it
+    has to survive being read off a row -- where the claim is JSON and the
+    ports are a name to port map rather than a list."""
+    from gpustack.server.model_instance_workloads import compile_model_instance
+
+    instance = _instance_with_follower()
+
+    from_instance = instance_placements(instance)
+    from_rows = placements_from_workloads(compile_model_instance(instance))
+
+    assert _binding_of(from_instance) == _binding_of(from_rows)
+
+
+def test_the_comparison_is_silent_when_the_two_agree(caplog):
+    from gpustack.server.model_instance_workloads import compile_model_instance
+
+    instance = _instance_with_follower()
+
+    with caplog.at_level(logging.INFO):
+        instance_placements(instance, compile_model_instance(instance))
+
+    assert "differs on" not in caplog.text
+    assert "agreed=" in caplog.text
+
+
+def test_a_row_bound_elsewhere_is_reported(caplog):
+    """Placing a worker wrongly is how the wrong node gets told to run
+    something, so it has to be loud rather than absorbed."""
+    from gpustack.server.model_instance_workloads import compile_model_instance
+
+    instance = _instance_with_follower()
+    rows = compile_model_instance(instance)
+    rows[1].worker_id = 99
+
+    with caplog.at_level(logging.INFO):
+        instance_placements(instance, rows)
+
+    assert "Workload placements differs on model instance mi" in caplog.text

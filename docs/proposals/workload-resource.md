@@ -364,6 +364,8 @@ UNIQUE (owner_kind, owner_id, worker_id, group_index)
 
 **待决的**:
 
+- **绑定是否应当不可变** —— 现在重新调度是在同一个 ModelInstance 上改绑定(`scheduler.py:376`),`sync_model_instance_workloads` 随之**原地更新已有的行**。k8s 的 Pod 不是这样:绑定不可变,重新调度建新 Pod。若 workload 行也如此(重绑=新建行、旧行回收),"两个写者改同一行"这一类竞争在构造上消失,也和后续 Pod 生命周期映射一致。代价是行 id 会变(worker 需重新解析)、回收面变大、日志文件命名要跟着调整。**这个方向是评审中提出的,值得在阶段 4 之后单独立项。**
+
 - **`INITIALIZING` 是否可以从用户可见的生命周期里消失** —— 第 4 步之后 worker 不再写实例,而 `INITIALIZING` 正是它写的,序列会变成 `DOWNLOADING → STARTING → RUNNING`。倾向接受(`STARTING` 已经表达"正在起",两者语义重叠),但这是产品可见的变化,需要在第 4 步之前定。若不能少,得让服务端在 workload 转 `starting` 时补写。
 - **`PATCH /workloads/{id}/status`** —— 服务端写 spec、worker 写 status 这条边界目前只是**约定**:worker 的写回是 GET 整行 / 改字段 / PUT 整行,会覆盖服务端并发写入的 spec(重新调度换了 GPU 就会丢)。要求走生成的客户端,所以需要新端点 + 重新生成客户端。这是阶段 3 之后依然存在的缺陷,不是过渡期产物。
 - **基准测试的折叠**是否也做(目前 Benchmark 行仍权威)
