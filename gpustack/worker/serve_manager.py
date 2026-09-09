@@ -11,7 +11,6 @@ import os
 from typing import Dict, Optional, List, Callable
 from pathlib import Path
 import logging
-import threading
 
 from gpustack_runtime.deployer import (
     get_workload,
@@ -56,7 +55,6 @@ from gpustack.schemas.models import (
     ModelInstanceSubordinateWorker,
     CategoryEnum,
 )
-from gpustack.schemas.workloads import WorkloadOwnerKindEnum, WorkloadUpdate
 from gpustack.server.bus import Event, EventType
 from gpustack.server.model_instance_workloads import named_ports, to_workload_state
 from gpustack.worker.controlloop import (
@@ -206,12 +204,6 @@ def provision_model_instance(
 
 
 class ServeManager:
-    _write_locks: Dict[int, "threading.Lock"] = {}
-    _write_locks_guard = threading.Lock()
-    """One lock per instance, so the pair of writes each state change makes --
-    the instance and its workload row -- cannot interleave with another
-    thread's pair and leave the two disagreeing about which came last."""
-
     @property
     def _worker_id(self) -> int:
         return self._worker_id_getter()
@@ -1179,6 +1171,23 @@ class ServeManager:
             except Exception as e:
                 logger.warning(f"Failed to delete {log_type} log file {f}: {e}")
 
+    def _own_subordinate_position(self, mi) -> int:
+        """
+        Where this worker sits in the instance's subordinate list.
+
+        Raises StopIteration if it is not there, as the inline lookups this
+        replaces did -- every caller reaches it having already established
+        that it is a subordinate of this instance, so absence means the row
+        and the worker disagree about that, and swallowing it would start a
+        container nothing reports on. The one caller that tolerates absence
+        asks for it separately.
+        """
+        return next(
+            p.subordinate_index
+            for p in subordinate_placements(mi)
+            if p.worker_id == self._worker_id
+        )
+
     def _purge_instance_logs(self, model_instance_id: int):
         """Delete all serve logs (main/container/sidecar) for a model instance id."""
         try:
@@ -1408,30 +1417,16 @@ class ServeManager:
         """
         Update model instance with given fields.
 
-        The instance and its workload row are written under one lock per
-        instance. Two periodic passes write state -- the sync pass and the
-        inference health check, on their own threads -- and without this their
-        writes interleave between the two calls, so the row can end up
-        reporting a state the instance was moved off first. The fold reads the
-        row, and a row newer than the instance is exactly what it is meant to
-        trust, so it undid a failure that had already been recorded.
+        The workload rows follow from this write, applied by the server in the
+        transaction that makes it. Mirroring from here instead meant a second
+        call that could land after another writer's update -- and the
+        provisioning subprocess writes instances too, where a lock in this
+        process reaches nothing.
 
         Args:
             id: The ID of the model instance to update.
             **kwargs: The fields to update, group by field name and value.
         """
-        with self._write_lock(id):
-            return self._write_model_instance(id, **kwargs)
-
-    def _write_lock(self, id: int):
-        with ServeManager._write_locks_guard:
-            lock = ServeManager._write_locks.get(id)
-            if lock is None:
-                lock = threading.Lock()
-                ServeManager._write_locks[id] = lock
-        return lock
-
-    def _write_model_instance(self, id: int, **kwargs) -> bool:
         applied = update_resource(
             self._clientset.model_instances,
             id,
@@ -1439,81 +1434,7 @@ class ServeManager:
             "Model instance",
             **kwargs,
         )
-        self._mirror_execution_state(id, kwargs)
         return applied
-
-    def _mirror_execution_state(self, model_instance_id: int, patch: dict):
-        """
-        Write the same execution state onto the instance's workload rows.
-
-        Every write-back funnels through here, including the indexed patches
-        into ``distributed_servers.subordinate_workers`` that a subordinate
-        worker makes, so one place covers both roles.
-
-        The instance row stays authoritative for now: this makes the workload
-        rows carry real execution state, rather than a copy of the instance
-        made when they were compiled, so that the aggregation that will read
-        them can be watched working before anything depends on it. Failures
-        are logged and dropped -- nothing reads these yet, and a mirror that
-        could fail a state write-back would be strictly worse than no mirror.
-        """
-        try:
-            group_index, fields = _execution_state_patch(patch)
-            if not fields:
-                return
-            workload = self._find_workload(model_instance_id, group_index)
-            if workload is None:
-                return
-            update_resource(
-                self._clientset.workloads,
-                workload.id,
-                WorkloadUpdate,
-                "Model instance workload",
-                **fields,
-            )
-        except Exception as e:
-            logger.debug(
-                f"Failed to mirror execution state of model instance "
-                f"{model_instance_id} onto its workload: {e}"
-            )
-
-    def _own_subordinate_position(self, mi) -> int:
-        """
-        Where this worker sits in the instance's subordinate list.
-
-        Raises StopIteration if it is not there, as the inline lookups this
-        replaces did -- every caller reaches it having already established
-        that it is a subordinate of this instance, so absence means the row
-        and the worker disagree about that, and swallowing it would start a
-        container nothing reports on. The one caller that tolerates absence
-        asks for it separately.
-        """
-        return next(
-            p.subordinate_index
-            for p in subordinate_placements(mi)
-            if p.worker_id == self._worker_id
-        )
-
-    def _find_workload(self, model_instance_id: int, group_index: int):
-        """The instance's workload at that position in its group, from the
-        watch-backed cache."""
-        # No page parameter: the generated client skips its cache whenever
-        # one is present, and this runs on every state write-back.
-        page = self._clientset.workloads.list(
-            params={
-                "worker_id": self._worker_id,
-                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE.value,
-            }
-        )
-        return next(
-            (
-                workload
-                for workload in page.items or []
-                if workload.owner_id == model_instance_id
-                and workload.group_index == group_index
-            ),
-            None,
-        )
 
     def _stop_model_instance(
         self,

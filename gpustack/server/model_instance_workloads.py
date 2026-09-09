@@ -584,3 +584,57 @@ def rows_are_behind(instance, workloads: List[Workload]) -> bool:
     if newest is None or getattr(instance, "updated_at", None) is None:
         return False
     return newest < instance.updated_at
+
+
+EXECUTION_FIELDS = (
+    "state",
+    "state_message",
+    "ports",
+    "pid",
+    "restart_count",
+    "last_restart_time",
+    "progress",
+)
+"""What a workload reports, as opposed to what it was asked to be. The mirror
+below owns these; ``SPEC_FIELDS`` is the other half and the controller owns
+that."""
+
+
+async def mirror_execution_state(session, instance: ModelInstance) -> None:
+    """
+    Copy an instance's execution state onto the rows that run it.
+
+    Server-side, in the transaction that writes the instance, because
+    ordering is the whole problem. Two processes write an instance -- the
+    worker's sync passes and the provisioning subprocess -- and while the
+    worker mirrored, only one of them did: the subprocess wrote the instance
+    and nothing else, so the row carried the other writer's view. Worse, the
+    mirror was a second call, so a mirror sent before another writer's update
+    could land after it and leave the row reporting a state the instance had
+    already moved off. The fold, reading a row newer than the instance,
+    trusted it and put a container that had just died back into service.
+
+    Deriving the rows from the instance write removes the ordering question
+    instead of guarding against it: there is one write, so there is one order.
+    """
+    compiled = {w.group_index: w for w in compile_model_instance(instance)}
+    if not compiled:
+        return
+    existing = await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+            "owner_id": instance.id,
+        },
+    )
+    for row in existing:
+        source = compiled.get(row.group_index)
+        if source is None:
+            continue
+        changed = {
+            name: getattr(source, name)
+            for name in EXECUTION_FIELDS
+            if getattr(row, name, None) != getattr(source, name)
+        }
+        if changed:
+            await row.update(session, changed)

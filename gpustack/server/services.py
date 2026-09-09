@@ -40,6 +40,7 @@ from gpustack.server.cache import (
     locked_cached,
 )
 from gpustack.server.cache_services import resolve_instance_cache_config_safe
+from gpustack.server.model_instance_workloads import mirror_execution_state
 from gpustack.server.worker_allocated_cache import invalidate_workers_allocated
 from gpustack.utils.usage_snapshots import propagate_user_rename
 
@@ -934,6 +935,10 @@ class ModelInstanceService:
         self, model_instance: ModelInstance, source: Union[dict, SQLModel, None] = None
     ):
         result = await model_instance.update(self.session, source)
+        # In the same transaction as the write it derives from: every writer
+        # of an instance comes through here, so the rows follow one order
+        # rather than whichever of two processes' calls happened to land last.
+        await mirror_execution_state(self.session, model_instance)
         await delete_cache_by_key(self.get_running_instances, model_instance.model_id)
         await delete_cache_by_key(self.get_by_id, model_instance.id)
         await invalidate_workers_allocated([model_instance])

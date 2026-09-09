@@ -37,6 +37,8 @@ from gpustack.server.model_instance_workloads import (
     aggregate_instance_runtime,
     fold_decline_reason,
     instance_ports,
+    EXECUTION_FIELDS,
+    mirror_execution_state,
     rows_are_behind,
     to_workload_state,
     compile_model_instance,
@@ -874,3 +876,91 @@ def test_a_restart_count_that_moved_forward_is_folded():
     workload.restart_count = 2
 
     assert aggregate_instance_runtime([workload], instance)["restart_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Deriving the rows from the write they follow
+# ---------------------------------------------------------------------------
+
+
+def _mirror_rows(states):
+    """Rows carrying a state and nothing else, so any other field the mirror
+    writes shows up as a change."""
+    return [
+        SimpleNamespace(
+            group_index=group_index,
+            state=state,
+            state_message=None,
+            ports=None,
+            pid=None,
+            restart_count=0,
+            last_restart_time=None,
+            progress=None,
+            update=AsyncMock(),
+        )
+        for group_index, state in enumerate(states)
+    ]
+
+
+def _rows_matching(instance):
+    """Rows already saying exactly what the instance does."""
+    return [
+        SimpleNamespace(
+            **{name: getattr(w, name) for name in EXECUTION_FIELDS},
+            group_index=w.group_index,
+            update=AsyncMock(),
+        )
+        for w in compile_model_instance(instance)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_rows_follow_the_instance_write(monkeypatch):
+    """Two processes write an instance -- the worker's sync passes and the
+    provisioning subprocess -- and while the worker mirrored, only one of them
+    did. Deriving the rows from the write removes the ordering question
+    instead of guarding against it."""
+    instance = _instance(state=ModelInstanceStateEnum.ERROR)
+    instance.state_message = "Error (exit code 137)"
+    rows = _mirror_rows([WorkloadStateEnum.RUNNING])
+    monkeypatch.setattr(Workload, "all_by_fields", AsyncMock(return_value=rows))
+
+    await mirror_execution_state(MagicMock(), instance)
+
+    applied = rows[0].update.await_args[0][1]
+    assert applied["state"] == WorkloadStateEnum.ERROR
+    assert applied["state_message"] == "Error (exit code 137)"
+
+
+@pytest.mark.asyncio
+async def test_a_row_already_saying_it_is_left_alone(monkeypatch):
+    """update publishes an event whether or not anything changed, and this
+    runs on every instance write."""
+    instance = _instance(state=ModelInstanceStateEnum.RUNNING)
+    rows = _rows_matching(instance)
+    monkeypatch.setattr(Workload, "all_by_fields", AsyncMock(return_value=rows))
+
+    await mirror_execution_state(MagicMock(), instance)
+
+    rows[0].update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_follower_follows_its_own_entry(monkeypatch):
+    """The leader's state is the instance's; a follower's is its entry in the
+    subordinate list, and putting the leader's on both would report a node
+    that had failed as running."""
+    instance = _instance(
+        mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER, followers=1
+    )
+    instance.state = ModelInstanceStateEnum.RUNNING
+    instance.distributed_servers.subordinate_workers[0].state = (
+        ModelInstanceStateEnum.ERROR
+    )
+    rows = _mirror_rows([WorkloadStateEnum.PENDING, WorkloadStateEnum.PENDING])
+    monkeypatch.setattr(Workload, "all_by_fields", AsyncMock(return_value=rows))
+
+    await mirror_execution_state(MagicMock(), instance)
+
+    assert rows[0].update.await_args[0][1]["state"] == WorkloadStateEnum.RUNNING
+    assert rows[1].update.await_args[0][1]["state"] == WorkloadStateEnum.ERROR

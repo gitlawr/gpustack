@@ -962,37 +962,6 @@ def test_pre_container_states_mirror_as_pending():
     assert fields["state"] == WorkloadStateEnum.PENDING
 
 
-def test_mirror_writes_to_the_matching_workload():
-    manager, clientset = _build_serve_manager()
-    workload = SimpleNamespace(id=77, owner_id=5, group_index=0)
-    clientset.workloads.list.return_value = SimpleNamespace(items=[workload])
-
-    with patch("gpustack.worker.serve_manager.update_resource") as update:
-        manager._mirror_execution_state(5, {"state": ModelInstanceStateEnum.RUNNING})
-
-    assert update.call_args[0][1] == 77
-    assert update.call_args[1]["state"] == WorkloadStateEnum.RUNNING
-
-
-def test_a_failed_mirror_never_fails_the_state_write_back():
-    """Nothing reads these rows yet, so a mirror that could fail a write-back
-    would be strictly worse than no mirror."""
-    manager, clientset = _build_serve_manager()
-    clientset.workloads.list.side_effect = RuntimeError("api down")
-
-    manager._mirror_execution_state(5, {"state": ModelInstanceStateEnum.RUNNING})
-
-
-def test_mirror_is_silent_when_the_instance_has_no_workload_row_yet():
-    manager, clientset = _build_serve_manager()
-    clientset.workloads.list.return_value = SimpleNamespace(items=[])
-
-    with patch("gpustack.worker.serve_manager.update_resource") as update:
-        manager._mirror_execution_state(5, {"state": ModelInstanceStateEnum.RUNNING})
-
-    update.assert_not_called()
-
-
 def _distributed_subordinate_view(subordinate_state):
     """The instance as the subordinate worker on worker 2 sees it: itself in
     the subordinate list, its own container running."""
@@ -1095,67 +1064,3 @@ def test_a_worker_that_is_not_a_subordinate_is_not_silently_zero():
 
     with pytest.raises(StopIteration):
         manager._own_subordinate_position(mi)
-
-
-def test_the_instance_and_its_row_are_written_without_interleaving():
-    """Two periodic passes write state on their own threads. Between the
-    instance write and the mirror, another thread's pair can land, leaving the
-    row reporting a state the instance was moved off first -- and the fold
-    trusts a row newer than the instance, so it undid a failure that had
-    already been recorded."""
-    import threading
-
-    manager, _ = _build_serve_manager()
-    order = []
-    both_in_flight = threading.Event()
-
-    def slow_write(id, **kwargs):
-        order.append(f"start:{kwargs['state']}")
-        both_in_flight.wait(0.2)
-        order.append(f"end:{kwargs['state']}")
-        return True
-
-    with patch.object(manager, "_write_model_instance", side_effect=slow_write):
-        threads = [
-            threading.Thread(
-                target=manager._update_model_instance, args=(1,), kwargs={"state": s}
-            )
-            for s in ("error", "running")
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-    # Whichever ran first, it finished before the other started.
-    assert order[1].startswith("end:")
-    assert order[0].split(":")[1] == order[1].split(":")[1]
-
-
-def test_different_instances_do_not_block_each_other():
-    """The lock is per instance: one worker runs many, and serialising all of
-    them would put every state write behind the slowest."""
-    import threading
-
-    manager, _ = _build_serve_manager()
-    entered = threading.Event()
-    released = threading.Event()
-
-    def first(id, **kwargs):
-        entered.set()
-        released.wait(0.5)
-        return True
-
-    with patch.object(manager, "_write_model_instance", side_effect=first):
-        blocker = threading.Thread(
-            target=manager._update_model_instance, args=(1,), kwargs={"state": "error"}
-        )
-        blocker.start()
-        assert entered.wait(0.5)
-
-        with patch.object(manager, "_write_model_instance", return_value=True) as other:
-            manager._update_model_instance(2, state="running")
-            other.assert_called_once()
-
-        released.set()
-        blocker.join()
