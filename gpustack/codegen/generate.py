@@ -20,7 +20,11 @@ def main():
             "ModelRouteTarget",
             "CacheService",
             "Workload",
-        ]
+        ],
+        # Resources whose server exposes PATCH /{id}/status. Generating the
+        # method for one that does not would give a client a call that fails
+        # at the request rather than here.
+        status_patchable=["Workload"],
     )
 
     env = Environment(loader=FileSystemLoader(cfg.template_dir), auto_reload=True)
@@ -43,6 +47,7 @@ class Config:
     template_dir: str = os.path.join(os.path.dirname(__file__), "templates")
     output_dir: str = "gpustack/client"
     class_names: List[str] = None
+    status_patchable: List[str] = None
 
 
 def gen_clients(env: Environment, cfg: Config):
@@ -51,6 +56,7 @@ def gen_clients(env: Environment, cfg: Config):
     for class_name in cfg.class_names:
         data = {
             "class_name": class_name,
+            "status_patchable": class_name in (cfg.status_patchable or []),
         }
         client_code = template.render(data)
 

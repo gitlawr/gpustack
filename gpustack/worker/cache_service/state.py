@@ -1,8 +1,7 @@
 import logging
 
 from gpustack.client import ClientSet
-from gpustack.schemas.workloads import WorkloadUpdate
-from gpustack.worker.controlloop import update_resource
+from gpustack.worker.controlloop import patch_status
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +17,9 @@ def update_cache_service_instance(clientset: ClientSet, id: int, **kwargs) -> bo
     Returns:
         Whether the update was applied.
     """
-    return update_resource(
+    return patch_status(
         clientset.workloads,
         id,
-        WorkloadUpdate,
         "Cache service workload",
         **kwargs,
     )

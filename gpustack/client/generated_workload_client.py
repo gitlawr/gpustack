@@ -5,6 +5,7 @@ import threading
 from typing import Any, Callable, Dict, Optional, Union, Awaitable
 
 import httpx
+from fastapi.encoders import jsonable_encoder
 from gpustack.api.exceptions import (
     raise_if_response_error,
     async_raise_if_response_error,
@@ -57,8 +58,7 @@ class WorkloadClient:
             # have returned, so fetch unpaginated -- otherwise the server's
             # default perPage=100 silently truncates this fallback.
             logger.debug(
-                "workloads cache not authoritative; "
-                "fetching unpaginated from API"
+                "workloads cache not authoritative; " "fetching unpaginated from API"
             )
             params = {**(params or {}), "page": -1}
 
@@ -228,9 +228,7 @@ class WorkloadClient:
                         first_start = not self._watch_started
                         self._watch_started = True
                     if first_start:
-                        logger.debug(
-                            f"workloads cache watch started"
-                        )
+                        logger.debug(f"workloads cache watch started")
 
                 lines = response.aiter_lines()
                 while True:
@@ -343,6 +341,21 @@ class WorkloadClient:
         response = self._client.get_httpx_client().put(
             f"{self._url}/{id}",
             content=model_update.model_dump_json(),
+            headers={"Content-Type": "application/json"},
+        )
+        raise_if_response_error(response)
+        return WorkloadPublic.model_validate(response.json())
+
+    def patch_status(self, id: int, **fields):
+        """Report status without sending the rest of the row.
+
+        The row has another writer -- the controller owns the spec -- and
+        update() sends every field, so it replaces whatever that writer put
+        there since this one last read.
+        """
+        response = self._client.get_httpx_client().patch(
+            f"{self._url}/{id}/status",
+            json=jsonable_encoder(fields),
             headers={"Content-Type": "application/json"},
         )
         raise_if_response_error(response)

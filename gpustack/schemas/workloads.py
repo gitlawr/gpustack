@@ -258,6 +258,34 @@ class WorkloadUpdate(WorkloadBase):
     pass
 
 
+class WorkloadStatusUpdate(SQLModel):
+    """
+    What a worker reports about the container it runs.
+
+    Every field optional and applied by ``model_fields_set``, so a worker
+    sends what it is reporting rather than the whole row.
+
+    The row has two writers by design -- the controller compiles the spec, the
+    worker reports the status -- and with a whole-row PUT that split was an
+    agreement between two pieces of code rather than something the row
+    enforced: a worker sends everything, built from a read of its own, so any
+    spec written in between is replaced by what was there before. This model
+    has no spec fields to send, so the boundary holds whatever the caller
+    intends.
+    """
+
+    state: Optional[WorkloadStateEnum] = None
+    state_message: Optional[str] = None
+    ports: Optional[Dict[str, int]] = None
+    pid: Optional[int] = None
+    progress: Optional[float] = None
+    healthy: Optional[bool] = None
+    last_check_at: Optional[datetime] = None
+    restart_count: Optional[int] = None
+    last_restart_time: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+
+
 class WorkloadPublic(WorkloadBase):
     id: int
     created_at: datetime

@@ -1211,13 +1211,31 @@ def test_start_instance_reports_a_dropped_state_writeback(caplog):
 
 
 def test_update_instance_reports_failed_writeback_without_raising():
+    """The callers run on a watch loop, a sync thread, or a subprocess about
+    to exit, where an exception is dropped."""
     manager, clientset = _build_manager(worker_id=1)
-    clientset.workloads.get.side_effect = RuntimeError("boom")
+    clientset.workloads.patch_status.side_effect = RuntimeError("boom")
 
     assert (
         manager._update_cache_service_instance(11, state=WorkloadStateEnum.RUNNING)
         is False
     )
+
+
+def test_a_status_write_back_does_not_read_the_row_first():
+    """Reading to build a whole-row write is what let one writer lose
+    another's: the spec the controller wrote between the read and the write
+    was replaced by what had been there before."""
+    manager, clientset = _build_manager(worker_id=1)
+
+    manager._update_cache_service_instance(11, state=WorkloadStateEnum.RUNNING)
+
+    clientset.workloads.get.assert_not_called()
+    clientset.workloads.update.assert_not_called()
+    assert clientset.workloads.patch_status.call_args[1] == {
+        "id": 11,
+        "state": WorkloadStateEnum.RUNNING,
+    }
 
 
 def test_allocate_ports_excludes_ports_of_sibling_instances():

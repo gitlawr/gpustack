@@ -82,3 +82,32 @@ def updater(
         )
 
     return update
+
+
+def patch_status(
+    client: Any,
+    id: int,
+    description: str,
+    **fields,
+) -> bool:
+    """
+    Report a workload's status, sending only what is being reported.
+
+    Unlike :func:`update_resource` this needs no read, so there is no window
+    between reading and writing for another writer to lose. It also cannot
+    carry the spec, which the controller owns: the endpoint's model has no
+    field for it.
+
+    Returns whether the update was applied, on the same terms as
+    ``update_resource`` -- a failed write-back is reported rather than raised,
+    because the callers cannot handle one.
+    """
+    try:
+        client.patch_status(id=id, **fields)
+        return True
+    except NotFoundException:
+        logger.warning(f"{description} with ID {id} not found when trying to update.")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to update {description.lower()} {id}: {e}")
+        return False

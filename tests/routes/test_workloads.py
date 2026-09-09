@@ -24,6 +24,7 @@ from gpustack.schemas.workloads import (
     WorkloadRestartPolicyEnum,
     WorkloadRoleEnum,
     WorkloadStateEnum,
+    WorkloadStatusUpdate,
 )
 
 CALLER_PRINCIPAL = 7
@@ -338,3 +339,52 @@ def test_the_public_view_accepts_a_row_loaded_from_the_database():
 
     assert view.state == "running"
     assert (view.port, view.metrics_port) == (40001, 40002)
+
+
+# ---------------------------------------------------------------------------
+# Reporting status without sending the spec
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_status_patch_is_refused_to_non_system_principals(monkeypatch):
+    with pytest.raises(ForbiddenException):
+        await workloads_route.update_workload_status(
+            session=MagicMock(),
+            ctx=_ctx(kind=PrincipalType.USER),
+            id=1,
+            status_in=MagicMock(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_status_patch_applies_only_what_was_set(monkeypatch):
+    """The row's other writer owns the spec. A whole-row write replaces
+    whatever it put there since this caller last read, so the model it sends
+    has no spec fields to send."""
+    workload = _workload()
+    monkeypatch.setattr(
+        workloads_route.Workload, "one_by_id", AsyncMock(return_value=workload)
+    )
+    monkeypatch.setattr(workloads_route, "cluster_scoped_system", lambda ctx: False)
+    applied = AsyncMock()
+    monkeypatch.setattr(workloads_route.Workload, "update", applied)
+
+    status = WorkloadStatusUpdate(state=WorkloadStateEnum.RUNNING)
+    await workloads_route.update_workload_status(
+        session=MagicMock(),
+        ctx=_ctx(kind=PrincipalType.SYSTEM),
+        id=1,
+        status_in=status,
+    )
+
+    sent = applied.await_args[0][1]
+    assert sent.model_fields_set == {"state"}
+
+
+def test_the_status_model_carries_no_spec():
+    """The boundary is the model, not an agreement: a caller cannot send a
+    binding through this endpoint even by trying."""
+    from gpustack.server.model_instance_workloads import SPEC_FIELDS
+
+    assert not (set(WorkloadStatusUpdate.model_fields) & SPEC_FIELDS)

@@ -5,7 +5,8 @@ import threading
 from typing import Any, Callable, Dict, Optional, Union, Awaitable
 
 import httpx
-from gpustack.api.exceptions import (
+{% if status_patchable %}from fastapi.encoders import jsonable_encoder
+{% endif %}from gpustack.api.exceptions import (
     raise_if_response_error,
     async_raise_if_response_error,
 )
@@ -348,6 +349,23 @@ class {{ class_name }}Client:
         raise_if_response_error(response)
         return {{ class_name }}Public.model_validate(response.json())
 
+{% if status_patchable %}
+    def patch_status(self, id: int, **fields):
+        """Report status without sending the rest of the row.
+
+        The row has another writer -- the controller owns the spec -- and
+        update() sends every field, so it replaces whatever that writer put
+        there since this one last read.
+        """
+        response = self._client.get_httpx_client().patch(
+            f"{self._url}/{id}/status",
+            json=jsonable_encoder(fields),
+            headers={"Content-Type": "application/json"},
+        )
+        raise_if_response_error(response)
+        return {{ class_name }}Public.model_validate(response.json())
+
+{% endif %}
     def delete(self, id: int):
         response = self._client.get_httpx_client().delete(f"{self._url}/{id}")
         raise_if_response_error(response)

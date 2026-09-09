@@ -27,12 +27,11 @@ from gpustack.worker.benchmark.runner import BenchmarkRunner
 from gpustack.client import ClientSet
 from gpustack.schemas.workloads import (
     WorkloadOwnerKindEnum,
-    WorkloadUpdate,
 )
 from gpustack.server.benchmark_workloads import to_workload_state
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.controlloop import (
-    update_resource,
+    patch_status,
     ProvisionRunner,
     WorkloadPhase,
     classify_workload,
@@ -385,10 +384,9 @@ class BenchmarkManager:
             workload = self._find_workload(benchmark_id)
             if workload is None:
                 return
-            update_resource(
+            patch_status(
                 self._clientset.workloads,
                 workload.id,
-                WorkloadUpdate,
                 "Benchmark workload",
                 **fields,
             )
@@ -1464,10 +1462,9 @@ class BenchmarkManager:
         workload = self._find_workload(benchmark.id)
         if workload is None:
             return
-        update_resource(
+        patch_status(
             self._clientset.workloads,
             workload.id,
-            WorkloadUpdate,
             "Benchmark workload",
             started_at=datetime.now(timezone.utc),
         )

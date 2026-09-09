@@ -20,6 +20,7 @@ from gpustack.schemas.workloads import (
     WorkloadOwnerKindEnum,
     WorkloadPublic,
     WorkloadStateEnum,
+    WorkloadStatusUpdate,
     WorkloadUpdate,
     WorkloadsPublic,
 )
@@ -109,6 +110,42 @@ async def get_workload(session: SessionDep, ctx: TenantContextDep, id: int):
     if not _visible(ctx, workload):
         raise NotFoundException(message="Workload not found")
 
+    return workload
+
+
+@router.patch("/{id}/status", response_model=WorkloadPublic)
+async def update_workload_status(
+    session: SessionDep,
+    ctx: TenantContextDep,
+    id: int,
+    status_in: WorkloadStatusUpdate,
+):
+    """
+    Report what the container is doing, and nothing else.
+
+    The row has two writers by design -- the controller compiles the spec, the
+    worker reports the status -- and a whole-row PUT made that an agreement
+    rather than a rule, since it replaces any spec written since the worker
+    read. Only the fields set here are applied, and the model has none of the
+    others to set.
+    """
+    workload = await _writable_workload(session, ctx, id)
+    await workload.update(session, status_in)
+    return workload
+
+
+async def _writable_workload(session, ctx, id: int) -> Workload:
+    if ctx.user is None or ctx.user.kind != PrincipalType.SYSTEM:
+        raise ForbiddenException(message="Only system principals may update workloads")
+
+    workload = await Workload.one_by_id(session, id)
+    if workload is None:
+        raise NotFoundException(message="Workload not found")
+
+    # Cluster-bound service accounts write their own cluster's rows only,
+    # mirroring the read endpoints.
+    if cluster_scoped_system(ctx) and not scoped_cluster_row_visible(ctx, workload):
+        raise NotFoundException(message="Workload not found")
     return workload
 
 

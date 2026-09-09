@@ -2220,7 +2220,7 @@ class TestDeadlineFromWorkload:
             items=[self._workload(deadline=60, started_ago_seconds=None)]
         )
 
-        with patch("gpustack.worker.benchmark_manager.update_resource") as update:
+        with patch("gpustack.worker.benchmark_manager.patch_status") as update:
             mgr._mark_workload_started(SimpleNamespace(id=5))
 
         assert update.call_args[0][1] == 9
@@ -2234,7 +2234,7 @@ class TestDeadlineFromWorkload:
             items=[self._workload(deadline=None, started_ago_seconds=1)]
         )
 
-        with patch("gpustack.worker.benchmark_manager.update_resource") as update:
+        with patch("gpustack.worker.benchmark_manager.patch_status") as update:
             mgr._mirror_execution_state(
                 5, {"state": BenchmarkStateEnum.COMPLETED, "state_message": "done"}
             )
@@ -2251,7 +2251,7 @@ class TestDeadlineFromWorkload:
             items=[self._workload(deadline=None, started_ago_seconds=1)]
         )
 
-        with patch("gpustack.worker.benchmark_manager.update_resource") as update:
+        with patch("gpustack.worker.benchmark_manager.patch_status") as update:
             mgr._mirror_execution_state(5, {"state": "running"})
 
         assert update.call_args[1]["state"] == WorkloadStateEnum.RUNNING
@@ -2265,7 +2265,7 @@ class TestDeadlineFromWorkload:
     def test_a_patch_with_nothing_a_workload_carries_writes_nothing(self):
         mgr = self._manager()
 
-        with patch("gpustack.worker.benchmark_manager.update_resource") as update:
+        with patch("gpustack.worker.benchmark_manager.patch_status") as update:
             mgr._mirror_execution_state(5, {"results": [1, 2, 3]})
 
         update.assert_not_called()
