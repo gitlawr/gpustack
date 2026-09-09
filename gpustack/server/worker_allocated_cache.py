@@ -32,6 +32,7 @@ from sqlmodel import select, or_
 
 from gpustack.policies.base import Allocated
 from gpustack.schemas.models import ModelInstance
+from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 from gpustack.server.cache import delete_cache_by_key, locked_cached
 from gpustack.server.db import async_session
 
@@ -67,6 +68,8 @@ async def get_worker_allocated(worker_id: int) -> Allocated:
     # imports server.services (and services imports this module).
     from gpustack.policies.utils import compute_worker_allocated
 
+    from gpustack.policies.utils import compute_worker_allocated_from_workloads
+
     async with async_session() as session:
         # main: cheap indexed filter.
         # distributed subordinates live inside the distributed_servers JSON
@@ -84,7 +87,23 @@ async def get_worker_allocated(worker_id: int) -> Allocated:
                 )
             )
         ).all()
-    return compute_worker_allocated(rows, worker_id)
+        workloads = await Workload.all_by_fields(
+            session, {"owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE}
+        )
+
+    allocated = compute_worker_allocated(rows, worker_id)
+    # A workload row carries its worker in a column, so the query above --
+    # every distributed instance, because a JSON column cannot be filtered by
+    # worker portably -- becomes an indexed one. Compared rather than swapped:
+    # this decides what the scheduler thinks is free, and reading it low would
+    # overcommit a worker rather than fail visibly.
+    from_workloads = compute_worker_allocated_from_workloads(workloads, worker_id)
+    if from_workloads != allocated:
+        logger.info(
+            f"Workload rows report different allocation for worker {worker_id}: "
+            f"instances {allocated}, rows {from_workloads}"
+        )
+    return allocated
 
 
 async def invalidate_workers_allocated(instances: Iterable[ModelInstance]) -> None:

@@ -28,6 +28,8 @@ from gpustack.utils.lora_model_source import (
     normalized_lora_list,
 )
 
+from gpustack.schemas.workloads import Workload
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,6 +86,63 @@ def compute_worker_allocated(
                     gpu_type is None or mi.gpu_type == gpu_type
                 ):
                     add_vram(sw.computed_resource_claim)
+
+    return allocated
+
+
+def compute_worker_allocated_from_workloads(
+    workloads: List[Workload],
+    worker_id: int,
+    gpu_type: Optional[str] = None,
+) -> Allocated:
+    """
+    The same aggregate as :func:`compute_worker_allocated`, read off workload
+    rows instead of instances and their embedded subordinate lists.
+
+    Takes every model-instance workload rather than only this worker's,
+    because the subordinate branch below filters on the *instance's* gpu type,
+    which lives on the leader's row and that can be on another worker.
+
+    Both quirks of the original are reproduced deliberately, not tidied:
+    a subordinate contributes vram but no ram (the rpc-server side does not
+    hold the model), and it is filtered by the instance's gpu type rather than
+    its own, without the ``is None`` escape the leader gets. The second looks
+    like a defect -- a subordinate whose type differs from the instance's goes
+    uncounted, which under-reports what is allocated -- but it decides
+    placement today, so changing it belongs in its own change.
+    """
+    allocated = Allocated(ram=0, vram={})
+
+    def add_vram(claim):
+        for gpu_index, vram in (claim or {}).get("vram", {}).items():
+            index = int(gpu_index)
+            allocated.vram[index] = allocated.vram.get(index, 0) + vram
+
+    owner_gpu_type = {
+        w.owner_id: w.gpu_type for w in workloads if (w.group_index or 0) == 0
+    }
+
+    for w in workloads:
+        if w.worker_id != worker_id:
+            continue
+        claim = w.computed_resource_claim
+        if (w.group_index or 0) == 0:
+            mismatched = (
+                gpu_type is not None
+                and w.gpu_type is not None
+                and w.gpu_type != gpu_type
+            )
+            if mismatched:
+                continue
+            if claim is not None:
+                allocated.ram += claim.get("ram") or 0
+                if w.gpu_indexes:
+                    add_vram(claim)
+        else:
+            if gpu_type is not None and owner_gpu_type.get(w.owner_id) != gpu_type:
+                continue
+            if claim:
+                add_vram(claim)
 
     return allocated
 
