@@ -81,18 +81,24 @@ worker 报执行状态,服务端把整组折叠回领域状态。折叠先只比
 
 ### 3.1 现状
 
-**账本只覆盖模型实例。**
+**有三本账,不是两本。**
 
-| | 资源声明 | 放置方式 | 进 `Allocated` |
-|---|---|---|---|
-| 模型实例 | `gpu_indexes` + `computed_resource_claim` + `reserved_claims` | 调度器,资源感知 | ✅ |
-| 缓存服务实例 | 无 | 创建时选定 worker,或 per_node 铺开 | ❌ |
-| 基准测试 | 无 | 创建时指定 | ❌ |
-| GPU instance | 独立子系统(CRD + 自有控制器) | k8s | ❌(另一本账) |
+| 路径 | 容量从哪里读 | 谁决定放置 |
+|---|---|---|
+| 模型实例(常规) | gpustack 的 `Allocated`,只累加 ModelInstance 行 | gpustack 调度器 |
+| 模型实例(**vGPU**,`model.gpu_type_selector`) | **operator 的 `Devices` CRD**,`status.groups[].accelerators[].remaining` | gpustack 选节点,operator 按需切分 |
+| GPU instance | operator(`Instance` CRD,分配结果回写到 status) | operator / k8s |
+| 缓存服务实例、基准测试 | **无** | 创建时指定 worker,或 per_node 铺开 |
 
-缓存服务用 CUDA-IPC 映射 KV 缓冲区,**实际占显存但对调度器不可见**——调度器会把模型实例排到已被缓存服务占用的卡上。
+三件事值得单独说:
 
-**k8s 集群上,模型服务绕开了 k8s 调度器。** worker 以 DaemonSet 运行,gpustack 自己选节点和卡,再由 runtime 的 k8s deployer 建容器。等于在 k8s 里跑第二个调度器,而它看不见非 gpustack 的 Pod。
+**缓存服务对调度器不可见。** 它用 CUDA-IPC 映射 KV 缓冲区,实际占显存,但编译出的 Workload 行连 `computed_resource_claim` 都不填。调度器会把模型实例排到已被它占用的卡上。基准测试同理(多数是 CPU 负载,但"没声明"和"不占用"目前无法区分)。
+
+**vGPU 那条路已经把容量账交给了 operator。** `VGPUResourceFitSelector` 读的是 `Devices` CRD 的 `remaining`,不用 `Allocated`。这不是权宜之计——分区是 operator 的 device-manager 按需切的,只有它知道还剩多少。
+
+**所以"统一账本"在 k8s 上不是要新建一本,而是要把另外两个消费者也接进 operator 那本。** 常规模型实例和缓存服务是缺口,GPU instance 和 vGPU 模型实例已经在里面。
+
+**另一个缺口:常规模型服务在 k8s 上绕开了 k8s 调度器。** worker 以 DaemonSet 运行,gpustack 自己选节点和卡,再由 runtime 的 k8s deployer 建容器。等于在 k8s 里跑第二个调度器,而它看不见非 gpustack 的 Pod——包括 GPU instance 的 Pod。
 
 ### 3.2 第一步:让账本覆盖所有 Workload(与集群类型无关)
 
@@ -122,6 +128,8 @@ k8s 集群       资源需求估算    →    k8s / Volcano   →  从 Pod 观�
 
 **为什么这次重构让它变便宜**:Workload 已经把 **binding 和 spec、status 分开**了。谁来填 binding 是一个可以按集群类型不同的细节,**读者不用改**——资源核算、放置查询、日志路由都只读 binding,不关心它从哪来。
 
+**而且这不是新架构,是把已有的一条路推广开。** GPU instance 现在就是这么工作的:gpustack 写 `Instance` CRD,集群里的 operator 变成 Pod,gpustack 从 CRD 的 status 读回 `node_name`、设备分配、Pod IP。常规模型服务反而是那个特例。
+
 具体形态:
 
 - **k8s 集群**:controller 把 Workload 编译成 Pod/Job(资源需求作为 requests/limits),不填 `worker_id`/`gpu_indexes`。k8s 调度完成后,从 Pod 的 `nodeName` 和设备分配**观测回写**这些字段。这条路径和现有的状态折叠是同一个形状(观测 → 聚合 → 写回领域资源),已有机制可复用。
@@ -132,15 +140,29 @@ k8s 集群       资源需求估算    →    k8s / Volcano   →  从 Pod 观�
 
 ### 3.4 GPU instance 并入同一本账
 
-目标是"不再区分集群用于 model service 还是 gpu service"。自然的做法是让 **GPU instance 成为 Workload 的又一种 owner**——它本来就是"在某个节点上跑的一个容器",符合这张表的不变式。
+读过 `gpu_instances/` 之后,结论比预想的顺:**它已经是这个形状了。**
+
+`GPUInstance` 上有 `GPUInstanceSpec`(镜像、命令、端口、env、resources、卷)和 `GPUInstanceStatus`(`phase` / `node_name` / `pod_ips` / `allocations`),binding 是从 CRD status **观测回来的**,不是我们写的。换句话说 GPU instance 与 Workload 的差别不在数据模型,**在运行时是谁**:一个由集群里的 operator 跑,一个由我们的 worker 跑。
+
+那些看起来"多出来"的东西并不需要 Workload 承载:
+
+| 资源 | 形态 | 归属 |
+|---|---|---|
+| 持久卷、卷类型 | 独立 CRD + 独立表 | owner 侧领域概念,编译进 spec 的 `volume` |
+| SSH 公钥 | 同上 | 同上 |
+| instance type / flavor | 集群级 CRD | 目录,不是实例的一部分 |
+
+这和 Model 与模型实例 Workload 的关系是同一种:目录、配置、凭据留在 owner 侧,**编译**成执行层能懂的东西。
+
+所以并入的路径是:GPUInstance 成为第五种 `owner_kind`,它的 controller 把 spec 编译成 Workload,binding 从 CRD status 观测回写——正是 §3.3 给 k8s 定的那条路。
 
 并入之后:
 
-- 一本账:`Allocated` 由所有 Workload 聚合而来,不管 owner 是模型、缓存、基准还是 GPU instance
-- 一套回收:孤儿容器回收、级联删除的三层机制对它同样适用
-- k8s 上两者都由 k8s 调度,不再是"一个走 CRD、一个走我们的调度器"
+- **一本账**:`Allocated` 由所有 Workload 聚合,不区分 owner
+- **一套回收**:孤儿回收和级联删除的三层机制同样适用
+- **一套横向能力**:日志、指标目标发现、优雅终止不用再实现第二遍
 
-**待确认**:GPU instance 现在带持久卷、SSH 公钥、flavor 等资源,这些是 owner 侧的领域语义(编译进 Workload 的 spec),还是需要 Workload 承载新的概念。需要看一遍 `gpu_instances/` 的实际形态再定,本文不预判。
+**真正的开放问题只剩一个,而且不在数据模型上**:GPU instance 的运行时是 operator,`WorkloadPlan` 走不到它。要么 Workload 的 spec 增加"由谁执行"这一维(我们的 worker / 集群 operator),要么承认这类 Workload 的 deployer 就是"写 CRD 并观测"。后者更接近现状,也更像 §3.3 里 k8s 集群本来就要做的事——**两者其实是同一件事的两个说法**。
 
 ### 3.5 复杂集成只在 k8s 做
 
@@ -159,6 +181,8 @@ Volcano、JobSet 这类只在 k8s 生态存在的东西,不必在 Docker 集群�
 | 3. k8s 集群改为观测回写 binding | 2 | 是(按集群类型) |
 | 4. helm 部署的 Pod 同步入库 | 3 | 是 |
 | 5. GPU instance 并入 Workload | 3 | 需数据迁移 |
+
+第 5 步排在第 3 步之后不是偶然:第 3 步做完之后,"binding 从 CRD/Pod 观测回写"已经是一条走通的路径,GPU instance 并入就只是再挂一个 `owner_kind`,而不是同时发明机制和迁移数据。
 
 **最大的风险是账本口径**:如果一个负载既被"预留"(我们写 binding)又被"观测"(从 Pod 读回),会重复计数。所以每种集群类型必须只有一个 binding 的来源,这也是 §3.3 那张表要明确到"binding 从哪来"这一列的原因。
 
