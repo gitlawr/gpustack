@@ -432,6 +432,7 @@ class _Fold(NamedTuple):
     folded: Optional[dict]
     reason: Optional[FoldDeclineReason]
     distributed: bool
+    workloads: tuple = ()
 
 
 _FOLD_FLAPPING_AT = 5
@@ -495,6 +496,21 @@ STARTING: the sequence is INITIALIZING -> DOWNLOADING -> STARTING, so reporting
 INITIALIZING from either walks the lifecycle backwards. Worse, it does not
 settle -- the controller writes DOWNLOADING from the file events, the fold puts
 it back, and the two take turns."""
+
+
+def _freshness(instance, workloads) -> str:
+    """When the instance and each of its rows were last written.
+
+    A correction is either the fold reading a row the instance has moved past
+    or the two genuinely disagreeing, and the two are told apart only by which
+    was written last. Two diagnoses of the same correction were wrong for want
+    of this, so it goes on the line rather than being reasoned about.
+    """
+    rows = ", ".join(
+        f"g{w.group_index or 0}={w.state}@{getattr(w, 'updated_at', None)}"
+        for w in sorted(workloads or [], key=lambda w: w.group_index or 0)
+    )
+    return f"(instance@{getattr(instance, 'updated_at', None)} rows: {rows})"
 
 
 def _with_runtime(folded: dict, workloads, instance=None) -> dict:
@@ -616,6 +632,7 @@ class ModelInstanceWorkloadStateController:
                     _with_runtime(spawned, workloads, instance),
                     None,
                     distributed,
+                    tuple(workloads),
                 )
             # Nothing is waiting on a container here -- the instance was
             # freshly scheduled, or is preparing model files. Whatever its
@@ -625,19 +642,39 @@ class ModelInstanceWorkloadStateController:
             # restart. Its own STARTING is deliberately not in that set; that
             # is where it waits for the fold to report the container running.
             return _Fold(
-                instance, None, FoldDeclineReason.INSTANCE_NOT_EXECUTING, distributed
+                instance,
+                None,
+                FoldDeclineReason.INSTANCE_NOT_EXECUTING,
+                distributed,
+                tuple(workloads),
             )
 
         if rows_are_behind(instance, workloads):
-            return _Fold(instance, None, FoldDeclineReason.ROWS_BEHIND, distributed)
+            return _Fold(
+                instance,
+                None,
+                FoldDeclineReason.ROWS_BEHIND,
+                distributed,
+                tuple(workloads),
+            )
 
         folded = aggregate_instance_state(
             workloads, await self._follower_worker_ips(session, workloads)
         )
         if folded is None:
-            return _Fold(instance, None, fold_decline_reason(workloads), distributed)
+            return _Fold(
+                instance,
+                None,
+                fold_decline_reason(workloads),
+                distributed,
+                tuple(workloads),
+            )
         return _Fold(
-            instance, _with_runtime(folded, workloads, instance), None, distributed
+            instance,
+            _with_runtime(folded, workloads, instance),
+            None,
+            distributed,
+            tuple(workloads),
         )
 
     async def _reconcile(self, instance_id: int):
@@ -685,7 +722,8 @@ class ModelInstanceWorkloadStateController:
                 logger.info(
                     f"Workload fold corrected model instance {instance.name} "
                     f"(id={instance.id}): {changing} "
-                    f"[agreed={_tally(self._agreed)} corrected={self._corrected}]"
+                    f"[agreed={_tally(self._agreed)} corrected={self._corrected}] "
+                    f"{_freshness(instance, result.workloads)}"
                 )
                 if self._corrections[instance.id] == _FOLD_FLAPPING_AT:
                     # Correcting one instance over and over is not the fold

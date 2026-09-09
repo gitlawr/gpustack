@@ -731,3 +731,33 @@ async def test_distributed_agreements_are_counted_in_both_modes(
         await controller._reconcile(3)
 
     assert controller._agreed_distributed == {"running": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_correction_says_when_each_side_was_written(monkeypatch, caplog):
+    """Two diagnoses of the same correction were wrong for want of this. A
+    correction is either the fold reading a row the instance has moved past or
+    the two genuinely disagreeing, and only the write times tell them apart --
+    so they go on the line rather than being reasoned about afterwards."""
+    from datetime import datetime, timezone
+
+    written = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    instance = _instance(state="error")
+    instance.updated_at = written
+    rows = _group(0)
+    rows[0].state = "running"
+    rows[0].updated_at = written
+
+    controller = ModelInstanceWorkloadStateController()
+    with _fold(
+        monkeypatch,
+        instance,
+        folded={"state": "running"},
+        authoritative=True,
+        workloads=rows,
+    ):
+        with caplog.at_level(logging.INFO):
+            await controller._reconcile(3)
+
+    assert "instance@2026-01-01" in caplog.text
+    assert "g0=running@2026-01-01" in caplog.text
