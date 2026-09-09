@@ -42,6 +42,7 @@ from gpustack.routes.worker.logs import (
 )
 from gpustack.worker.model_meta import get_meta_from_running_instance
 from gpustack.client import ClientSet
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.models import (
     BackendEnum,
     Model,
@@ -521,15 +522,7 @@ class ServeManager:
                             }
                         # Get patch dict for subordinate worker.
                         else:
-                            sw_pos = next(
-                                (
-                                    i
-                                    for i, sw in enumerate(
-                                        model_instance.distributed_servers.subordinate_workers
-                                    )
-                                    if sw.worker_id == self._worker_id
-                                ),
-                            )
+                            sw_pos = self._own_subordinate_position(model_instance)
                             sw = model_instance.distributed_servers.subordinate_workers[
                                 sw_pos
                             ]
@@ -613,15 +606,7 @@ class ServeManager:
                     # STARTING forever. The branch above already marks a
                     # subordinate ERROR whatever its mode, so skipping this one
                     # also made the reporting one-way.
-                    sw_pos = next(
-                        (
-                            i
-                            for i, sw in enumerate(
-                                model_instance.distributed_servers.subordinate_workers
-                            )
-                            if sw.worker_id == self._worker_id
-                        ),
-                    )
+                    sw_pos = self._own_subordinate_position(model_instance)
                     sw = model_instance.distributed_servers.subordinate_workers[sw_pos]
                     if sw.state == ModelInstanceStateEnum.RUNNING:
                         continue
@@ -1224,13 +1209,7 @@ class ServeManager:
         sw_pos: Optional[int] = None
         sw: Optional[ModelInstanceSubordinateWorker] = None
         if not is_main_worker:
-            sw_pos = next(
-                (
-                    i
-                    for i, sw in enumerate(mi.distributed_servers.subordinate_workers)
-                    if sw.worker_id == self._worker_id
-                ),
-            )
+            sw_pos = self._own_subordinate_position(mi)
             sw = mi.distributed_servers.subordinate_workers[sw_pos]
 
         try:
@@ -1471,6 +1450,23 @@ class ServeManager:
                 f"Failed to mirror execution state of model instance "
                 f"{model_instance_id} onto its workload: {e}"
             )
+
+    def _own_subordinate_position(self, mi) -> int:
+        """
+        Where this worker sits in the instance's subordinate list.
+
+        Raises StopIteration if it is not there, as the inline lookups this
+        replaces did -- every caller reaches it having already established
+        that it is a subordinate of this instance, so absence means the row
+        and the worker disagree about that, and swallowing it would start a
+        container nothing reports on. The one caller that tolerates absence
+        asks for it separately.
+        """
+        return next(
+            p.subordinate_index
+            for p in subordinate_placements(mi)
+            if p.worker_id == self._worker_id
+        )
 
     def _find_workload(self, model_instance_id: int, group_index: int):
         """The instance's workload at that position in its group, from the

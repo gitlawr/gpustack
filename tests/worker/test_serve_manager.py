@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 from unittest.mock import ANY, MagicMock, patch
 
 from gpustack.schemas.models import (
@@ -1067,3 +1068,30 @@ def test_a_subordinate_already_reported_running_writes_nothing():
     update_model_instance = _sync_as_subordinate(manager, clientset, model_instance)
 
     update_model_instance.assert_not_called()
+
+
+def test_a_worker_finds_its_own_position_in_the_subordinate_list():
+    """The patch key a subordinate writes under is its index, and the same
+    lookup was inlined at four call sites. Getting it wrong writes another
+    node's state."""
+    manager, _ = _build_serve_manager(worker_id=2)
+    mi = _distributed_subordinate_view(ModelInstanceStateEnum.PENDING)
+    mi.distributed_servers.subordinate_workers.insert(
+        0,
+        ModelInstanceSubordinateWorker(
+            worker_id=9, worker_name="worker-9", worker_ip="10.0.0.9"
+        ),
+    )
+
+    assert manager._own_subordinate_position(mi) == 1
+
+
+def test_a_worker_that_is_not_a_subordinate_is_not_silently_zero():
+    """Every caller reaches this having established it is one, so absence
+    means the row and the worker disagree; returning a position anyway would
+    have it write over the first subordinate's state."""
+    manager, _ = _build_serve_manager(worker_id=99)
+    mi = _distributed_subordinate_view(ModelInstanceStateEnum.PENDING)
+
+    with pytest.raises(StopIteration):
+        manager._own_subordinate_position(mi)
