@@ -115,7 +115,9 @@ worker 报执行状态,服务端把整组折叠回领域状态。折叠先只比
 
 **vGPU 那条路已经把容量账交给了 operator。** `VGPUResourceFitSelector` 读的是 `Devices` CRD 的 `remaining`,不用 `Allocated`。这不是权宜之计——分区是 operator 的 device-manager 按需切的,只有它知道还剩多少。
 
-**所以"统一账本"在 k8s 上不是要新建一本,而是要把另外两个消费者也接进 operator 那本。** 常规模型实例和缓存服务是缺口,GPU instance 和 vGPU 模型实例已经在里面。
+**k8s 上还有一层准入,模型服务也没接:Kueue。** gpustack 自己分发并由 operator 安装 Kueue(镜像随版本固定),按 GPU 型号建 ClusterQueue(队列名形如 `gpustack-nvidia-geforce-rtx-4090-<suffix>`),operator 的 Pod webhook 把一份**以显存为标尺**的 credit 请求折进 Kueue。计量侧写得很直白:**"kueue admits → resource is reserved"**——在 k8s 上,"占住了资源"这件事的定义就是 Kueue 准入。
+
+**所以"统一账本"在 k8s 上不是要新建一本,而是要把缺席的消费者接进已有的那套。** GPU instance 走完整的一套(Devices + Kueue),vGPU 模型实例接了 Devices 但没接 Kueue,常规模型实例和缓存服务两样都没有。
 
 **另一个缺口:常规模型服务在 k8s 上绕开了 k8s 调度器。** worker 以 DaemonSet 运行,gpustack 自己选节点和卡,再由 runtime 的 k8s deployer 建容器。等于在 k8s 里跑第二个调度器,而它看不见非 gpustack 的 Pod——包括 GPU instance 的 Pod。
 
@@ -140,10 +142,12 @@ Workload 表已经有 `gpu_indexes` / `computed_resource_claim` / `reserved_clai
 ```
               评估（我们）          调度（谁）        binding 从哪来
 Docker 集群    资源需求估算    →    gpustack 调度器  →  调度器写入
-k8s 集群       资源需求估算    →    k8s / Volcano   →  从 Pod 观测回写
+k8s 集群       换算成 credit   →    Kueue 准入 + k8s →  从 Pod 观测回写
 ```
 
-**为什么这个划分是对的**:模型需要多少显存是我们的领域知识(和后端、量化、上下文长度有关),k8s 不懂;而哪个节点有空、和别的工作负载怎么抢,是 k8s 的领域,我们不该在它旁边再算一遍——尤其算不准,因为看不见非 gpustack 的 Pod。
+**为什么这个划分是对的**:模型需要多少显存是我们的领域知识(和后端、量化、上下文长度有关),k8s 不懂;而哪个节点有空、和别的工作负载怎么抢,是 k8s 的领域,我们不该在它旁边再算一遍——尤其算不准,因为看不见非 gpustack 的 Pod,包括 GPU instance 的。
+
+**而"交给 k8s"在这里有具体所指,不是泛泛而谈**:就是接入 GPU instance 已经在走的 Kueue——按 GPU 型号的 ClusterQueue、以显存为标尺的 credit 请求、"准入即占用"的语义。模型实例要做的是把资源评估结果换算成同一把尺子上的 credit,而不是发明新机制。
 
 **为什么这次重构让它变便宜**:Workload 已经把 **binding 和 spec、status 分开**了。谁来填 binding 是一个可以按集群类型不同的细节,**读者不用改**——资源核算、放置查询、日志路由都只读 binding,不关心它从哪来。
 
@@ -185,9 +189,11 @@ k8s 集群       资源需求估算    →    k8s / Volcano   →  从 Pod 观�
 
 ### 3.5 复杂集成只在 k8s 做
 
-Volcano、JobSet 这类只在 k8s 生态存在的东西,不必在 Docker 集群上找对应物。Workload 的 spec 里带调度提示(队列、gang 大小、优先级),**k8s deployer 映射,Docker deployer 忽略**。
+k8s 生态里的排队、配额、gang 调度,不必在 Docker 集群上找对应物。Workload 的 spec 里带调度提示(队列、gang 大小、优先级),**k8s deployer 映射,Docker deployer 忽略**。
 
-分布式实例正好落在这里:`group_key` 天然对应 gang,而 `INITIALIZE_LATER`(从属节点等主节点初始化后再启动)这类启动顺序协调,在 k8s 上应该交给 JobSet/LeaderWorkerSet,而不是继续由我们的 worker 互相等待。
+**Kueue 已经是这条路上的既成事实**,不是待选项:它由 operator 安装,承担 GPU instance 的准入与配额。模型实例要做的是加入,不是另选一套——再引入第二个排队器会让同一批卡上出现两个互不知情的配额视图,正是 §3.1 那三本账的翻版。
+
+启动顺序是仍需决定的部分:`group_key` 天然对应 gang,但 `INITIALIZE_LATER`(从属节点等主节点初始化后再启动)现在由我们的 worker 互相等待实现。在 k8s 上这应该交给 JobSet/LeaderWorkerSet 之类的编排原语,与 Kueue 的 gang 准入配合,而不是让 worker 继续自己协调。
 
 ### 3.6 风险与顺序
 
@@ -205,4 +211,6 @@ Volcano、JobSet 这类只在 k8s 生态存在的东西,不必在 Docker 集群�
 
 **最大的风险是账本口径**:如果一个负载既被"预留"(我们写 binding)又被"观测"(从 Pod 读回),会重复计数。所以每种集群类型必须只有一个 binding 的来源,这也是 §3.3 那张表要明确到"binding 从哪来"这一列的原因。
 
-**第二个风险是 k8s 上的准入**:交给 k8s 调度之后,我们不再能保证"排得下"。资源评估仍要做,但它从"分配"降级为"准入检查 + requests",排不下时是 Pod Pending 而不是我们拒绝。这是行为变化,需要在 UI 上如实呈现,不能假装还是原来的语义。
+**第二个风险是准入语义变了**:交给 Kueue 之后,我们不再在创建时判断"排不排得下"。资源评估仍要做,但它从"分配"变成"换算成 credit 请求",排不下的结果是 **Workload 被挂起等待准入**,而不是我们当场拒绝。
+
+这未必更差——排队本来就比"直接拒绝"更贴近用户想要的行为,而且 Kueue 的队列状态是可以展示的。但它**是行为变化**:创建成功不再等于马上会跑。UI 要如实呈现"在队列里",不能沿用原来的措辞假装语义没变。
