@@ -17,6 +17,7 @@ from gpustack_runtime.deployer import (
 )
 from gpustack_runtime.deployer.__utils__ import compare_versions
 from gpustack_runtime.detector import ManufacturerEnum, manufacturer_to_backend
+from gpustack.utils.model_instance_workers import instance_placements
 from gpustack.schemas.models import (
     ModelInstance,
     SpeculativeAlgorithmEnum,
@@ -994,14 +995,13 @@ def cal_multinode_topology(
     :func:`validate_multinode_topology`, then layers on the node-perspective
     fields (``my_idx`` / ``start_rank`` / ``is_follower``).
     """
-    g_main = len(model_instance.gpu_indexes) if model_instance.gpu_indexes else 1
-    subordinate = (
-        model_instance.distributed_servers.subordinate_workers
-        if model_instance.distributed_servers
-        and model_instance.distributed_servers.subordinate_workers
-        else []
-    )
-    gpu_per_node = [g_main] + [len(s.gpu_indexes or []) for s in subordinate]
+    # A leader with no GPUs recorded counts as one node's worth, a follower
+    # with none counts as none. Kept as it was: the ranks below are derived
+    # from these counts, and shifting one shifts every rank after it.
+    gpu_per_node = [
+        (len(p.gpu_indexes or []) or 1) if p.is_leader else len(p.gpu_indexes or [])
+        for p in instance_placements(model_instance)
+    ]
     nnodes = len(gpu_per_node)
 
     # This node's physical rank.

@@ -848,3 +848,32 @@ def test_ray_path_still_pins_vllm_port_to_connecting_port():
     env = _distributed_env("dp_only", executor_backend="ray")
     assert env["VLLM_PORT"] == "40063"
     assert "VLLM_DP_MASTER_PORT" not in env
+
+
+# ---------------------------------------------------------------------------
+# Node counts read off the placements
+# ---------------------------------------------------------------------------
+
+
+def test_a_leader_with_no_recorded_gpus_still_counts_as_a_node():
+    """The leader's count falls back to one where a follower's does not, so
+    reading both the same way silently drops a node and shifts every rank
+    after it. Nothing covered this until the two shapes were read as one."""
+    mi = _instance(0, 8)
+
+    out = cal_multinode_topology(mi, _meta("leader"))
+
+    assert out.nnodes == 2
+    assert out.node_rank == 0
+
+
+def test_a_follower_with_no_recorded_gpus_contributes_none():
+    """The other half of the same asymmetry, and why it cannot be tidied into
+    one expression: the follower's zero survives into the node capacities and
+    the cluster is rejected as heterogeneous. Giving it the leader's fallback
+    would let it through and place ranks on a node with nothing to run them.
+    """
+    mi = _instance(8, 0)
+
+    with pytest.raises(ValueError, match="differing GPU counts"):
+        cal_multinode_topology(mi, _meta("leader"))

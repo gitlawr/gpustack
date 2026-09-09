@@ -158,6 +158,7 @@ from gpustack.server.services import (
 from gpustack.server.lora_model_routes import cleanup_orphan_lora_routes
 from gpustack.utils.model_instance_workers import (
     get_model_instance_worker_match,
+    subordinate_placements,
     get_worker_matches_from_workloads,
     report_match_disagreement,
 )
@@ -3389,9 +3390,7 @@ def _get_worker_ids_for_file_download(
         and instance.distributed_servers.download_model_files
     ):
         worker_ids += [
-            item.worker_id
-            for item in instance.distributed_servers.subordinate_workers or []
-            if item.worker_id
+            p.worker_id for p in subordinate_placements(instance) if p.worker_id
         ]
 
     return worker_ids
