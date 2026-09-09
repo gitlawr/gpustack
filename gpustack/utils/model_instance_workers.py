@@ -188,35 +188,41 @@ def instance_placements(instance: ModelInstance) -> list:
             download_progress=instance.download_progress,
         )
     ]
+    return placements + subordinate_placements(instance)
+
+
+def subordinate_placements(instance: ModelInstance) -> list:
+    """
+    Everything but the instance's own worker.
+
+    Built without the leader rather than filtered out of the full list: the
+    callers that want only these are on the worker, holding an instance whose
+    own fields they have no business reading, and constructing the leader to
+    discard it would make them depend on all of them.
+    """
     subordinates = (
         instance.distributed_servers.subordinate_workers
         if instance.distributed_servers
         and instance.distributed_servers.subordinate_workers
         else []
     )
-    for index, sw in enumerate(subordinates):
-        placements.append(
-            InstancePlacement(
-                group_index=index + 1,
-                worker_id=sw.worker_id,
-                worker_name=sw.worker_name,
-                worker_ip=sw.worker_ip,
-                worker_ifname=sw.worker_ifname,
-                gpu_type=sw.gpu_type,
-                gpu_indexes=sw.gpu_indexes,
-                gpu_addresses=sw.gpu_addresses,
-                computed_resource_claim=sw.computed_resource_claim,
-                ports=sw.ports,
-                pid=sw.pid,
-                arguments=sw.arguments,
-                state=sw.state,
-                state_message=sw.state_message,
-                download_progress=sw.download_progress,
-            )
+    return [
+        InstancePlacement(
+            group_index=index + 1,
+            worker_id=sw.worker_id,
+            worker_name=sw.worker_name,
+            worker_ip=sw.worker_ip,
+            worker_ifname=sw.worker_ifname,
+            gpu_type=sw.gpu_type,
+            gpu_indexes=sw.gpu_indexes,
+            gpu_addresses=sw.gpu_addresses,
+            computed_resource_claim=sw.computed_resource_claim,
+            ports=sw.ports,
+            pid=sw.pid,
+            arguments=sw.arguments,
+            state=sw.state,
+            state_message=sw.state_message,
+            download_progress=sw.download_progress,
         )
-    return placements
-
-
-def subordinate_placements(instance: ModelInstance) -> list:
-    """Everything but the instance's own worker."""
-    return [p for p in instance_placements(instance) if not p.is_leader]
+        for index, sw in enumerate(subordinates)
+    ]

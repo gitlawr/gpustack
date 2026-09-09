@@ -19,6 +19,7 @@ from gpustack_runtime.deployer import (
 )
 from gpustack_runtime.envs import to_bool
 
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.models import ModelInstanceDeploymentMetadata
 from gpustack.utils.command import find_parameter, format_backend_parameters
 from gpustack.utils.envs import sanitize_env
@@ -1124,12 +1125,7 @@ class AscendMindIEServer(InferenceServer):
             f"Starting Ascend MindIE model instance: {self._model_instance.name}"
         )
         # Prepare distributed information.
-        dservers = self._model_instance.distributed_servers
-        subworkers = (
-            dservers.subordinate_workers
-            if dservers and dservers.subordinate_workers
-            else []
-        )
+        subworkers = subordinate_placements(self._model_instance)
         deployment_metadata = self._get_deployment_metadata()
 
         # Root path is defined by in Dockerfile ENV

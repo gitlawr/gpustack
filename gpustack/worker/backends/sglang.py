@@ -18,6 +18,7 @@ from gpustack_runtime.deployer import (
 from gpustack_runtime.deployer.__utils__ import compare_versions
 
 from gpustack.scheduler.model_registry import is_multimodal_model
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.models import (
     LoraListEntry,
     ModelInstance,
@@ -590,9 +591,7 @@ class SGLangServer(InferenceServer):
         ):
             return []
 
-        subordinate_workers = (
-            self._model_instance.distributed_servers.subordinate_workers
-        )
+        subordinate_workers = subordinate_placements(self._model_instance)
         total_nodes = len(subordinate_workers) + 1  # +1 for the current node
 
         # Find the current node's rank
