@@ -117,6 +117,61 @@ def named_ports(port: Optional[int], ports: Optional[List[int]]) -> Dict[str, in
     }
 
 
+def instance_ports(named: Optional[Dict[str, int]]):
+    """
+    ``named_ports`` read backwards: the (port, ports) an instance carries.
+
+    Only the first is named, so the rest are recovered by position. A gap in
+    the sequence ends it rather than being skipped -- the list is positional
+    on the instance and closing a hole would shift everything after it.
+    """
+    if not named:
+        return None, None
+    ordered = []
+    if SERVICE_PORT in named:
+        ordered.append(named[SERVICE_PORT])
+    index = 1
+    while f"port{index}" in named:
+        ordered.append(named[f"port{index}"])
+        index += 1
+    if not ordered:
+        return None, None
+    return ordered[0], ordered
+
+
+_RUNTIME_FIELDS = ("pid", "restart_count", "last_restart_time")
+
+
+def aggregate_instance_runtime(workloads: List[Workload]) -> dict:
+    """
+    What the leader's container is, as opposed to how it is doing.
+
+    The worker writes these onto the instance today and stops at stage 3 step
+    4; the fold has to carry them or ``mi.port`` -- which is what requests are
+    proxied to -- goes stale the moment it does.
+
+    A field the row has nothing for is left out rather than written as None.
+    The row is filled by the mirror, so it lags the instance by one write, and
+    clearing a live port because the row has not caught up would take the
+    instance off the air for a reason that has nothing to do with it.
+    """
+    leader = next((w for w in workloads if (w.group_index or 0) == 0), None)
+    if leader is None:
+        return {}
+
+    runtime = {
+        name: getattr(leader, name, None)
+        for name in _RUNTIME_FIELDS
+        if getattr(leader, name, None) is not None
+    }
+    port, ports = instance_ports(leader.ports)
+    if port is not None:
+        runtime["port"] = port
+    if ports:
+        runtime["ports"] = ports
+    return runtime
+
+
 def compile_model_instance(mi: ModelInstance) -> List[Workload]:
     """
     The workloads that run a model instance.

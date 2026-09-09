@@ -88,6 +88,7 @@ from gpustack.server.benchmark_workloads import compile_benchmark
 from gpustack.server.model_instance_workloads import (
     AWAITING_EXECUTION_STATES,
     FoldDeclineReason,
+    aggregate_instance_runtime,
     aggregate_instance_state,
     fold_decline_reason,
     spec_differs,
@@ -495,6 +496,16 @@ settle -- the controller writes DOWNLOADING from the file events, the fold puts
 it back, and the two take turns."""
 
 
+def _with_runtime(folded: dict, workloads) -> dict:
+    """The fold's verdict plus what the leader's container is.
+
+    Carried on the same write rather than separately: they come from one row,
+    and splitting them would publish two events per change to everything
+    watching instances.
+    """
+    return {**aggregate_instance_runtime(workloads), **folded}
+
+
 def _spawned_but_not_reported(instance, workloads) -> Optional[dict]:
     """
     INITIALIZING, when the leader's container exists and the instance has not
@@ -599,7 +610,9 @@ class ModelInstanceWorkloadStateController:
         if instance.state in AWAITING_EXECUTION_STATES:
             spawned = _spawned_but_not_reported(instance, workloads)
             if spawned is not None:
-                return _Fold(instance, spawned, None, distributed)
+                return _Fold(
+                    instance, _with_runtime(spawned, workloads), None, distributed
+                )
             # Nothing is waiting on a container here -- the instance was
             # freshly scheduled, or is preparing model files. Whatever its
             # workloads say describes a run that is over: after a restart the
@@ -616,7 +629,7 @@ class ModelInstanceWorkloadStateController:
         )
         if folded is None:
             return _Fold(instance, None, fold_decline_reason(workloads), distributed)
-        return _Fold(instance, folded, None, distributed)
+        return _Fold(instance, _with_runtime(folded, workloads), None, distributed)
 
     async def _reconcile(self, instance_id: int):
         try:

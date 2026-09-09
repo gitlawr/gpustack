@@ -214,8 +214,20 @@ def _fold(monkeypatch, instance, folded, authoritative=False, workloads=None):
 
 
 def _instance(**overrides):
+    # The runtime fields line up with _group's leader: the fold carries them
+    # alongside the state now, so an instance without them reads as one the
+    # fold has to correct.
     fields = dict(
-        id=3, name="mi", state="running", state_message="", update=AsyncMock()
+        id=3,
+        name="mi",
+        state="running",
+        state_message="",
+        port=8000,
+        ports=[8000],
+        pid=None,
+        restart_count=0,
+        last_restart_time=None,
+        update=AsyncMock(),
     )
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -459,8 +471,18 @@ async def test_the_tally_separates_agreements_about_a_distributed_group(monkeypa
 
 
 def _group(followers: int):
+    """Rows shaped like the real ones: the fold reads the leader's runtime
+    fields off them, so a stub with only a position hides that."""
     return [
-        SimpleNamespace(group_index=i, worker_id=100 + i) for i in range(followers + 1)
+        SimpleNamespace(
+            group_index=i,
+            worker_id=100 + i,
+            ports={"service": 8000 + i},
+            pid=None,
+            restart_count=0,
+            last_restart_time=None,
+        )
+        for i in range(followers + 1)
     ]
 
 

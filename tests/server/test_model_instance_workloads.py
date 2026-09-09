@@ -34,7 +34,9 @@ from gpustack.server.model_instance_workloads import (
     FoldDeclineReason,
     aggregate_instance_state,
     SPEC_FIELDS,
+    aggregate_instance_runtime,
     fold_decline_reason,
+    instance_ports,
     to_workload_state,
     compile_model_instance,
     named_ports,
@@ -749,3 +751,59 @@ def test_a_worker_that_changes_address_propagates():
     spec = workload_spec(compile_model_instance(mi)[0])
 
     assert spec.worker_ip == "10.0.0.9"
+
+
+# ---------------------------------------------------------------------------
+# What the container is, as opposed to how it is doing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "port,ports",
+    [(8000, [8000, 8001, 8002]), (8000, [8000]), (8000, None), (None, None)],
+)
+def test_ports_survive_the_round_trip(port, ports):
+    """Only the first is named; the rest are recovered by position. mi.port is
+    what requests are proxied to, so a shift here sends them nowhere."""
+    assert instance_ports(named_ports(port, ports)) == (
+        port,
+        [port] if port is not None and not ports else ports,
+    )
+
+
+def test_a_gap_in_the_sequence_ends_it():
+    """The list is positional on the instance, so closing a hole would shift
+    everything after it onto the wrong port."""
+    assert instance_ports({"service": 8000, "port2": 8002}) == (8000, [8000])
+
+
+def test_the_runtime_comes_from_the_leader():
+    workloads = [
+        _workload(0, WorkloadStateEnum.RUNNING),
+        _workload(1, WorkloadStateEnum.RUNNING),
+    ]
+    workloads[0].ports = {"service": 8000, "port1": 8001}
+    workloads[0].pid = 4242
+    workloads[1].ports = {"service": 9000}
+    workloads[1].pid = 5353
+
+    runtime = aggregate_instance_runtime(workloads)
+
+    assert runtime["port"] == 8000
+    assert runtime["ports"] == [8000, 8001]
+    assert runtime["pid"] == 4242
+
+
+def test_a_field_the_row_has_nothing_for_is_left_alone():
+    """The row is filled by the mirror, so it lags the instance by one write.
+    Clearing a live port because the row has not caught up would take the
+    instance off the air for a reason unrelated to it."""
+    workload = _workload(0, WorkloadStateEnum.RUNNING)
+    workload.ports = None
+    workload.pid = None
+
+    runtime = aggregate_instance_runtime([workload])
+
+    assert "port" not in runtime
+    assert "ports" not in runtime
+    assert "pid" not in runtime
