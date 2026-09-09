@@ -473,6 +473,45 @@ def _tally(counts: Dict[Any, int]) -> str:
     )
 
 
+_BEFORE_SPAWNING = frozenset(
+    {
+        ModelInstanceStateEnum.PENDING,
+        ModelInstanceStateEnum.ANALYZING,
+        ModelInstanceStateEnum.SCHEDULED,
+        ModelInstanceStateEnum.DOWNLOADING,
+    }
+)
+"""Instance states from which INITIALIZING is the next step. Its own STARTING
+is not one: the server writes that after INITIALIZING, so folding back to it
+from there would walk the lifecycle backwards."""
+
+
+def _spawned_but_not_reported(instance, workloads) -> Optional[dict]:
+    """
+    INITIALIZING, when the leader's container exists and the instance has not
+    been told.
+
+    The worker writes INITIALIZING today, and stops at stage 3 step 4. Nothing
+    else produces it: the fold is silent through the whole of coming up
+    because two instance states mirror onto one workload state, so without
+    this the state disappears from what a user sees the moment the worker
+    stops writing.
+
+    A starting workload is the discriminator, and it is not ambiguous the way
+    the state alone is. After a failure the rows keep the ERROR that caused
+    the restart while the instance is rescheduled; only the run that actually
+    spawned turns a row starting. The worst case is a row left starting by a
+    worker that died mid-launch, which reports INITIALIZING a little early and
+    is corrected by the next launch.
+    """
+    if instance.state not in _BEFORE_SPAWNING:
+        return None
+    leader = next((w for w in workloads if (w.group_index or 0) == 0), None)
+    if leader is None or leader.state != WorkloadStateEnum.STARTING:
+        return None
+    return {"state": ModelInstanceStateEnum.INITIALIZING}
+
+
 class ModelInstanceWorkloadStateController:
     """
     Folds a model instance's workload states back onto the instance.
@@ -538,7 +577,19 @@ class ModelInstanceWorkloadStateController:
         if instance is None:
             return _Fold(None, None, None, False)
 
+        workloads = await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                "owner_id": instance_id,
+            },
+        )
+        distributed = any(w.group_index != 0 for w in workloads)
+
         if instance.state in AWAITING_EXECUTION_STATES:
+            spawned = _spawned_but_not_reported(instance, workloads)
+            if spawned is not None:
+                return _Fold(instance, spawned, None, distributed)
             # Nothing is waiting on a container here -- the instance was
             # freshly scheduled, or is preparing model files. Whatever its
             # workloads say describes a run that is over: after a restart the
@@ -547,20 +598,12 @@ class ModelInstanceWorkloadStateController:
             # restart. Its own STARTING is deliberately not in that set; that
             # is where it waits for the fold to report the container running.
             return _Fold(
-                instance, None, FoldDeclineReason.INSTANCE_NOT_EXECUTING, False
+                instance, None, FoldDeclineReason.INSTANCE_NOT_EXECUTING, distributed
             )
 
-        workloads = await Workload.all_by_fields(
-            session,
-            {
-                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
-                "owner_id": instance_id,
-            },
-        )
         folded = aggregate_instance_state(
             workloads, await self._follower_worker_ips(session, workloads)
         )
-        distributed = any(w.group_index != 0 for w in workloads)
         if folded is None:
             return _Fold(instance, None, fold_decline_reason(workloads), distributed)
         return _Fold(instance, folded, None, distributed)

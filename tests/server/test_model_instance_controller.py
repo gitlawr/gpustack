@@ -20,6 +20,7 @@ from gpustack.schemas.workloads import (
 )
 from gpustack.server.bus import Event, EventType
 from gpustack import envs
+from gpustack.schemas.models import ModelInstanceStateEnum
 from gpustack.server import controllers as controllers_module
 from gpustack.server.model_instance_workloads import FoldDeclineReason
 from gpustack.server.controllers import (
@@ -594,3 +595,56 @@ async def test_the_tally_says_which_mode_it_is_in(
             await controller._reconcile(3)
 
     assert f"Workload fold [{expected}" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The state the worker will stop writing
+# ---------------------------------------------------------------------------
+
+
+def _leader(state):
+    return SimpleNamespace(group_index=0, state=state, worker_id=1)
+
+
+@pytest.mark.parametrize(
+    "instance_state",
+    ["pending", "analyzing", "scheduled", "downloading"],
+)
+def test_a_spawned_container_reports_initializing(instance_state):
+    """The worker writes INITIALIZING today and stops at step 4. Nothing else
+    produces it -- the fold is silent through the whole of coming up -- so
+    without this the state disappears from what a user sees."""
+    instance = _instance(state=instance_state)
+
+    folded = controllers_module._spawned_but_not_reported(
+        instance, [_leader(WorkloadStateEnum.STARTING)]
+    )
+
+    assert folded == {"state": ModelInstanceStateEnum.INITIALIZING}
+
+
+def test_a_rescheduled_instance_is_not_dragged_forward_by_a_stale_row():
+    """After a failure the rows keep the ERROR that caused the restart while
+    the instance is rescheduled. Only the run that actually spawned turns a
+    row starting, which is what makes that the discriminator."""
+    instance = _instance(state="scheduled")
+
+    assert (
+        controllers_module._spawned_but_not_reported(
+            instance, [_leader(WorkloadStateEnum.ERROR)]
+        )
+        is None
+    )
+
+
+def test_the_instances_own_starting_is_not_walked_backwards():
+    """The server writes STARTING after INITIALIZING, so reporting
+    INITIALIZING from there would move the lifecycle back a step."""
+    instance = _instance(state="starting")
+
+    assert (
+        controllers_module._spawned_but_not_reported(
+            instance, [_leader(WorkloadStateEnum.STARTING)]
+        )
+        is None
+    )
