@@ -33,6 +33,7 @@ from sqlmodel import select, or_
 from gpustack.policies.base import Allocated
 from gpustack.schemas.models import ModelInstance
 from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
+from gpustack.utils.comparison import tally
 from gpustack.server.cache import delete_cache_by_key, locked_cached
 from gpustack.server.db import async_session
 
@@ -97,12 +98,16 @@ async def get_worker_allocated(worker_id: int) -> Allocated:
     # worker portably -- becomes an indexed one. Compared rather than swapped:
     # this decides what the scheduler thinks is free, and reading it low would
     # overcommit a worker rather than fail visibly.
-    from_workloads = compute_worker_allocated_from_workloads(workloads, worker_id)
-    if from_workloads != allocated:
-        logger.info(
-            f"Workload rows report different allocation for worker {worker_id}: "
-            f"instances {allocated}, rows {from_workloads}"
-        )
+    #
+    # Through a tally because this runs on a cache miss: with the cache warm it
+    # may not run for a long stretch, and an empty log would read the same as
+    # agreement.
+    tally("Workload allocation").compare(
+        allocated,
+        compute_worker_allocated_from_workloads(workloads, worker_id),
+        f"worker {worker_id}",
+        skip_if_none=False,
+    )
     return allocated
 
 

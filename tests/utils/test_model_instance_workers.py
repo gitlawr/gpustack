@@ -82,11 +82,18 @@ async def test_a_worker_with_nothing_on_it_is_absent():
     assert await _matches([_row(7, 1, 0)], [9]) == {}
 
 
-def test_agreement_is_silent(caplog):
+def test_agreement_is_counted(caplog):
+    """Not silent: an empty log would read the same as the comparison never
+    having run, which is what "no rows compiled yet" looks like."""
     embedded = ModelInstanceWorkerMatch(is_main_worker=True)
-    report_match_disagreement(SimpleNamespace(name="mi", id=1), 7, embedded, embedded)
 
-    assert caplog.text == ""
+    with caplog.at_level(logging.INFO):
+        report_match_disagreement(
+            SimpleNamespace(name="mi", id=1), 7, embedded, embedded
+        )
+
+    assert "differs on" not in caplog.text
+    assert "agreed=" in caplog.text
 
 
 def test_a_missing_row_is_not_a_disagreement(caplog):
@@ -112,4 +119,4 @@ def test_a_different_placement_is_reported(caplog):
         ModelInstanceWorkerMatch(subordinate_worker_indexes=(0,)),
     )
 
-    assert "place worker 7 differently" in caplog.text
+    assert "Workload placement differs on worker 7" in caplog.text

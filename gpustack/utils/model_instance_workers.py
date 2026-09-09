@@ -9,6 +9,7 @@ from gpustack.schemas.models import (
     ModelInstanceStateEnum,
 )
 from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
+from gpustack.utils.comparison import tally
 
 logger = logging.getLogger(__name__)
 
@@ -105,18 +106,18 @@ def report_match_disagreement(
     embedded: ModelInstanceWorkerMatch,
     from_workloads: Optional[ModelInstanceWorkerMatch],
 ):
-    """Say where the rows and the embedded list place a worker differently.
+    """Compare where the rows and the embedded list place a worker.
 
     The embedded list stays authoritative while this is only being watched, on
-    the same footing as the state fold: silence is what says the rows can be
-    read instead.
+    the same footing as the state fold. Counted rather than only logged on
+    difference: an empty log would otherwise mean either that they agree or
+    that this never ran, and the second is what "no rows compiled yet" looks
+    like.
     """
-    if from_workloads is None or from_workloads == embedded:
-        return
-    logger.info(
-        f"Workload rows place worker {worker_id} differently on model instance "
-        f"{instance.name} (id={instance.id}): embedded {embedded}, "
-        f"rows {from_workloads}"
+    tally("Workload placement").compare(
+        embedded,
+        from_workloads,
+        f"worker {worker_id} on model instance {instance.name} " f"(id={instance.id})",
     )
 
 
