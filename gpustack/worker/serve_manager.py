@@ -11,6 +11,7 @@ import os
 from typing import Dict, Optional, List, Callable
 from pathlib import Path
 import logging
+import threading
 
 from gpustack_runtime.deployer import (
     get_workload,
@@ -205,6 +206,12 @@ def provision_model_instance(
 
 
 class ServeManager:
+    _write_locks: Dict[int, "threading.Lock"] = {}
+    _write_locks_guard = threading.Lock()
+    """One lock per instance, so the pair of writes each state change makes --
+    the instance and its workload row -- cannot interleave with another
+    thread's pair and leave the two disagreeing about which came last."""
+
     @property
     def _worker_id(self) -> int:
         return self._worker_id_getter()
@@ -1401,11 +1408,30 @@ class ServeManager:
         """
         Update model instance with given fields.
 
+        The instance and its workload row are written under one lock per
+        instance. Two periodic passes write state -- the sync pass and the
+        inference health check, on their own threads -- and without this their
+        writes interleave between the two calls, so the row can end up
+        reporting a state the instance was moved off first. The fold reads the
+        row, and a row newer than the instance is exactly what it is meant to
+        trust, so it undid a failure that had already been recorded.
+
         Args:
             id: The ID of the model instance to update.
             **kwargs: The fields to update, group by field name and value.
         """
+        with self._write_lock(id):
+            return self._write_model_instance(id, **kwargs)
 
+    def _write_lock(self, id: int):
+        with ServeManager._write_locks_guard:
+            lock = ServeManager._write_locks.get(id)
+            if lock is None:
+                lock = threading.Lock()
+                ServeManager._write_locks[id] = lock
+        return lock
+
+    def _write_model_instance(self, id: int, **kwargs) -> bool:
         applied = update_resource(
             self._clientset.model_instances,
             id,
