@@ -162,69 +162,96 @@ k8s 那一侧不是新架构:**GPU instance 现在就这么工作**——gpustac
 
 ### Workload schema
 
-按 spec / binding / status 三段划分,列出**谁写**是因为这是整个设计的要点——一个字段属于哪一段,就决定了它由谁写、以及换个集群类型时它从哪来。
+```python
+class WorkloadOwnerKindEnum(str, Enum):
+    MODEL_INSTANCE = "model_instance"
+    BENCHMARK      = "benchmark"
+    CACHE_SERVICE  = "cache_service"      # 将来:finetune_job / gpu_instance
 
-**身份与归属**
+class WorkloadRoleEnum(str, Enum):
+    LEADER   = "leader"
+    FOLLOWER = "follower"
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `name` | str | worker 上的容器名,跨重启稳定 |
-| `owner_kind` | enum | `model_instance` / `benchmark` / `cache_service`(将来 `finetune_job`、`gpu_instance`) |
-| `owner_id` | int | 编译自哪个领域资源。**不是外键**:目标表随 kind 变化,生命周期归 controller |
-| `owner_principal_id` | int? | 创建时从 owner 复制,列表查询据此做租户隔离,免去按 kind 变化的联表 |
-| `cluster_id` | int? | 反范式化,worker 的 watch 按集群过滤 |
+class WorkloadRestartPolicyEnum(str, Enum):
+    ALWAYS     = "always"                 # 服务
+    ON_FAILURE = "on_failure"
+    NEVER      = "never"                  # 任务
 
-**分组(分布式实例)**
+class WorkloadStateEnum(str, Enum):
+    PENDING = "pending"                   # 还没有容器
+    STARTING = "starting"                 # 已拉起，未通过健康检查
+    RUNNING = "running"
+    UNREACHABLE = "unreachable"
+    SUCCEEDED = "succeeded"               # 仅 restart_policy=never 会到达
+    ERROR = "error"
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `group_key` | str? | 把一个分布式实例的多行系在一起;单机为 None |
-| `group_index` | int | 组内位置,**0 是 leader**,从属 i 在 i+1 |
-| `role` | enum | `leader` / `follower` |
+class ReservedClaim(BaseModel):
+    worker_id: int
+    gpu_indexes: list[int] | None
+    gpu_addresses: list[str] | None
+    computed_resource_claim: dict | None
 
-**spec —— controller 写**
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `restart_policy` | enum | `always`(服务)/ `on_failure` / `never`(任务) |
-| `active_deadline_seconds` | int? | 任务的墙钟上限;None 表示不限,服务即如此 |
-| `spec_digest` | str? | 创建时 owner 塑形参数的摘要。owner 改了但行没重建时,凭它看出漂移 |
-| `labels` | dict? | 供选择与归类 |
+class Workload:
+    id: int
+    name: str                             # worker 上的容器名，跨重启稳定
 
-**binding —— Docker 上由调度器写,k8s 上从集群观测**
+    # ── 归属 ──────────────────────────────────────────────
+    owner_kind: WorkloadOwnerKindEnum
+    owner_id: int                         # 非外键：目标表随 kind 变化
+    owner_principal_id: int | None        # 创建时从 owner 复制，用于租户隔离
+    cluster_id: int | None
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `worker_id` | int? | |
-| `worker_name` / `worker_ip` / `worker_ifname` | str? | 反范式化。需要它们的读者在 worker 上,拼命令行时没有会话可联表,也不该在启动路径里加一次往返 |
-| `gpu_type` | str? | |
-| `gpu_indexes` / `gpu_addresses` | list? | |
-| `computed_resource_claim` | dict? | 本行自己占用的资源 |
-| `reserved_claims` | list? | **替别的框架在别的节点上占住的资源**(DELEGATED)。这样不必为"存在但不跑"的容器建行 |
+    # ── 分组：一个分布式实例 = 一组行 ──────────────────────
+    group_key: str | None                 # 单机为 None
+    group_index: int = 0                  # 0 = leader，从属 i 在 i+1
+    role: WorkloadRoleEnum
 
-`ReservedClaim` 为 `{worker_id, gpu_indexes, gpu_addresses, computed_resource_claim}`。
+    # ── spec：controller 写 ───────────────────────────────
+    restart_policy: WorkloadRestartPolicyEnum
+    active_deadline_seconds: int | None    # 任务的墙钟上限
+    spec_digest: str | None                # owner 塑形参数的摘要，用于发现漂移
+    labels: dict[str, str] | None
 
-**status —— worker 写(经 `PATCH /status`)**
+    # ── binding：Docker 由调度器写 / k8s 从集群观测 ────────
+    worker_id: int | None
+    worker_name: str | None
+    worker_ip: str | None                  # 反范式化：worker 拼命令行时无会话可联表
+    worker_ifname: str | None
+    gpu_type: str | None
+    gpu_indexes: list[int] | None
+    gpu_addresses: list[str] | None
+    computed_resource_claim: dict | None   # 本行自己占用
+    reserved_claims: list[ReservedClaim] | None   # 替别的框架在别处占住的
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `state` | enum | `pending` / `starting` / `running` / `unreachable` / `succeeded` / `error` |
-| `state_message` | str? | |
-| `ports` | dict? | 具名端口,如 `{"service": 40001}` |
-| `pid` | int? | |
-| `restart_count` | int | **单调**。它给每次启动的日志文件编号,不能重置 |
-| `last_restart_time` / `started_at` | datetime? | `started_at` 是容器**开始运行**的时刻,不是行创建的时刻——任务的超时要从它算起 |
-| `healthy` / `last_check_at` | bool? / datetime? | 探针型健康检查用;模型实例的健康检查在业务层 |
-| `progress` | float? | 供给进度 0–100(如拉镜像、下载模型文件) |
+    # ── status：worker 写（经 PATCH /status）──────────────
+    state: WorkloadStateEnum
+    state_message: str | None
+    ports: dict[str, int] | None           # {"service": 40001}
+    pid: int | None
+    restart_count: int = 0                 # 单调，给日志文件编号，不可重置
+    last_restart_time: datetime | None
+    started_at: datetime | None            # 容器开始运行的时刻，任务超时从此计
+    healthy: bool | None
+    last_check_at: datetime | None
+    progress: float | None                 # 供给进度 0-100
 
-`arguments`(list?)从嵌套列表原样带了过来,但**当前无人写入**:后端拼命令行用的是局部变量,没有回写到这里。因此它不在 status 端点的模型里。要么给它一个真实的写入方(记录本次启动实际使用的 argv,便于排障),要么随嵌套列表一并去掉——**不应保持现状**,一个存在但恒为空的字段会让读者以为它有内容。
+    arguments: list[str] | None            # 见下
 
-**约束与索引**
+    __table_args__ = (
+        # 含组内位置：leader 与 follower 可能落在同一台 worker 上
+        UniqueConstraint("owner_kind", "owner_id", "worker_id", "group_index"),
+        Index("ix_workloads_worker_id", "worker_id"),
+        Index("ix_workloads_owner", "owner_kind", "owner_id"),
+        Index("ix_workloads_owner_state", "owner_kind", "owner_id", "state"),
+        Index("ix_workloads_cluster_id", "cluster_id"),
+        Index("ix_workloads_group_key", "group_key"),
+    )
+```
 
-- 唯一约束 `(owner_kind, owner_id, worker_id, group_index)` —— 含组内位置,因为 leader 与 follower 可能落在同一台 worker 上,只用 `(owner, worker)` 会误拒合法组合
-- 索引:`worker_id`(worker 对账)、`(owner_kind, owner_id)`(controller 扇出)、`(owner_kind, owner_id, state)`、`cluster_id`、`group_key`
+不变式:**有行就有容器**。DELEGATED 的从属节点因此不产生行,而并入 leader 的 `reserved_claims`。
 
-**不变式:有行就有容器。** 这决定了 DELEGATED 的从属节点不产生行,而是并入 leader 的 `reserved_claims`。
+`arguments` 从嵌套列表原样带过来,当前无人写入,也不在 status 端点的模型里。要么给它真实的写入方(记录本次启动的 argv),要么随嵌套列表一并删除。
 
 ### 端点
 
