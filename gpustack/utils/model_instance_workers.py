@@ -261,7 +261,7 @@ def instance_placements(instance: ModelInstance, workloads: list = None) -> list
     return placements
 
 
-def subordinate_placements(instance: ModelInstance) -> list:
+def subordinate_placements(instance: ModelInstance, workloads: list = None) -> list:
     """
     Everything but the instance's own worker.
 
@@ -269,6 +269,9 @@ def subordinate_placements(instance: ModelInstance) -> list:
     callers that want only these are on the worker, holding an instance whose
     own fields they have no business reading, and constructing the leader to
     discard it would make them depend on all of them.
+
+    Given the rows, compares the two readings on the same terms as
+    :func:`instance_placements`.
     """
     subordinates = (
         instance.distributed_servers.subordinate_workers
@@ -276,7 +279,7 @@ def subordinate_placements(instance: ModelInstance) -> list:
         and instance.distributed_servers.subordinate_workers
         else []
     )
-    return [
+    placements = [
         InstancePlacement(
             group_index=index + 1,
             worker_id=sw.worker_id,
@@ -296,3 +299,12 @@ def subordinate_placements(instance: ModelInstance) -> list:
         )
         for index, sw in enumerate(subordinates)
     ]
+    if workloads is not None:
+        from_rows = [p for p in placements_from_workloads(workloads) if not p.is_leader]
+        tally("Workload placements").compare(
+            _binding_of(placements),
+            _binding_of(from_rows),
+            f"subordinates of model instance {getattr(instance, 'name', None)}",
+            skip_if_none=False,
+        )
+    return placements

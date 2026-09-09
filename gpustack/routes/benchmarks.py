@@ -30,6 +30,7 @@ from gpustack.schemas.models import (
     is_image_model,
     is_reranker_model,
 )
+from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.workers import Worker
 from gpustack.server.db import async_session
@@ -677,7 +678,14 @@ async def get_benchmark_snapshot(
     if gpus_snapshots is not None:
         gpu_snapshots.update(gpus_snapshots)
 
-    for sub in subordinate_placements(mi):
+    rows = await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+            "owner_id": mi.id,
+        },
+    )
+    for sub in subordinate_placements(mi, rows):
         sw: Worker = await WorkerService(session).get_by_id(sub.worker_id)
         w_snapshot, gpus_snapshots = create_worker_snapshot(
             sw, sub.gpu_type, sub.gpu_indexes
