@@ -648,9 +648,7 @@ class ModelInstanceWorkloadStateController:
 
                 changing = _differing(instance, folded)
                 if not changing:
-                    self._agreed[folded.get("state")] = (
-                        self._agreed.get(folded.get("state"), 0) + 1
-                    )
+                    self._count_agreement(folded, result.distributed)
                     self._report_tally()
                     return
                 # The worker still writes the instance too, so this is the
@@ -724,12 +722,7 @@ class ModelInstanceWorkloadStateController:
         """
         differing = _differing(instance, folded)
         if not differing:
-            state = folded.get("state")
-            self._agreed[state] = self._agreed.get(state, 0) + 1
-            if distributed:
-                self._agreed_distributed[state] = (
-                    self._agreed_distributed.get(state, 0) + 1
-                )
+            self._count_agreement(folded, distributed)
             logger.debug(
                 f"Workload fold agrees with model instance {instance.name} "
                 f"(id={instance.id}): {folded}"
@@ -797,6 +790,17 @@ class ModelInstanceWorkloadStateController:
             )
         finally:
             self._confirming.discard(instance_id)
+
+    def _count_agreement(self, folded: dict, distributed: bool):
+        """One place for both modes. They had a tally each, and the
+        authoritative one never touched the distributed counter -- so the
+        figure that says whether the followers were exercised read empty for
+        every run made after the flag went on, which is every run where it
+        mattered."""
+        state = folded.get("state")
+        self._agreed[state] = self._agreed.get(state, 0) + 1
+        if distributed:
+            self._agreed_distributed[state] = self._agreed_distributed.get(state, 0) + 1
 
     def _report_tally(self):
         """

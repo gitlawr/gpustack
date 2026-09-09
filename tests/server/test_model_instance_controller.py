@@ -685,3 +685,27 @@ async def test_corrections_spread_over_instances_are_not_flapping(monkeypatch, c
                 await controller._reconcile(instance_id)
 
     assert "taking turns" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authoritative", [False, True])
+async def test_distributed_agreements_are_counted_in_both_modes(
+    monkeypatch, authoritative
+):
+    """The two modes kept a tally each, and the authoritative one never
+    touched the distributed counter -- so the figure that says whether the
+    followers were exercised read empty for every run after the flag went on,
+    which is every run where it mattered."""
+    instance = _instance(state="running")
+    controller = ModelInstanceWorkloadStateController()
+
+    with _fold(
+        monkeypatch,
+        instance,
+        folded={"state": "running"},
+        authoritative=authoritative,
+        workloads=_group(1),
+    ):
+        await controller._reconcile(3)
+
+    assert controller._agreed_distributed == {"running": 1}
