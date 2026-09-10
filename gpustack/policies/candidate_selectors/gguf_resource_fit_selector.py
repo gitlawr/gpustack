@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from gpustack.policies.event_recorder.recorder import EventCollector, EventLevelEnum
+from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import get_worker_allocatable_resource, ListMessageBuilder
 from gpustack.scheduler.calculator import (
     GPUOffloadEnum,
@@ -77,8 +78,9 @@ class GGUFResourceFitSelector(ScheduleCandidatesSelector):
         model: Model,
         model_instances: List[ModelInstance],
         cache_dir: Optional[str] = None,
+        workloads: Optional[List[Workload]] = None,
     ):
-        self._initialize_basic_data(model, model_instances, cache_dir)
+        self._initialize_basic_data(model, model_instances, cache_dir, workloads)
         self._initialize_cached_claim_data()
         self._initialize_model_parameters(model)
         self._initialize_selected_gpu_ids()
@@ -88,10 +90,15 @@ class GGUFResourceFitSelector(ScheduleCandidatesSelector):
         model: Model,
         model_instances: List[ModelInstance],
         cache_dir: Optional[str],
+        workloads: Optional[List[Workload]] = None,
     ):
         """Initialize basic data."""
         self._model = model
         self._model_instances = model_instances
+        # Every model-instance row in the cluster, not this model's: the
+        # allocatable reading compares against them and its subordinate branch
+        # needs the leader's row, which can be on another worker.
+        self._workloads = workloads
         self._cache_dir = cache_dir
         self._workers = []  # Initialize workers list for remote parsing
 
@@ -180,7 +187,9 @@ class GGUFResourceFitSelector(ScheduleCandidatesSelector):
         if self._workers_allocatable_resource.get(worker.id):
             return self._workers_allocatable_resource.get(worker.id)
 
-        return get_worker_allocatable_resource(self._model_instances, worker)
+        return get_worker_allocatable_resource(
+            self._model_instances, worker, workloads=self._workloads
+        )
 
     def _get_claim_with_layers(
         self, layers: int, is_uma: bool = False

@@ -17,6 +17,7 @@ from gpustack.policies.candidate_selectors.base_candidate_selector import (
     ScheduleCandidatesSelector,
 )
 from gpustack.policies.event_recorder.recorder import EventCollector, EventLevelEnum
+from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import (
     ListMessageBuilder,
     estimate_model_vram,
@@ -68,8 +69,9 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
         cfg: Config,
         model: Model,
         model_instances: List[ModelInstance],
+        workloads: Optional[List[Workload]] = None,
     ):
-        super().__init__(cfg, model, model_instances)
+        super().__init__(cfg, model, model_instances, workloads)
 
         self._vram_claim = 0
         self._ram_claim = 0

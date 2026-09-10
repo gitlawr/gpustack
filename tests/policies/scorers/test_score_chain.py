@@ -242,7 +242,7 @@ async def test_candidate_score_chain_binpack_and_locality():
     mock_async_session = AsyncMock()
     mock_async_session.__aenter__.return_value = mock_session
 
-    def allocatable_side_effect(_, worker, gpu_type=None):
+    def allocatable_side_effect(_, worker, gpu_type=None, workloads=None):
         return Allocatable(ram=0, vram={0: 100})
 
     with (
@@ -304,7 +304,7 @@ async def test_candidate_score_chain_binpack_locality_changes_pick():
     mock_async_session = AsyncMock()
     mock_async_session.__aenter__.return_value = mock_session
 
-    def allocatable_side_effect(_, worker, gpu_type=None):
+    def allocatable_side_effect(_, worker, gpu_type=None, workloads=None):
         if worker.id == worker1.id:
             return Allocatable(ram=0, vram={0: 100})
         return Allocatable(ram=0, vram={0: 110})
@@ -425,7 +425,7 @@ async def test_instance_score_chain_with_real_scorers():
     mock_async_session = AsyncMock()
     mock_async_session.__aenter__.return_value = mock_session
 
-    def allocatable_side_effect(_, worker, gpu_type=None):
+    def allocatable_side_effect(_, worker, gpu_type=None, workloads=None):
         if worker.id == worker1.id:
             return Allocatable(ram=1000, vram={})
         return Allocatable(ram=2000, vram={})

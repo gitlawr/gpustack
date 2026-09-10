@@ -14,6 +14,7 @@ from gpustack.policies.candidate_selectors.base_candidate_selector import (
     ScheduleCandidatesSelector,
 )
 from gpustack.policies.event_recorder.recorder import EventCollector
+from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import (
     estimate_lora_weights_bytes,
     get_worker_allocatable_resource,
@@ -51,8 +52,9 @@ class AscendMindIEResourceFitSelector(ScheduleCandidatesSelector):
         config: Config,
         model: Model,
         model_instances: List[ModelInstance],
+        workloads: Optional[List[Workload]] = None,
     ):
-        super().__init__(config, model, model_instances)
+        super().__init__(config, model, model_instances, workloads)
 
         # Diagnostic message to be set to the model instance.
         self._diagnostic_messages: List[str] = []
@@ -938,7 +940,9 @@ class AscendMindIEResourceFitSelector(ScheduleCandidatesSelector):
         if worker.id in self.__worker_alloc_idx:
             return self.__worker_alloc_idx[worker.id]
 
-        worker_alloc = get_worker_allocatable_resource(self._model_instances, worker)
+        worker_alloc = get_worker_allocatable_resource(
+            self._model_instances, worker, workloads=self._workloads
+        )
         if not worker_alloc:
             logger.warning(f"Worker {worker.name} has no allocatable resources.")
             worker_alloc = Allocatable(ram=0, vram={0: 0})

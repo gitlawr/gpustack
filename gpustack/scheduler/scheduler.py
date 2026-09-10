@@ -45,6 +45,7 @@ from gpustack.policies.worker_filters.status_filter import StatusFilter
 from gpustack import envs
 from gpustack.schemas.inference_backend import is_built_in_backend
 from gpustack.schemas.workers import Worker
+from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 from gpustack.schemas.models import (
     BackendEnum,
     CategoryEnum,
@@ -345,13 +346,21 @@ class Scheduler:
             model_instances = await ModelInstance.all(
                 session, options=[selectinload(ModelInstance.model)]
             )
+            workloads = await Workload.all_by_fields(
+                session, {"owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE}
+            )
 
             candidate = None
             messages = []
             if workers and model:
                 try:
                     candidate, messages = await find_candidate(
-                        session, self._config, model, workers, model_instances
+                        session,
+                        self._config,
+                        model,
+                        workers,
+                        model_instances,
+                        workloads,
                     )
                 except Exception as e:
                     state_message = f"Failed to find candidate: {e}"
@@ -437,12 +446,18 @@ async def find_candidate(
     model: Model,
     workers: List[Worker],
     model_instances: List[ModelInstance],
+    workloads: Optional[List[Workload]] = None,
 ) -> Tuple[Optional[ModelInstanceScheduleCandidate], List[str]]:
     """
     Find a schedule candidate for the model instance.
     :param config: GPUStack configuration.
     :param model: Model to schedule.
     :param workers: List of workers to consider.
+    :param workloads: every model-instance workload row in the cluster. The
+        selectors compare the allocatable they read from the instances against
+        the same figure read from these rows; the instances stay
+        authoritative. Left out by the evaluator, which estimates whether a
+        model could fit rather than deciding where one goes.
     :return: A tuple containing:
                 - The schedule candidate.
                 - A list of messages for the scheduling process.
@@ -470,28 +485,28 @@ async def find_candidate(
     try:
         if model.gpu_type_selector:
             candidates_selector = VGPUResourceFitSelector(
-                config, model, model_instances
+                config, model, model_instances, workloads
             )
         elif is_gguf_model(model):
             candidates_selector = GGUFResourceFitSelector(
-                model, model_instances, config.cache_dir
+                model, model_instances, config.cache_dir, workloads
             )
         elif model.backend == BackendEnum.ASCEND_MINDIE:
             candidates_selector = AscendMindIEResourceFitSelector(
-                config, model, model_instances
+                config, model, model_instances, workloads
             )
         elif model.backend == BackendEnum.VLLM and not is_omni_model(model):
             # Note: Route omni categories to CustomSelector for vLLM-Omni.
             candidates_selector = VLLMResourceFitSelector(
-                config, model, model_instances
+                config, model, model_instances, workloads
             )
         elif model.backend == BackendEnum.SGLANG:
             candidates_selector = SGLangResourceFitSelector(
-                config, model, model_instances
+                config, model, model_instances, workloads
             )
         else:
             candidates_selector = CustomBackendResourceFitSelector(
-                config, model, model_instances
+                config, model, model_instances, workloads
             )
     except Exception as e:
         return None, [f"Failed to initialize {model.backend} candidates selector: {e}"]
@@ -501,7 +516,7 @@ async def find_candidate(
 
     # Score candidates.
     candidate_scorers = [
-        PlacementScorer(model, model_instances),
+        PlacementScorer(model, model_instances, workloads=workloads),
     ]
     locality_max_score = envs.SCHEDULER_SCALE_UP_LOCALITY_MAX_SCORE
     if locality_max_score > 0:

@@ -98,6 +98,13 @@ def _schedule_patches(model, model_instance, candidate, resolve_mock, service_mo
             "gpustack.scheduler.scheduler.ModelInstance.all",
             AsyncMock(return_value=[]),
         ),
+        # Loaded alongside the instances so the selectors can compare the
+        # allocatable they read from each against the same figure read from
+        # the rows; these tests are about the cache config it resolves.
+        patch(
+            "gpustack.scheduler.scheduler.Workload.all_by_fields",
+            AsyncMock(return_value=[]),
+        ),
         patch(
             "gpustack.scheduler.scheduler.find_candidate",
             AsyncMock(return_value=(candidate, [])),

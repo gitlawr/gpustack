@@ -24,6 +24,7 @@ from gpustack.utils.gpu import (
 )
 from gpustack.policies.base import Allocatable, ModelInstanceScheduleCandidate
 from gpustack.utils.model_instance_workers import subordinate_placements
+from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import (
     ListMessageBuilder,
     get_computed_ram_claim,
@@ -195,10 +196,15 @@ class ScheduleCandidatesSelector(ABC):
         config: Config,
         model: Model,
         model_instances: List[ModelInstance],
+        workloads: Optional[List[Workload]] = None,
     ):
         self._config = config
         self._model = model
         self._model_instances = model_instances
+        # Every model-instance row in the cluster, not this model's: the
+        # allocatable reading compares against them and its subordinate branch
+        # needs the leader's row, which can be on another worker.
+        self._workloads = workloads
         self._model_params = ModelParameters()
         self._num_attention_heads = 0
         self._vision_num_attention_heads = 0
@@ -317,7 +323,7 @@ class ScheduleCandidatesSelector(ABC):
             return allocatable
 
         allocatable = get_worker_allocatable_resource(
-            self._model_instances, worker, gpu_type
+            self._model_instances, worker, gpu_type, self._workloads
         )
         self._workers_allocatable_resource_by_gpu_type.setdefault(
             gpu_type, {}
@@ -992,7 +998,9 @@ class ScheduleCandidatesSelector(ABC):
         """
         Validate that there is no more than one distributed vLLM instance per worker.
         """
-        instances = get_worker_model_instances(self._model_instances, worker)
+        instances = get_worker_model_instances(
+            self._model_instances, worker, self._workloads
+        )
         for instance in instances:
             if subordinate_placements(instance) and (
                 instance.model

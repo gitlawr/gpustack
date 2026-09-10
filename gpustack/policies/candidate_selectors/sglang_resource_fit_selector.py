@@ -15,6 +15,7 @@ from gpustack.policies.candidate_selectors.base_candidate_selector import (
     ScheduleCandidatesSelector,
 )
 from gpustack.policies.event_recorder.recorder import EventCollector, EventLevelEnum
+from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import (
     get_computed_ram_claim,
     ListMessageBuilder,
@@ -54,8 +55,9 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
         cfg: Config,
         model: Model,
         model_instances: List[ModelInstance],
+        workloads: Optional[List[Workload]] = None,
     ):
-        super().__init__(cfg, model, model_instances)
+        super().__init__(cfg, model, model_instances, workloads)
 
         self._vram_claim = 0
         self._ram_claim = 0
@@ -361,6 +363,7 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
                         self._model_params,
                         gpu_type,
                         self._selected_gpu_indexes_by_gpu_type_and_worker,
+                        self._workloads,
                     )._cal_mem_fraction_static(workers_of_type)
                 )
                 for gpu_type, workers_of_type in workers_by_gpu_type.items()
@@ -558,6 +561,7 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
             model_instances=self._model_instances,
             ram_claim=self._ram_claim,
             gpu_type=gpu_type,
+            workloads=self._workloads,
         )
 
         for info in gpu_group:
@@ -699,6 +703,7 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
                 model_instances=self._model_instances,
                 ram_claim=self._ram_claim,
                 gpu_type=gpu_type,
+                workloads=self._workloads,
             )
 
             for gpu_list in gpu_group:
@@ -931,9 +936,14 @@ class MemFractionStaticCalculator:
         model_params: ModelParameters,
         gpu_type: str,
         selected_gpu_indexes_by_gpu_type_and_worker: Dict[str, Dict[int, List[int]]],
+        workloads: Optional[List[Workload]] = None,
     ) -> None:
         self._model = model
         self._model_instances = model_instances
+        # Every model-instance row in the cluster, not this model's: the
+        # allocatable reading compares against them and its subordinate branch
+        # needs the leader's row, which can be on another worker.
+        self._workloads = workloads
         self._model_params = model_params
         self._gpu_type = gpu_type
         self._selected_gpu_indexes_by_gpu_type_and_worker = (
@@ -1226,7 +1236,7 @@ class MemFractionStaticCalculator:
 
                 if self._model.gpu_selector.gpus_per_replica:
                     allocatable = get_worker_allocatable_resource(
-                        self._model_instances, worker, self._gpu_type
+                        self._model_instances, worker, self._gpu_type, self._workloads
                     )
                     sorted_gpu_indexes = [
                         idx
