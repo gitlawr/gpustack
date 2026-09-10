@@ -487,6 +487,7 @@
     - name: device_name
       label: RDMA Device
       description: NIC device(s) for the RDMA protocol.
+      placeholder: "mlx5_0"
       visible_by: protocol
       visible_when: rdma
     # Recipes-curated eviction posture, exposed like LMCache's knobs:
@@ -521,6 +522,7 @@
       description: >-
         host:port of your etcd, comma-separated for several. The masters
         elect through it and engines read the current leader from it.
+      placeholder: "10.0.0.1:2379,10.0.0.2:2379"
       required: true
       visible_by: enable_ha
       visible_when: true

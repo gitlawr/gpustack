@@ -332,6 +332,10 @@ class CacheProviderField(BaseModel):
     label: Optional[str] = None
     description: Optional[str] = None
 
+    placeholder: Optional[str] = None
+    """Sample value shown in the empty input — the shape of the value
+    where prose cannot convey it (an endpoint list, a device name)."""
+
     type: str = "string"
     """Value type: "string" | "number" | "boolean" (booleans render as
     "true"/"false")."""

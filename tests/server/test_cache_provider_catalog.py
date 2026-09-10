@@ -567,6 +567,8 @@ def test_mooncake_provider_declaration():
     assert fields["ha_backend_connstring"].required is True
     assert fields["ha_backend_connstring"].visible_by == "enable_ha"
     assert fields["ha_backend_connstring"].visible_when is True
+    # the shape of an endpoint list does not survive prose
+    assert fields["ha_backend_connstring"].placeholder == "10.0.0.1:2379,10.0.0.2:2379"
     assert fields["master_replicas"].default == 3
     assert fields["master_replicas"].gated_default == 1
     # Masters do not vote among themselves, so a floor of two rules out
