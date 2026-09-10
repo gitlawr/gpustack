@@ -36,9 +36,13 @@ def _build_manager(worker_id: int = 1):
     cfg = SimpleNamespace(
         service_port_range="40000-41000",
         system_default_container_registry=None,
-        worker_ip="10.0.0.1",
+        # Empty as in a real deployment: the address is detected by the
+        # worker and this field is only a user override.
+        worker_ip=None,
     )
-    manager = CacheServiceManager(lambda: worker_id, lambda: clientset, cfg)
+    manager = CacheServiceManager(
+        lambda: worker_id, lambda: "10.0.0.1", lambda: clientset, cfg
+    )
     return manager, clientset
 
 
@@ -534,7 +538,9 @@ def _two_component_provider() -> CacheProvider:
             "master": CacheProviderComponent(
                 topology="replicas",
                 attach_endpoint=True,
-                run_command="mooncake_master --rpc_port {{port}}",
+                run_command=(
+                    "mooncake_master --rpc_address {{worker_ip}} " "--rpc_port {{port}}"
+                ),
             ),
             "store": CacheProviderComponent(
                 topology="replicas",
@@ -570,6 +576,8 @@ def test_user_parameters_reach_only_the_attach_component():
     master_exec = create.call_args[0][0].containers[0].execution
     assert master_exec.command == [
         "mooncake_master",
+        "--rpc_address",
+        "10.0.0.1",
         "--rpc_port",
         "40001",
         "--default_kv_lease_ttl=60000",

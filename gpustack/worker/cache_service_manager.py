@@ -140,10 +140,14 @@ class CacheServiceManager:
     def __init__(
         self,
         worker_id_getter: Callable[[], int],
+        worker_ip_getter: Callable[[], str],
         clientset_getter: Callable[[], ClientSet],
         cfg: Config,
     ):
         self._worker_id_getter = worker_id_getter
+        # The detected address, which only the worker holds: the config
+        # field carries a user override and is empty otherwise.
+        self._worker_ip_getter = worker_ip_getter
         self._clientset_getter = clientset_getter
         self._config = cfg
 
@@ -286,7 +290,7 @@ class CacheServiceManager:
             # The worker's own IP: a store advertises it to peers (the
             # P2P handshake publishes it as local_hostname), where the
             # bind-address 0.0.0.0 would be useless.
-            params["worker_ip"] = self._config.worker_ip
+            params["worker_ip"] = self._worker_ip_getter()
             # Dependency addresses the controller stamped at creation
             # (e.g. the Mooncake master's host:port for a store).
             for name, address in (instance.component_addresses or {}).items():
