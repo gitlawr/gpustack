@@ -25,7 +25,10 @@ from gpustack.worker.controlloop.workload_state import (
     describe_workload_failure,
     needs_restart,
 )
-from gpustack.worker.controlloop.workload_rows import group_workloads
+from gpustack.worker.controlloop.workload_rows import (
+    group_workloads,
+    workloads_by_instance,
+)
 from gpustack.worker.controlloop.writeback import patch_status, update_resource
 
 __all__ = [
@@ -43,6 +46,7 @@ __all__ = [
     "needs_restart",
     "run_provisioning",
     "group_workloads",
+    "workloads_by_instance",
     "patch_status",
     "update_resource",
     "watch_forever",

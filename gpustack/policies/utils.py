@@ -30,7 +30,10 @@ from gpustack.utils.lora_model_source import (
 
 from gpustack.schemas.workloads import Workload
 from gpustack.utils.comparison import tally
-from gpustack.utils.model_instance_workers import instance_placements
+from gpustack.utils.model_instance_workers import (
+    instance_placements,
+    rows_by_owner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -608,7 +611,7 @@ def get_worker_model_instances(
     placed from its own rows and the result compared against the placement
     read off the instance, which stays authoritative.
     """
-    rows_by_owner = _rows_by_owner(workloads)
+    grouped_rows = rows_by_owner(workloads)
     # Filter to get only the relevant instances:
     # 1. Instances assigned to this worker (main worker)
     # 2. Instances that use this worker as a subordinate worker
@@ -618,25 +621,10 @@ def get_worker_model_instances(
         if any(
             p.worker_id == worker.id
             for p in instance_placements(
-                model_instance, rows_by_owner.get(model_instance.id)
+                model_instance, grouped_rows.get(model_instance.id)
             )
         )
     ]
-
-
-def _rows_by_owner(
-    workloads: Optional[List[Workload]],
-) -> Dict[int, List[Workload]]:
-    """Group rows by the instance they belong to.
-
-    The readers take one instance's rows at a time, and the schedulers hold
-    the whole cluster's; grouping once per pass keeps this off the per-worker
-    inner loop.
-    """
-    grouped: Dict[int, List[Workload]] = {}
-    for w in workloads or []:
-        grouped.setdefault(w.owner_id, []).append(w)
-    return grouped
 
 
 class ListMessageBuilder:

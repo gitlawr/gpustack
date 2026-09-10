@@ -58,6 +58,7 @@ from gpustack.schemas.models import (
 from gpustack.server.bus import Event, EventType
 from gpustack.server.model_instance_workloads import named_ports, to_workload_state
 from gpustack.worker.controlloop import (
+    workloads_by_instance,
     group_workloads,
     ContainerLogPersistence,
     PortAllocator,
@@ -451,6 +452,7 @@ class ServeManager:
             # local state.
             return
 
+        rows_by_instance = workloads_by_instance(self._clientset)
         model_instances: List[ModelInstance] = []
         for model_instance in all_items:
             # if the model instance is assigned to this worker, it must be scheduled.
@@ -460,14 +462,11 @@ class ServeManager:
                 and model_instance.state != ModelInstanceStateEnum.SCHEDULED
             ):
                 model_instances.append(model_instance)
-            if (
-                model_instance.distributed_servers
-                and model_instance.distributed_servers.subordinate_workers
-            ):
-                for sw in model_instance.distributed_servers.subordinate_workers:
-                    if sw.worker_id == self._worker_id:
-                        model_instances.append(model_instance)
-                        break
+            subordinates = subordinate_placements(
+                model_instance, rows_by_instance.get(model_instance.id)
+            )
+            if any(p.worker_id == self._worker_id for p in subordinates):
+                model_instances.append(model_instance)
 
         for model_instance in model_instances:
             # Skip if the provision process has not exited yet.
@@ -954,8 +953,10 @@ class ServeManager:
                 return
             # Return if it isn't the member of the distribution serving.
             joined = any(
-                sw.worker_id == self._worker_id
-                for sw in mi.distributed_servers.subordinate_workers or []
+                p.worker_id == self._worker_id
+                for p in subordinate_placements(
+                    mi, group_workloads(self._clientset, mi.id)
+                )
             )
             if not joined:
                 return

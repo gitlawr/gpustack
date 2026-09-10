@@ -17,7 +17,10 @@ from gpustack_runtime.deployer import (
 )
 from gpustack_runtime.deployer.__utils__ import compare_versions
 from gpustack_runtime.detector import ManufacturerEnum, manufacturer_to_backend
-from gpustack.utils.model_instance_workers import instance_placements
+from gpustack.utils.model_instance_workers import (
+    instance_placements,
+    subordinate_placements,
+)
 from gpustack.schemas.models import (
     ModelInstance,
     SpeculativeAlgorithmEnum,
@@ -572,15 +575,11 @@ class VLLMServer(InferenceServer):
         vram = 0
         computed_resource_claim = self._model_instance.computed_resource_claim
         if self._worker.id != self._model_instance.worker_id:
-            dservers = self._model_instance.distributed_servers
-            subworkers = (
-                dservers.subordinate_workers
-                if dservers and dservers.subordinate_workers
-                else []
-            )
-            for subworker in subworkers:
-                if subworker.worker_id == self._worker.id:
-                    computed_resource_claim = subworker.computed_resource_claim
+            for placement in subordinate_placements(
+                self._model_instance, self._group_workloads()
+            ):
+                if placement.worker_id == self._worker.id:
+                    computed_resource_claim = placement.computed_resource_claim
                     break
 
         if not computed_resource_claim:

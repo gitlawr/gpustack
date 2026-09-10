@@ -21,7 +21,10 @@ from gpustack.api.exceptions import (
     NotFoundException,
 )
 from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
-from gpustack.utils.model_instance_workers import instance_placements
+from gpustack.utils.model_instance_workers import (
+    instance_placements,
+    subordinate_placements,
+)
 from gpustack.schemas.workers import Worker
 from gpustack.schemas.clusters import Cluster
 from gpustack.api.tenant import (
@@ -604,18 +607,23 @@ async def resolve_instance_log_worker_targets(
         targets.append((main_id, main_worker.name or "", main_worker))
         seen.add(main_id)
 
-    dservers = model_instance.distributed_servers
-    if dservers and dservers.subordinate_workers:
-        for sw in dservers.subordinate_workers:
-            wid = sw.worker_id
-            if wid is None or wid in seen:
-                continue
-            name = sw.worker_name or ""
-            w = await Worker.one_by_id(session, wid)
-            if not name:
-                name = w.name if w else ""
-            targets.append((wid, name or "", w))
-            seen.add(wid)
+    rows = await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+            "owner_id": model_instance.id,
+        },
+    )
+    for placement in subordinate_placements(model_instance, rows):
+        wid = placement.worker_id
+        if wid is None or wid in seen:
+            continue
+        name = placement.worker_name or ""
+        w = await Worker.one_by_id(session, wid)
+        if not name:
+            name = w.name if w else ""
+        targets.append((wid, name or "", w))
+        seen.add(wid)
 
     return targets
 

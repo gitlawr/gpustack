@@ -588,16 +588,12 @@ class SGLangServer(InferenceServer):
         arguments = []
 
         # Check if this is a multi-node deployment
-        if not (
-            self._model_instance.distributed_servers
-            and self._model_instance.distributed_servers.subordinate_workers
-        ):
-            return []
-
         subordinate_workers = subordinate_placements(
             self._model_instance,
             self._group_workloads(),
         )
+        if not subordinate_workers:
+            return []
         total_nodes = len(subordinate_workers) + 1  # +1 for the current node
 
         # Find the current node's rank

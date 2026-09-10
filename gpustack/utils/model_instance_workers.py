@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 from gpustack.server.model_instance_workloads import instance_ports
 from gpustack.schemas.models import (
@@ -259,6 +259,21 @@ def instance_placements(instance: ModelInstance, workloads: list = None) -> list
             skip_if_none=False,
         )
     return placements
+
+
+def rows_by_owner(
+    workloads: Optional[List[Workload]],
+) -> Dict[int, List[Workload]]:
+    """Group rows by the instance they belong to.
+
+    The readers take one instance's rows at a time, and the schedulers hold
+    the whole cluster's; grouping once per pass keeps this off the per-worker
+    inner loop.
+    """
+    grouped: Dict[int, List[Workload]] = {}
+    for w in workloads or []:
+        grouped.setdefault(w.owner_id, []).append(w)
+    return grouped
 
 
 def subordinate_placements(instance: ModelInstance, workloads: list = None) -> list:

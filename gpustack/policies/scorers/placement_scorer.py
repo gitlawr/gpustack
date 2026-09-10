@@ -15,6 +15,7 @@ from gpustack.policies.base import (
 from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import (
+    rows_by_owner,
     get_worker_allocatable_resource,
 )
 from gpustack.schemas.models import (
@@ -189,6 +190,7 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
         Score the candidates with the binpack strategy.
         """
         scored_instances = []
+        rows_by_instance = rows_by_owner(self._workloads)
 
         for instance in instances:
             if instance.worker_id is None:
@@ -217,7 +219,9 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
             )
             final_score = score
 
-            subordinate_workers = subordinate_placements(instance)
+            subordinate_workers = subordinate_placements(
+                instance, rows_by_instance.get(instance.id)
+            )
             if subordinate_workers:
                 subordinate_worker_score = (
                     await self._score_binpack_subordinate_workers(
@@ -569,6 +573,7 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
             }
         )
 
+        rows_by_instance = rows_by_owner(self._workloads)
         for model_instance in self._model_instances:
             if model_instance.worker_id is None:
                 continue
@@ -590,7 +595,9 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
                     is_current_model,
                 )
 
-            for subordinate_worker in subordinate_placements(model_instance):
+            for subordinate_worker in subordinate_placements(
+                model_instance, rows_by_instance.get(model_instance.id)
+            ):
                 for subordinate_gpu_index in subordinate_worker.gpu_indexes:
                     update_count(
                         worker_model_instances_count_map,

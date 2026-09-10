@@ -10,7 +10,7 @@ import logging
 from types import SimpleNamespace
 
 from gpustack.schemas.workloads import WorkloadOwnerKindEnum
-from gpustack.worker.controlloop import group_workloads
+from gpustack.worker.controlloop import group_workloads, workloads_by_instance
 
 
 def _clientset(items=None, raises=None):
@@ -71,5 +71,52 @@ def test_a_failed_read_does_not_reach_the_caller(caplog):
 
     with caplog.at_level(logging.DEBUG):
         assert group_workloads(clientset, 7) == []
+
+    assert "connection refused" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The whole cluster's rows, grouped
+# ---------------------------------------------------------------------------
+
+
+def test_the_grouped_read_asks_once_for_every_instance():
+    """The pass that walks every instance would otherwise filter the whole
+    watch cache once per instance."""
+    clientset, calls = _clientset(items=[])
+
+    workloads_by_instance(clientset)
+
+    assert calls == [
+        {"params": {"owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE.value}}
+    ]
+
+
+def test_rows_are_grouped_by_the_instance_they_belong_to():
+    rows = [
+        SimpleNamespace(owner_id=1, group_index=0),
+        SimpleNamespace(owner_id=2, group_index=0),
+        SimpleNamespace(owner_id=1, group_index=1),
+    ]
+    clientset, _ = _clientset(items=rows)
+
+    grouped = workloads_by_instance(clientset)
+
+    assert grouped == {1: [rows[0], rows[2]], 2: [rows[1]]}
+
+
+def test_an_instance_with_no_rows_is_absent_rather_than_empty():
+    """The readers take None to mean "nothing compiled yet" and skip the
+    comparison; an empty list would read as "compiled, and it disagrees"."""
+    clientset, _ = _clientset(items=[SimpleNamespace(owner_id=1, group_index=0)])
+
+    assert workloads_by_instance(clientset).get(2) is None
+
+
+def test_a_failed_grouped_read_does_not_reach_the_caller(caplog):
+    clientset, _ = _clientset(raises=RuntimeError("connection refused"))
+
+    with caplog.at_level(logging.DEBUG):
+        assert workloads_by_instance(clientset) == {}
 
     assert "connection refused" in caplog.text
