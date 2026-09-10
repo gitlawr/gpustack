@@ -547,7 +547,7 @@ def test_mooncake_provider_declaration():
     fields = {field.name: field for field in provider.managed_fields}
     assert set(fields) == {
         "enable_ha",
-        "ha_backend_connstring",
+        "etcd_endpoints",
         "master_replicas",
         "pool_mode",
         "engine_segment_size",
@@ -564,11 +564,11 @@ def test_mooncake_provider_declaration():
     # master while it is off, and clients reach the elected leader
     # through etcd rather than through whichever replica they found.
     assert fields["enable_ha"].default is False
-    assert fields["ha_backend_connstring"].required is True
-    assert fields["ha_backend_connstring"].visible_by == "enable_ha"
-    assert fields["ha_backend_connstring"].visible_when is True
+    assert fields["etcd_endpoints"].required is True
+    assert fields["etcd_endpoints"].visible_by == "enable_ha"
+    assert fields["etcd_endpoints"].visible_when is True
     # the shape of an endpoint list does not survive prose
-    assert fields["ha_backend_connstring"].placeholder == "10.0.0.1:2379,10.0.0.2:2379"
+    assert fields["etcd_endpoints"].placeholder == "10.0.0.1:2379,10.0.0.2:2379"
     assert fields["master_replicas"].default == 3
     assert fields["master_replicas"].gated_default == 1
     # Masters do not vote among themselves, so a floor of two rules out
@@ -580,23 +580,25 @@ def test_mooncake_provider_declaration():
     # next to the sizing it switches, and the HA posture goes last.
     order = [field.name for field in provider.managed_fields]
     assert order[:2] == ["pool_mode", "engine_segment_size"]
-    assert order[-3:] == ["enable_ha", "ha_backend_connstring", "master_replicas"]
+    assert order[-3:] == ["enable_ha", "etcd_endpoints", "master_replicas"]
     assert master.replicas_by == "master_replicas"
-    assert master.address_template == "etcd://{{ha_backend_connstring}}"
+    assert master.address_template == "etcd://{{etcd_endpoints}}"
     ha_off = resolved_field_values(provider.managed_fields, {})
     assert ha_off["master_replicas"] == 1
     assert render_optional_template(master.address_template, ha_off) is None
     ha_on = resolved_field_values(
         provider.managed_fields,
-        {"enable_ha": True, "ha_backend_connstring": "10.0.0.9:2379"},
+        {"enable_ha": True, "etcd_endpoints": "10.0.0.9:2379"},
     )
     assert ha_on["master_replicas"] == 3
     assert (
         render_optional_template(master.address_template, ha_on)
         == "etcd://10.0.0.9:2379"
     )
-    # The leader publishes its own routable address into the election.
+    # The leader publishes its own routable address into the election,
+    # and the endpoints ride the flag this version actually declares.
     assert "--rpc_address {{worker_ip}}" in master.run_command
+    assert "--etcd_endpoints {{etcd_endpoints}}" in master.run_command
 
     assert fields["pool_mode"].default == "embedded"
     assert fields["pool_mode"].option_values() == ["embedded", "standalone-store"]

@@ -386,12 +386,11 @@
         --default_kv_lease_ttl 30000
         --eviction_high_watermark_ratio {{eviction_high_watermark_ratio}}
         --eviction_ratio {{eviction_ratio}}
-        --enable_ha={{enable_ha}} --ha_backend_type=etcd
-        --ha_backend_connstring {{ha_backend_connstring}}
+        --enable_ha={{enable_ha}} --etcd_endpoints {{etcd_endpoints}}
       # With HA on, clients discover the current leader through etcd
-      # instead of dialing one master; without a connection string this
-      # renders to nothing and the resolved instance address is used.
-      address_template: "etcd://{{ha_backend_connstring}}"
+      # instead of dialing one master; without endpoints this renders to
+      # nothing and the resolved instance address is used.
+      address_template: "etcd://{{etcd_endpoints}}"
       health_check:
         scheme: http
         path: /metrics
@@ -517,7 +516,12 @@
         one.
       type: boolean
       default: false
-    - name: ha_backend_connstring
+    # Named after the flag that carries it. v0.3.13 renames the pair to
+    # ha_backend_type/ha_backend_connstring to admit other backends, so
+    # moving the default version past v0.3.10 has to re-cut this command
+    # — which today needs per-version component launches, a gap the
+    # catalog does not cover yet.
+    - name: etcd_endpoints
       label: etcd Endpoints
       description: >-
         host:port of your etcd, comma-separated for several. The masters

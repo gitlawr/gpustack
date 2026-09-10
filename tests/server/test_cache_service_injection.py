@@ -527,7 +527,7 @@ async def test_resolve_ha_mooncake_points_the_engine_at_the_backend():
     master_worker = SimpleNamespace(id=9, ip="10.0.0.9", deleted_at=None)
     service = mooncake_cache_service(
         config=CacheServiceConfig(
-            fields={"enable_ha": True, "ha_backend_connstring": "10.0.0.3:2379"}
+            fields={"enable_ha": True, "etcd_endpoints": "10.0.0.3:2379"}
         )
     )
     with patch_lookups(
