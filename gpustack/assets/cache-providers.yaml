@@ -535,10 +535,11 @@
       description: >-
         Masters in the election. One leader serves at a time; the
         others stand by to take over. They do not vote among themselves —
-        etcd holds the election — so size this by how many workers can
-        hold a master.
+        etcd holds the election — so two already survives losing one, and
+        more only buys depth; size this by how many workers can hold a
+        master.
       type: number
-      default: 3
+      default: 2
       min: 2
       step: 1
       visible_by: enable_ha

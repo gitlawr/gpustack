@@ -569,12 +569,12 @@ def test_mooncake_provider_declaration():
     assert fields["etcd_endpoints"].visible_when is True
     # the shape of an endpoint list does not survive prose
     assert fields["etcd_endpoints"].placeholder == "10.0.0.1:2379,10.0.0.2:2379"
-    assert fields["master_replicas"].default == 3
-    assert fields["master_replicas"].gated_default == 1
-    # Masters do not vote among themselves, so a floor of two rules out
-    # the contradiction of HA with a single master rather than tuning a
-    # quorum.
+    # Masters do not vote among themselves, so this is not a quorum to
+    # size: two already survives losing one, and it doubles as the floor
+    # that rules out the contradiction of HA with a single master.
+    assert fields["master_replicas"].default == 2
     assert fields["master_replicas"].min == 2
+    assert fields["master_replicas"].gated_default == 1
     # The form renders fields in declaration order with no group frames,
     # so adjacency is what ties a field to what it governs: the mode sits
     # next to the sizing it switches, and the HA posture goes last.
@@ -590,7 +590,7 @@ def test_mooncake_provider_declaration():
         provider.managed_fields,
         {"enable_ha": True, "etcd_endpoints": "10.0.0.9:2379"},
     )
-    assert ha_on["master_replicas"] == 3
+    assert ha_on["master_replicas"] == 2
     assert (
         render_optional_template(master.address_template, ha_on)
         == "etcd://10.0.0.9:2379"
