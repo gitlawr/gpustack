@@ -362,6 +362,7 @@ def test_start_instance_creates_workload_and_patches_starting():
         state=CacheServiceStateEnum.STARTING,
         port=40001,
         metrics_port=40002,
+        extra_ports=None,
         state_message="",
     )
     assert manager._assigned_ports[instance.id] == (40001, 40002)
@@ -1226,6 +1227,9 @@ def test_allocate_ports_excludes_ports_of_sibling_instances():
         state=CacheServiceStateEnum.RUNNING,
         port=40001,
         metrics_port=40011,
+        # A sibling's declared ports are held just as firmly as its two
+        # platform ones.
+        extra_ports={"p2p": 40021},
     )
     clientset.cache_service_instances.list.return_value = SimpleNamespace(
         items=[sibling]
@@ -1243,9 +1247,10 @@ def test_allocate_ports_excludes_ports_of_sibling_instances():
         "gpustack.worker.cache_service_manager.network.get_free_port",
         side_effect=fake_get_free_port,
     ):
-        port, metrics_port = manager._allocate_ports(instance)
+        port, metrics_port, extra_ports = manager._allocate_ports(instance)
 
     assert (port, metrics_port) == (40002, 40003)
+    assert extra_ports == {}
     # Both of the sibling's ports are excluded; the metrics-port pick also
     # excludes the service port picked just before it. Siblings are listed
     # for this worker only.
@@ -1254,10 +1259,75 @@ def test_allocate_ports_excludes_ports_of_sibling_instances():
         "page": -1,
     }
     assert port_calls == [
-        ("40000-41000", {40001, 40011}),
-        ("40000-41000", {40001, 40011, 40002}),
+        ("40000-41000", {40001, 40011, 40021}),
+        ("40000-41000", {40001, 40011, 40021, 40002}),
     ]
     assert manager._assigned_ports[instance.id] == (40002, 40003)
+
+
+def test_allocate_ports_serves_the_names_a_component_declares():
+    """A declared port is allocated alongside the platform's two, excluded
+    from the picks after it, and recorded for reuse."""
+    manager, clientset = _build_manager(worker_id=1)
+    instance = _new_instance(id=12, cache_service_id=6)
+    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+    picks = iter([40002, 40003, 40004])
+    seen = []
+
+    def fake_get_free_port(port_range, unavailable_ports):
+        seen.append(set(unavailable_ports))
+        return next(picks)
+
+    with patch(
+        "gpustack.worker.cache_service_manager.network.get_free_port",
+        side_effect=fake_get_free_port,
+    ):
+        port, metrics_port, extra_ports = manager._allocate_ports(instance, ["p2p"])
+
+    assert (port, metrics_port) == (40002, 40003)
+    assert extra_ports == {"p2p": 40004}
+    assert seen[-1] == {40002, 40003}
+    assert manager._assigned_ports[instance.id] == (40002, 40003, 40004)
+
+
+def test_allocate_ports_reuses_a_recorded_declared_port():
+    """Peers hold the advertised port, so a restart keeps it rather than
+    republishing a new one."""
+    manager, clientset = _build_manager(worker_id=1)
+    instance = _new_instance(
+        id=12,
+        cache_service_id=6,
+        port=40001,
+        metrics_port=40002,
+        extra_ports={"p2p": 40003},
+    )
+    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+
+    with patch(
+        "gpustack.worker.cache_service_manager.network.is_port_available",
+        return_value=True,
+    ):
+        port, metrics_port, extra_ports = manager._allocate_ports(instance, ["p2p"])
+
+    assert (port, metrics_port, extra_ports) == (40001, 40002, {"p2p": 40003})
+
+
+def test_allocate_ports_repicks_when_a_declared_port_is_new():
+    """A component that gains a port keeps none of the old ones: the
+    recorded set no longer covers what the launch needs."""
+    manager, clientset = _build_manager(worker_id=1)
+    instance = _new_instance(id=12, cache_service_id=6, port=40001, metrics_port=40002)
+    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+    picks = iter([40005, 40006, 40007])
+
+    with patch(
+        "gpustack.worker.cache_service_manager.network.get_free_port",
+        side_effect=lambda **kwargs: next(picks),
+    ):
+        port, metrics_port, extra_ports = manager._allocate_ports(instance, ["p2p"])
+
+    assert (port, metrics_port) == (40005, 40006)
+    assert extra_ports == {"p2p": 40007}
 
 
 # ---------------------------------------------------------------------------

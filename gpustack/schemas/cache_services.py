@@ -267,6 +267,12 @@ class CacheServiceInstanceBase(SQLModel):
     """Port the cache server exposes Prometheus metrics on, allocated on
     the instance's worker alongside ``port``."""
 
+    extra_ports: Optional[Dict[str, int]] = Field(sa_column=Column(JSON), default=None)
+    """Ports allocated for the names this instance's component declares
+    (port name -> port), rendered into its templates as
+    {{ports.<name>}}. Recorded so a restart keeps the ports it already
+    published to peers."""
+
     state: CacheServiceStateEnum = Field(
         default=CacheServiceStateEnum.PENDING,
         sa_column=Column(String(length=64), nullable=False),

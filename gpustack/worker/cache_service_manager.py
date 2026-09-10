@@ -283,10 +283,17 @@ class CacheServiceManager:
                 )
             self._release_ports(instance.id)
 
-            port, metrics_port = self._allocate_ports(instance)
+            component_spec = provider.get_component(instance.component or "")
+            port, metrics_port, extra_ports = self._allocate_ports(
+                instance, component_spec.ports if component_spec else None
+            )
             params = self._build_template_params(
                 cache_service, provider, port, metrics_port
             )
+            # Ports the component declared by name, each its own listener
+            # (a transfer channel's handshake socket, say).
+            for name, value in extra_ports.items():
+                params[f"ports.{name}"] = value
             # The worker's own IP: a store advertises it to peers (the
             # P2P handshake publishes it as local_hostname), where the
             # bind-address 0.0.0.0 would be useless.
@@ -295,8 +302,6 @@ class CacheServiceManager:
             # (e.g. the Mooncake master's host:port for a store).
             for name, address in (instance.component_addresses or {}).items():
                 params[f"component.{name}.address"] = address
-
-            component_spec = provider.get_component(instance.component or "")
 
             argv, overrides_entrypoint = self._build_launch_argv(
                 cache_service, version_config, component_spec, params
@@ -367,6 +372,7 @@ class CacheServiceManager:
                 state=CacheServiceStateEnum.STARTING,
                 port=port,
                 metrics_port=metrics_port,
+                extra_ports=extra_ports or None,
                 state_message="",
             ):
                 logger.info(
@@ -664,19 +670,22 @@ class CacheServiceManager:
             )
         return remaining + l2_args + hand_written, l2_env
 
-    def _allocate_ports(self, instance: CacheServiceInstance) -> Tuple[int, int]:
+    def _allocate_ports(
+        self, instance: CacheServiceInstance, extra_names: Optional[List[str]] = None
+    ) -> Tuple[int, int, Dict[str, int]]:
         """
-        Allocate the instance's (port, metrics_port) pair on this worker.
+        Allocate the instance's ports on this worker: the service port, the
+        metrics port, and one for every name its component declares.
 
         Ports already handed out by this process and ports recorded on other
         cache service instances of this worker are both treated as
         unavailable, so a restarted worker can't re-issue a port an existing
-        instance holds. The metrics port additionally excludes the service
-        port picked just before it.
+        instance holds. Each port picked excludes the ones picked before it.
         """
+        extra_names = list(extra_names or [])
         with CacheServiceManager._port_lock:
             unavailable_ports = {
-                port for pair in self._assigned_ports.values() for port in pair
+                port for ports in self._assigned_ports.values() for port in ports
             }
             try:
                 instances_page = self._clientset.cache_service_instances.list(
@@ -691,6 +700,9 @@ class CacheServiceManager:
                         unavailable_ports.add(existing.port)
                     if existing.metrics_port:
                         unavailable_ports.add(existing.metrics_port)
+                    for existing_port in (existing.extra_ports or {}).values():
+                        if existing_port:
+                            unavailable_ports.add(existing_port)
             except Exception as e:
                 logger.warning(
                     f"Failed to list cache service instances for port "
@@ -702,31 +714,40 @@ class CacheServiceManager:
             # snapshots that nothing refreshes, so a restart that changed
             # ports would strand every running deployment on a dead
             # endpoint until its model instances are recreated.
-            if (
-                instance.port
-                and instance.metrics_port
-                and instance.port not in unavailable_ports
-                and instance.metrics_port not in unavailable_ports
-                and network.is_port_available(instance.port)
-                and network.is_port_available(instance.metrics_port)
+            recorded_extras = instance.extra_ports or {}
+            recorded = [instance.port, instance.metrics_port] + [
+                recorded_extras.get(name) for name in extra_names
+            ]
+            if all(
+                port
+                and port not in unavailable_ports
+                and network.is_port_available(port)
+                for port in recorded
             ):
-                self._assigned_ports[instance.id] = (
+                self._assigned_ports[instance.id] = tuple(recorded)
+                return (
                     instance.port,
                     instance.metrics_port,
+                    {name: recorded_extras[name] for name in extra_names},
                 )
-                return instance.port, instance.metrics_port
 
-            port = network.get_free_port(
-                port_range=self._config.service_port_range,
-                unavailable_ports=unavailable_ports,
+            def take() -> int:
+                port = network.get_free_port(
+                    port_range=self._config.service_port_range,
+                    unavailable_ports=unavailable_ports,
+                )
+                unavailable_ports.add(port)
+                return port
+
+            port = take()
+            metrics_port = take()
+            extra_ports = {name: take() for name in extra_names}
+            self._assigned_ports[instance.id] = (
+                port,
+                metrics_port,
+                *extra_ports.values(),
             )
-            unavailable_ports.add(port)
-            metrics_port = network.get_free_port(
-                port_range=self._config.service_port_range,
-                unavailable_ports=unavailable_ports,
-            )
-            self._assigned_ports[instance.id] = (port, metrics_port)
-            return port, metrics_port
+            return port, metrics_port, extra_ports
 
     def _release_ports(self, instance_id: int):
         with CacheServiceManager._port_lock:

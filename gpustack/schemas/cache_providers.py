@@ -467,6 +467,14 @@ class CacheProviderComponent(BaseModel):
     two roles. {{component.<name>.address}} resolves to a
     single-replica component's host:port."""
 
+    ports: List[str] = []
+    """Names of ports this component needs beyond the two the platform
+    always allocates (the service port and the metrics port) — e.g. the
+    handshake listener a peer-to-peer transfer channel binds. The worker
+    allocates one per name on the instance's worker, records them on the
+    instance so a restart keeps them, and renders each as
+    {{ports.<name>}} in this component's launch templates."""
+
     env: Dict[str, str] = {}
     """Env template for this component's container; values support
     {{placeholder}} including cross-component addresses."""
@@ -523,6 +531,31 @@ class CacheProviderComponent(BaseModel):
         if self.run_command and self.run_args:
             raise ValueError("a component declares run_command or run_args, not both")
         return self
+
+
+def _validate_component_shape(name: str, component: CacheProviderComponent) -> None:
+    """Check what a component declares about itself, independent of how it
+    relates to the others."""
+    if component.topology not in ("replicas", "per_node"):
+        raise ValueError(
+            f"component '{name}' declares unknown topology " f"'{component.topology}'"
+        )
+    if component.replicas < 1:
+        raise ValueError(
+            f"component '{name}' declares replicas "
+            f"{component.replicas}; at least one is required"
+        )
+    for port_name in component.ports:
+        if not port_name.isidentifier():
+            raise ValueError(
+                f"component '{name}' declares port '{port_name}', "
+                "which is not a valid placeholder name"
+            )
+        if port_name in ("port", "metrics_port"):
+            raise ValueError(
+                f"component '{name}' declares port '{port_name}', "
+                "which the platform already allocates"
+            )
 
 
 class CacheProvider(BaseModel):
@@ -651,16 +684,7 @@ class CacheProvider(BaseModel):
     @model_validator(mode="after")
     def _validate_components(self) -> "CacheProvider":
         for name, component in self.components.items():
-            if component.topology not in ("replicas", "per_node"):
-                raise ValueError(
-                    f"component '{name}' declares unknown topology "
-                    f"'{component.topology}'"
-                )
-            if component.replicas < 1:
-                raise ValueError(
-                    f"component '{name}' declares replicas "
-                    f"{component.replicas}; at least one is required"
-                )
+            _validate_component_shape(name, component)
             dep_name = component.depends_on
             if dep_name is None:
                 continue
