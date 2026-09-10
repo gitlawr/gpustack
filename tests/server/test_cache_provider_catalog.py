@@ -772,9 +772,9 @@ def test_meshfusion_provider_is_a_branded_lmcache_clone():
     diverging_fields = {
         # P2P is declared for LMCache alone until XSKY confirms their
         # image ships the coordinator CLI, so only LMCache splits into
-        # components (and moves its launch and sizing onto one of them).
+        # components — and carries the field that gates them. Both are
+        # checked below rather than left unchecked.
         "components",
-        "resource_profile",
         "managed_fields",
         "l2_backends",
         "versions",
@@ -822,6 +822,21 @@ def test_meshfusion_provider_is_a_branded_lmcache_clone():
     ]
     lm_vllm = lmcache.integration_for("vLLM", "cuda")
     assert lm_vllm.frameworks == ["cuda"]
+
+    # The two diverge on P2P alone: LMCache splits into components and
+    # declares the switch that gates them, while every other declared
+    # field stays in step. Sizing stays shared — LMCache's server
+    # component repeats it, but the provider-level profile both read is
+    # the same.
+    assert set(meshfusion.components) == set()
+    assert [field.name for field in meshfusion.managed_fields] == [
+        field.name for field in lmcache.managed_fields if field.name != "enable_p2p"
+    ]
+    assert [
+        field.model_dump()
+        for field in lmcache.managed_fields
+        if field.name != "enable_p2p"
+    ] == [field.model_dump() for field in meshfusion.managed_fields]
     for entry in vllm_entries:
         assert entry.injection == lm_vllm.injection
     sglang_entries = [
