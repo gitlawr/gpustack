@@ -964,3 +964,25 @@ async def test_a_follower_follows_its_own_entry(monkeypatch):
 
     assert rows[0].update.await_args[0][1]["state"] == WorkloadStateEnum.RUNNING
     assert rows[1].update.await_args[0][1]["state"] == WorkloadStateEnum.ERROR
+
+
+def test_an_empty_collection_compiles_to_none_not_an_empty_list():
+    """The columns default to None, so writing [] gives the same absence two
+    spellings and every comparison against the instance reports a difference
+    that is not one. Caught on a real instance with no gpu_addresses."""
+    mi = _instance()
+    mi.gpu_addresses = None
+
+    leader = compile_model_instance(mi)[0]
+
+    assert leader.gpu_addresses is None
+
+
+def test_a_non_empty_collection_is_copied():
+    mi = _instance()
+    mi.gpu_addresses = ["0000:01:00.0"]
+
+    leader = compile_model_instance(mi)[0]
+
+    assert leader.gpu_addresses == ["0000:01:00.0"]
+    assert leader.gpu_addresses is not mi.gpu_addresses

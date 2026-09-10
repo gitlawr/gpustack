@@ -189,6 +189,16 @@ def aggregate_instance_runtime(workloads: List[Workload], instance=None) -> dict
     return runtime
 
 
+def _listed(values) -> Optional[list]:
+    """A list, or None when there is nothing in it.
+
+    The columns default to None, so a compiler writing [] gives the same
+    absence two spellings and every comparison against the instance -- which
+    carries None -- reports a difference that is not one.
+    """
+    return list(values) if values else None
+
+
 def compile_model_instance(mi: ModelInstance) -> List[Workload]:
     """
     The workloads that run a model instance.
@@ -212,8 +222,8 @@ def compile_model_instance(mi: ModelInstance) -> List[Workload]:
         [
             ReservedClaim(
                 worker_id=sw.worker_id,
-                gpu_indexes=list(sw.gpu_indexes or []),
-                gpu_addresses=list(sw.gpu_addresses or []),
+                gpu_indexes=_listed(sw.gpu_indexes),
+                gpu_addresses=_listed(sw.gpu_addresses),
                 computed_resource_claim=(
                     sw.computed_resource_claim.model_dump()
                     if sw.computed_resource_claim
@@ -240,8 +250,8 @@ def compile_model_instance(mi: ModelInstance) -> List[Workload]:
         worker_ip=mi.worker_ip,
         worker_ifname=mi.worker_ifname,
         gpu_type=mi.gpu_type,
-        gpu_indexes=list(mi.gpu_indexes or []),
-        gpu_addresses=list(mi.gpu_addresses or []),
+        gpu_indexes=_listed(mi.gpu_indexes),
+        gpu_addresses=_listed(mi.gpu_addresses),
         computed_resource_claim=(
             mi.computed_resource_claim.model_dump()
             if mi.computed_resource_claim
@@ -277,8 +287,8 @@ def compile_model_instance(mi: ModelInstance) -> List[Workload]:
                 worker_ip=sw.worker_ip,
                 worker_ifname=sw.worker_ifname,
                 gpu_type=sw.gpu_type,
-                gpu_indexes=list(sw.gpu_indexes or []),
-                gpu_addresses=list(sw.gpu_addresses or []),
+                gpu_indexes=_listed(sw.gpu_indexes),
+                gpu_addresses=_listed(sw.gpu_addresses),
                 computed_resource_claim=(
                     sw.computed_resource_claim.model_dump()
                     if sw.computed_resource_claim
@@ -289,7 +299,7 @@ def compile_model_instance(mi: ModelInstance) -> List[Workload]:
                 state_message=sw.state_message,
                 ports=named_ports(None, sw.ports) or None,
                 pid=sw.pid,
-                arguments=list(sw.arguments or []),
+                arguments=_listed(sw.arguments),
                 progress=sw.download_progress,
             )
         )
