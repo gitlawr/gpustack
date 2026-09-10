@@ -384,14 +384,19 @@
     # metrics HTTP server binds all interfaces on its own (no
     # metrics_host flag exists), and the HA endpoints ride
     # etcd_endpoints, the name v0.3.13 keeps as the legacy alias.
-    # With HA on, the standbys loop candidate -> standby -> await view
-    # change by design, logging a failed standby replication start each
-    # pass: that path reads an oplog key the leader never writes while
-    # oplog stays off. It is upstream noise, not a fault — promotion
-    # goes through the leadership lease, not the oplog, so failover
-    # works; what a promoted leader lacks is the pool contents, which
-    # clients re-register. Upstream is reworking oplog durability, so
-    # enabling it is deferred.
+    # What HA delivers on the bundled build, measured: clients resolve
+    # the master through etcd, so a master that dies and is recreated is
+    # picked up on its own — no dependent recreation, no engine restart,
+    # which is what a stamped address costs. What it does not deliver is
+    # a standby taking over: the standbys loop candidate -> standby ->
+    # await view change every second, and each pass logs a failed
+    # replication start because it reads an oplog key the leader never
+    # initialises. That failure latches (standby_running_ stays false),
+    # and promotion refuses while it is, so a surviving standby wins the
+    # lease and hands it straight back; recovery comes from the fresh
+    # master instead, which has observed no leader and so can promote.
+    # Upstream is reworking oplog durability, which is where this gets
+    # fixed.
     master:
       attach_endpoint: true
       serves_metrics: true
