@@ -26,15 +26,17 @@ class TestMultimodalNVIDIA:
         cleanup_models,
     ):
         """Deploy an image generation model (Z-Image-Turbo)"""
-        model_name = e2e_config.models.multimodal.image
+        repo_id = e2e_config.models.multimodal.image
+        model_name = repo_id.split("/")[-1]
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}",
             source="huggingface",
-            huggingface_repo_id=model_name,  # Requires full repo id
+            huggingface_repo_id=repo_id,  # Requires full repo id
             backend="vLLM",
             categories=["image"],
             replicas=1,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
         cleanup_models.append(model["id"])
@@ -52,25 +54,36 @@ class TestMultimodalNVIDIA:
     def shared_tts_model(
         self,
         gpustack_client: GPUStackClient,
+        model_helper: ModelHelper,
         e2e_config: E2EConfig,
     ):
         """Class-scoped shared TTS model."""
-        model_name = e2e_config.models.multimodal.tts
+        repo_id = e2e_config.models.multimodal.tts
+        model_name = repo_id.split("/")[-1]
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}",
             source="huggingface",
-            huggingface_repo_id=model_name,
+            huggingface_repo_id=repo_id,
             backend="VoxBox",
             categories=["text_to_speech"],
             replicas=1,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
-        model = wait_for_model_ready(
-            gpustack_client,
-            model["id"],
-            timeout=e2e_config.models.deploy_timeout,
-        )
+        try:
+            model = wait_for_model_ready(
+                gpustack_client,
+                model["id"],
+                timeout=e2e_config.models.deploy_timeout,
+            )
+        except Exception:
+            if e2e_config.test.cleanup:
+                try:
+                    gpustack_client.delete_model(model["id"])
+                except Exception:
+                    pass
+            raise
 
         yield model
 
@@ -106,15 +119,17 @@ class TestMultimodalNVIDIA:
         cleanup_models,
     ):
         """Deploy an ASR model (Qwen3-ASR)"""
-        model_name = e2e_config.models.multimodal.asr
+        repo_id = e2e_config.models.multimodal.asr
+        model_name = repo_id.split("/")[-1]
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}",
             source="huggingface",
-            huggingface_repo_id=model_name,
+            huggingface_repo_id=repo_id,
             backend="VoxBox",  # ASR uses VoxBox backend
             categories=["speech_to_text"],
             replicas=1,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
         cleanup_models.append(model["id"])
@@ -148,19 +163,22 @@ class TestMultimodalAscend:
     def test_deploy_image_model_ascend(
         self,
         gpustack_client: GPUStackClient,
+        model_helper: ModelHelper,
         e2e_config: E2EConfig,
         cleanup_models,
     ):
         """Deploy an image model on Ascend"""
-        model_name = e2e_config.models.multimodal.image
+        repo_id = e2e_config.models.multimodal.image
+        model_name = repo_id.split("/")[-1]
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}-ascend",
             source="huggingface",
-            huggingface_repo_id=model_name,
+            huggingface_repo_id=repo_id,
             backend="MindIE",
             categories=["image"],
             replicas=1,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
         cleanup_models.append(model["id"])
@@ -176,19 +194,22 @@ class TestMultimodalAscend:
     def test_deploy_tts_model_ascend(
         self,
         gpustack_client: GPUStackClient,
+        model_helper: ModelHelper,
         e2e_config: E2EConfig,
         cleanup_models,
     ):
         """Deploy a TTS model on Ascend"""
-        model_name = e2e_config.models.multimodal.tts
+        repo_id = e2e_config.models.multimodal.tts
+        model_name = repo_id.split("/")[-1]
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}-ascend",
             source="huggingface",
-            huggingface_repo_id=model_name,
+            huggingface_repo_id=repo_id,
             backend="VoxBox",
             categories=["text_to_speech"],
             replicas=1,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
         cleanup_models.append(model["id"])
@@ -204,19 +225,22 @@ class TestMultimodalAscend:
     def test_deploy_asr_model_ascend(
         self,
         gpustack_client: GPUStackClient,
+        model_helper: ModelHelper,
         e2e_config: E2EConfig,
         cleanup_models,
     ):
         """Deploy an ASR model on Ascend"""
-        model_name = e2e_config.models.multimodal.asr
+        repo_id = e2e_config.models.multimodal.asr
+        model_name = repo_id.split("/")[-1]
 
         model = gpustack_client.create_model(
             name=f"e2e-test-{model_name}-ascend",
             source="huggingface",
-            huggingface_repo_id=model_name,
+            huggingface_repo_id=repo_id,
             backend="VoxBox",
             categories=["speech_to_text"],
             replicas=1,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
         cleanup_models.append(model["id"])

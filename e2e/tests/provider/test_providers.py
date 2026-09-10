@@ -3,10 +3,11 @@ Test Case 18: Add Doubao Provider
 Test Case 19: Add Qwen Provider
 Test Case 20: Add OpenAI Provider
 """
+import time
 
 import pytest
 
-from e2e.utils.client import GPUStackClient
+from e2e.utils.client import GPUStackClient,GPUStackClientError
 from e2e.utils.config import E2EConfig
 
 
@@ -35,7 +36,7 @@ class TestDoubaoProvider:
             config={
                 "type": "doubao",
             },
-            api_tokens=[{"value": e2e_config.providers.doubao.api_key}],
+            api_tokens=[{"input": e2e_config.providers.doubao.api_key}],
             models=[
                 {"name": "doubao-pro-32k", "category": "llm"},
             ],
@@ -59,7 +60,7 @@ class TestDoubaoProvider:
         provider = gpustack_client.create_model_provider(
             name="e2e-test-doubao-access",
             config={"type": "doubao"},
-            api_tokens=[{"value": e2e_config.providers.doubao.api_key}],
+            api_tokens=[{"input": e2e_config.providers.doubao.api_key}],
             models=[{"name": "doubao-pro-32k", "category": "llm"}],
         )
 
@@ -115,7 +116,7 @@ class TestQwenProvider:
             config={
                 "type": "qwen",
             },
-            api_tokens=[{"value": e2e_config.providers.qwen.api_key}],
+            api_tokens=[{"input": e2e_config.providers.qwen.api_key}],
             models=[
                 {"name": "qwen-turbo", "category": "llm"},
             ],
@@ -137,7 +138,7 @@ class TestQwenProvider:
         provider = gpustack_client.create_model_provider(
             name="e2e-test-qwen-access",
             config={"type": "qwen"},
-            api_tokens=[{"value": e2e_config.providers.qwen.api_key}],
+            api_tokens=[{"input": e2e_config.providers.qwen.api_key}],
             models=[{"name": "qwen-turbo", "category": "llm"}],
         )
 
@@ -193,7 +194,7 @@ class TestOpenAIProvider:
         provider = gpustack_client.create_model_provider(
             name="e2e-test-openai",
             config=config,
-            api_tokens=[{"value": e2e_config.providers.openai.api_key}],
+            api_tokens=[{"input": e2e_config.providers.openai.api_key}],
             models=[
                 {"name": "gpt-4o-mini", "category": "llm"},
             ],
@@ -219,7 +220,7 @@ class TestOpenAIProvider:
         provider = gpustack_client.create_model_provider(
             name="e2e-test-openai-access",
             config=config,
-            api_tokens=[{"value": e2e_config.providers.openai.api_key}],
+            api_tokens=[{"input": e2e_config.providers.openai.api_key}],
             models=[{"name": "gpt-4o-mini", "category": "llm"}],
         )
 
@@ -239,11 +240,23 @@ class TestOpenAIProvider:
 
         cleanup_routes.append(route["id"])
 
-        response = gpustack_client.chat_completion(
-            model=route["name"],
-            messages=[{"role": "user", "content": "Say hello"}],
-            max_tokens=50,
-        )
+        response = None
+        last_error = None
+        for _ in range(10):
+            try:
+                response = gpustack_client.chat_completion(
+                    model=route["name"],
+                    messages=[{"role": "user", "content": "Say hello"}],
+                    max_tokens=50,
+                )
+                break
+            except GPUStackClientError as e:
+                if e.status_code !=503:
+                    raise
+                last_error =e
+                time.sleep(1)
+        if response is None:
+            raise last_error
 
         assert response["choices"][0]["message"]["content"]
 
@@ -261,7 +274,7 @@ class TestOpenAIProvider:
         result = gpustack_client.test_provider_model(
             config=config,
             model_name="gpt-4o-mini",
-            api_tokens=[{"value": e2e_config.providers.openai.api_key}],
+            api_token=e2e_config.providers.openai.api_key,
         )
 
         # Test should succeed or return an error message

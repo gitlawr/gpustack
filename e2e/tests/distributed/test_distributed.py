@@ -129,24 +129,28 @@ class TestVLLMDistributed:
     def test_vllm_tensor_parallel(
         self,
         gpustack_client: GPUStackClient,
+        model_helper: ModelHelper,
         e2e_config: E2EConfig,
         cleanup_models,
     ):
         """Test vLLM Tensor Parallel deployment"""
         result = gpustack_client.list_gpu_devices()
-        gpu_count = len(result.get("items", []))
+        gpu_items = result.get("items",[])
+        gpu_count = len(gpu_items)
 
         if gpu_count < 2:
             pytest.skip("Need at least 2 GPUs for tensor parallel test")
 
+        gpu_ids = [g["id"] for g in gpu_items[:2]]
         model = gpustack_client.create_model(
             name="e2e-test-vllm-tp",
             source="huggingface",
             huggingface_repo_id=e2e_config.models.default_model,
             backend="vLLM",
             replicas=1,
-            gpu_selector={"gpus_per_replica": 2},
+            gpu_selector={"gpu_ids": gpu_ids,"gpus_per_replica": 2}, 
             distributed_inference_across_workers=True,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
         cleanup_models.append(model["id"])
@@ -177,24 +181,28 @@ class TestSGLangDistributed:
     def test_sglang_tensor_parallel(
         self,
         gpustack_client: GPUStackClient,
+        model_helper: ModelHelper,
         e2e_config: E2EConfig,
         cleanup_models,
     ):
         """Test SGLang Tensor Parallel deployment"""
         result = gpustack_client.list_gpu_devices()
-        gpu_count = len(result.get("items", []))
+        gpu_items = result.get("items",[])
+        gpu_count = len(gpu_items)
 
         if gpu_count < 2:
             pytest.skip("Need at least 2 GPUs for tensor parallel test")
 
+        gpu_ids = [g["id"] for g in gpu_items[:2]]
         model = gpustack_client.create_model(
             name="e2e-test-sglang-tp",
             source="huggingface",
             huggingface_repo_id=e2e_config.models.default_model,
             backend="SGLang",
             replicas=1,
-            gpu_selector={"gpus_per_replica": 2},
+            gpu_selector={"gpu_ids": gpu_ids, "gpus_per_replica": 2},
             distributed_inference_across_workers=True,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
         cleanup_models.append(model["id"])
@@ -225,24 +233,27 @@ class TestMindIEDistributed:
     def test_mindie_distributed(
         self,
         gpustack_client: GPUStackClient,
+        model_helper: ModelHelper,
         e2e_config: E2EConfig,
         cleanup_models,
     ):
         """Test MindIE distributed deployment"""
         result = gpustack_client.list_gpu_devices()
-        npu_count = len(result.get("items", []))
+        gpu_items = result.get("items",[])
+        npu_count = len(gpu_items)
 
         if npu_count < 2:
             pytest.skip("Need at least 2 NPUs for distributed test")
-
+        gpu_ids = [g["id"] for g in gpu_items[:2]]
         model = gpustack_client.create_model(
             name="e2e-test-mindie-distributed",
             source="huggingface",
             huggingface_repo_id=e2e_config.models.default_model,
             backend="MindIE",
             replicas=1,
-            gpu_selector={"gpus_per_replica": 2},
+            gpu_selector={"gpu_ids": gpu_ids,"gpus_per_replica": 2},
             distributed_inference_across_workers=True,
+            cluster_id=model_helper._get_default_cluster_id(),
         )
 
         cleanup_models.append(model["id"])

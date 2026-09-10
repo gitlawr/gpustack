@@ -3,6 +3,10 @@ Test Case 8: Version upgrade - verify API key and model compatibility
 """
 
 import time
+import os
+import shutil
+import subprocess
+import tempfile
 import pytest
 
 from e2e.utils.client import GPUStackClient
@@ -23,6 +27,8 @@ class TestVersionUpgrade:
         docker_manager.cleanup_all()
 
         admin_password = e2e_config.server.admin_password or "Admin@123"
+        data_dir = tempfile.mkdtemp(prefix="gpustack-e2e-upgrade-data-")
+        os.chmod(data_dir,0o777)
 
         # Pull both version images
         docker_manager.pull_image(e2e_config.upgrade.from_image)
@@ -32,10 +38,22 @@ class TestVersionUpgrade:
             "from_image": e2e_config.upgrade.from_image,
             "to_image": e2e_config.upgrade.to_image,
             "password": admin_password,
+            "data_dir":data_dir,
         }
 
         if e2e_config.test.cleanup:
             docker_manager.cleanup_all()
+        subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "--entrypoint", "chown",
+                "--volume", f"{data_dir}:/data",
+                e2e_config.upgrade.to_image,
+                "-R", f"{os.getuid()}:{os.getgid()}", "/data",
+            ],
+            check=False,
+        )
+        shutil.rmtree(data_dir,ignore_errors=True)
 
     def test_deploy_old_version(
         self,
@@ -47,6 +65,7 @@ class TestVersionUpgrade:
         docker_manager.run_allinone(
             bootstrap_password=upgrade_env["password"],
             image=upgrade_env["from_image"],
+            data_dir=upgrade_env["data_dir"],
         )
 
         time.sleep(e2e_config.docker.startup_wait)
@@ -108,6 +127,7 @@ class TestVersionUpgrade:
         self,
         upgrade_env,
         docker_manager: DockerManager,
+        e2e_config: E2EConfig,
     ):
         """Perform upgrade."""
         container_name = docker_manager._get_container_name("allinone")
@@ -120,9 +140,10 @@ class TestVersionUpgrade:
         docker_manager.run_allinone(
             bootstrap_password=upgrade_env["password"],
             image=upgrade_env["to_image"],
+            data_dir=upgrade_env["data_dir"],
         )
 
-        time.sleep(15)
+        time.sleep(e2e_config.docker.startup_wait)
 
     def test_verify_version_after_upgrade(
         self,

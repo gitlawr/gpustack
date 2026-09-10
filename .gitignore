@@ -174,3 +174,5 @@ charts/gpustack/charts/
 # avoid ignoring var in rootfs
 !/pack/rootfs/var
 !/pack/rootfs/var/**
+e2e/config.yaml
+config.yaml

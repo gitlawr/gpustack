@@ -26,20 +26,31 @@ class TestBenchmark:
         assert "items" in result
         assert isinstance(result["items"], list)
 
+    @pytest.mark.parametrize("dataset_name",["Random","ShareGPT"])
     def test_create_benchmark(
         self,
         gpustack_client: GPUStackClient,
         shared_vllm_model,
         e2e_config: E2EConfig,
+        dataset_name,
     ):
         """Create a Benchmark"""
+        instances = gpustack_client.list_model_instances(model_id=shared_vllm_model["id"])
+        instance_name = instances["items"][0]["name"]
+        benchmark_name = f"e2e-test-benchmark-{dataset_name.lower()}"
+        extra_kwargs = {}
+        if dataset_name == "Random":
+            extra_kwargs = {"dataset_input_tokens": 1024,"dataset_output_tokens": 128}
         benchmark = gpustack_client.create_benchmark(
-            name="e2e-test-benchmark",
+            name=benchmark_name,
             model_id=shared_vllm_model["id"],
+            model_instance_name=instance_name,
+            dataset_name=dataset_name,
+            **extra_kwargs,
         )
 
         assert benchmark["id"] > 0
-        assert benchmark["name"] == "e2e-test-benchmark"
+        assert benchmark["name"] == benchmark_name
 
         if e2e_config.test.cleanup:
             gpustack_client.delete_benchmark(benchmark["id"])
@@ -51,9 +62,15 @@ class TestBenchmark:
         e2e_config: E2EConfig,
     ):
         """Execute a Benchmark and verify results"""
+        instances = gpustack_client.list_model_instances(model_id=shared_vllm_model["id"])
+        instance_name = instances["items"][0]["name"]
         benchmark = gpustack_client.create_benchmark(
             name="e2e-test-benchmark-exec",
             model_id=shared_vllm_model["id"],
+            model_instance_name=instance_name,
+            dataset_name="Random",
+            dataset_input_tokens=1024,
+            dataset_output_tokens=128,
         )
 
         try:
@@ -73,9 +90,15 @@ class TestBenchmark:
         e2e_config: E2EConfig,
     ):
         """Verify Benchmark logs"""
+        instances = gpustack_client.list_model_instances(model_id=shared_vllm_model["id"])
+        instance_name = instances["items"][0]["name"]
         benchmark = gpustack_client.create_benchmark(
             name="e2e-test-benchmark-logs",
             model_id=shared_vllm_model["id"],
+            model_instance_name=instance_name,
+            dataset_name="Random",
+            dataset_input_tokens=1024,
+            dataset_output_tokens=128,
         )
 
         try:
