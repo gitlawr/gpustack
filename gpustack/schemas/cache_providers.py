@@ -440,9 +440,19 @@ class CacheProviderComponent(BaseModel):
     depends_on: Optional[str] = None
     """Name of a component whose instances must be RUNNING (with ports
     known) before this component's instances are created — e.g. stores
-    need the master's address. The dependency must be a single-replica
-    component, the only kind with one addressable endpoint (HA lifts
-    this by addressing the leader through the HA backend URI instead)."""
+    need the master's address. The dependency must be addressable: either
+    a single fixed replica, or a component declaring an
+    ``address_template``."""
+
+    address_template: Optional[str] = None
+    """How clients address this component when an indirection stands in
+    for one instance's host:port — Mooncake's HA masters elect a leader
+    that clients discover through the coordination backend
+    (``etcd://{{ha_backend_connstring}}``). Engines attaching to the
+    component and dependents rendering {{component.<name>.address}} use
+    it while every placeholder it references has a value, and fall back
+    to the resolved instance address otherwise. A component sized by a
+    field (``replicas_by``) must declare one to be addressable at all."""
 
     run_command: Optional[str] = None
     run_args: Optional[str] = None
@@ -470,8 +480,9 @@ class CacheProviderComponent(BaseModel):
     attach_endpoint: bool = False
     """Whether engines attach to this component's address (exactly one
     component of a multi-component provider declares it — e.g. the
-    Mooncake master; stores are internal). It must be a single-replica
-    component and cannot be gated by enabled_by."""
+    Mooncake master; stores are internal). It must be addressable (one
+    fixed replica or an address_template) and cannot be gated by
+    enabled_by."""
 
     enabled_by: Optional[str] = None
     """Name of a managed field that turns this component on; None means
@@ -494,6 +505,14 @@ class CacheProviderComponent(BaseModel):
     store's segment size), same template semantics as the provider-level
     profile — which describes the single-component case only and does
     not apply to components."""
+
+    def addressable_alone(self) -> bool:
+        """Whether one instance of this component is the whole address:
+        true only for a single fixed replica, since a field-sized or
+        per-node component has several endpoints."""
+        return (
+            self.topology == "replicas" and self.replicas == 1 and not self.replicas_by
+        )
 
     @model_validator(mode="after")
     def _one_launch_slot(self):
@@ -646,11 +665,11 @@ class CacheProvider(BaseModel):
                 raise ValueError(
                     f"component '{name}' depends on unknown component " f"'{dep_name}'"
                 )
-            if dependency.topology != "replicas" or dependency.replicas != 1:
+            if not (dependency.addressable_alone() or dependency.address_template):
                 raise ValueError(
                     f"component '{name}' depends on '{dep_name}', which is "
-                    "not a single-replica component: only those have one "
-                    "addressable endpoint"
+                    "neither a single-replica component nor declares an "
+                    "address_template: a dependent needs one address"
                 )
             if dependency.depends_on:
                 raise ValueError(
@@ -669,10 +688,10 @@ class CacheProvider(BaseModel):
                     "attach_endpoint component; engines need one address"
                 )
             spec = self.components[attach[0]]
-            if spec.topology != "replicas" or spec.replicas != 1:
+            if not (spec.addressable_alone() or spec.address_template):
                 raise ValueError(
                     f"attach_endpoint component '{attach[0]}' must be a "
-                    "single-replica component"
+                    "single-replica component or declare an address_template"
                 )
             if spec.enabled_by:
                 raise ValueError(
@@ -849,6 +868,31 @@ def render_template(value: str, params: Dict[str, Any]) -> str:
         return match.group(0)
 
     return _TEMPLATE_PATTERN.sub(replace_var, value)
+
+
+def render_optional_template(
+    value: Optional[str], params: Dict[str, Any]
+) -> Optional[str]:
+    """Render a template that only means something once every placeholder
+    it references has a value: an unset one makes the whole rendering
+    None rather than a string with a hole in it ("etcd://" for an unset
+    connection string). Same idiom as a flag dropped with its empty
+    value."""
+    if not value:
+        return None
+    missing = False
+
+    def replace_var(match):
+        nonlocal missing
+        name = match.group(1)
+        resolved = params.get(name)
+        if resolved is None or resolved == "":
+            missing = True
+            return ""
+        return str(resolved)
+
+    rendered = _TEMPLATE_PATTERN.sub(replace_var, value)
+    return None if missing else rendered
 
 
 def _coerce_l2_field_value(field: CacheProviderL2Field, value: Any) -> Any:

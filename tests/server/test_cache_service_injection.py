@@ -518,6 +518,31 @@ async def test_resolve_managed_mooncake_injects_store_connector():
 
 
 @pytest.mark.asyncio
+async def test_resolve_ha_mooncake_points_the_engine_at_the_backend():
+    """With HA on, the engine discovers the current leader through etcd
+    instead of dialing the master instance it happened to resolve — the
+    leader can move without rewriting every engine's config."""
+    model = shared_cache_model()
+    instance_worker = SimpleNamespace(id=7, ip="10.0.0.7", deleted_at=None)
+    master_worker = SimpleNamespace(id=9, ip="10.0.0.9", deleted_at=None)
+    service = mooncake_cache_service(
+        config=CacheServiceConfig(
+            fields={"enable_ha": True, "ha_backend_connstring": "10.0.0.3:2379"}
+        )
+    )
+    with patch_lookups(
+        service, worker=master_worker, instances=[mooncake_master_instance()]
+    ):
+        snapshot = await resolve_instance_cache_config(
+            MagicMock(), model, worker=instance_worker
+        )
+
+    assert snapshot.injected is True
+    config = json.loads(snapshot.files["/tmp/gpustack-mooncake.json"])
+    assert config["master_server_address"] == "etcd://10.0.0.3:2379"
+
+
+@pytest.mark.asyncio
 async def test_resolve_standalone_store_mooncake_engine_contributes_nothing():
     """standalone-store mode renders the engine a pure requester: the
     store replicas own the pool, and the hidden engine contribution

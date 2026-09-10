@@ -76,7 +76,10 @@ from gpustack.schemas.cache_services import (
     CacheServiceModeEnum,
     CacheServiceStateEnum,
 )
-from gpustack.schemas.cache_providers import resolved_field_values
+from gpustack.schemas.cache_providers import (
+    render_optional_template,
+    resolved_field_values,
+)
 from gpustack.server.cache_provider_catalog import get_cache_provider
 from gpustack.server.cache_services import resolve_instance_cache_config_safe
 from gpustack.schemas.workers import (
@@ -723,7 +726,12 @@ class CacheServiceController:
         # (the running process bakes them into its config), so they are
         # resolved once per pass: the dependency's RUNNING instance plus
         # its worker's IP.
-        addresses = await self._component_addresses(session, provider, instances)
+        addresses = await self._component_addresses(
+            session,
+            provider,
+            instances,
+            service.config.fields if service.config else None,
+        )
 
         surviving: List[CacheServiceInstance] = []
         # How many rows of each (component, worker) pair the desired
@@ -824,14 +832,22 @@ class CacheServiceController:
         session: AsyncSession,
         provider,
         instances: List[CacheServiceInstance],
+        config_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
-        """host:port of every depended-on component with a RUNNING
-        instance (single-replica by validation, so one address each)."""
+        """The address of every depended-on component that is up: the one
+        RUNNING instance's host:port, or the component's rendered
+        address_template where it declares one (an HA master pool is
+        reached through its coordination backend, not through whichever
+        replica answered first). A dependent still waits for an instance
+        to run either way — the pool has to exist before it is useful."""
         if provider is None or not provider.components:
             return {}
         depended = {
             spec.depends_on for spec in provider.components.values() if spec.depends_on
         }
+        resolved_fields = resolved_field_values(
+            provider.managed_fields, config_fields or {}
+        )
         addresses: Dict[str, str] = {}
         for name in depended:
             instance = next(
@@ -845,6 +861,13 @@ class CacheServiceController:
                 None,
             )
             if instance is None:
+                continue
+            spec = provider.get_component(name)
+            templated = render_optional_template(
+                spec.address_template if spec else None, resolved_fields
+            )
+            if templated:
+                addresses[name] = templated
                 continue
             worker = await Worker.one_by_id(session, instance.worker_id)
             if worker is None or not worker.ip:

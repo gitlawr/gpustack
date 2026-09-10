@@ -7,6 +7,8 @@ from gpustack.schemas.cache_providers import (
     CacheProvider,
     CacheProviderVersionConfig,
     render_l2_adapter,
+    render_optional_template,
+    resolved_field_values,
     validate_injection_templates,
 )
 from gpustack.schemas.cache_services import CacheServiceModeEnum
@@ -544,6 +546,9 @@ def test_mooncake_provider_declaration():
 
     fields = {field.name: field for field in provider.managed_fields}
     assert set(fields) == {
+        "enable_ha",
+        "ha_backend_connstring",
+        "master_replicas",
         "pool_mode",
         "engine_segment_size",
         "store_replicas",
@@ -553,6 +558,44 @@ def test_mooncake_provider_declaration():
         "eviction_high_watermark_ratio",
         "eviction_ratio",
     }
+    # HA is off by default and the whole feature hangs off one switch:
+    # the etcd endpoint is demanded only while the switch is on, the
+    # master pool sizes itself from a field that resolves to a single
+    # master while it is off, and clients reach the elected leader
+    # through etcd rather than through whichever replica they found.
+    assert fields["enable_ha"].default is False
+    assert fields["ha_backend_connstring"].required is True
+    assert fields["ha_backend_connstring"].visible_by == "enable_ha"
+    assert fields["ha_backend_connstring"].visible_when is True
+    assert fields["master_replicas"].default == 3
+    assert fields["master_replicas"].gated_default == 1
+    # Masters do not vote among themselves, so a floor of two rules out
+    # the contradiction of HA with a single master rather than tuning a
+    # quorum.
+    assert fields["master_replicas"].min == 2
+    # The form renders fields in declaration order with no group frames,
+    # so adjacency is what ties a field to what it governs: the mode sits
+    # next to the sizing it switches, and the HA posture goes last.
+    order = [field.name for field in provider.managed_fields]
+    assert order[:2] == ["pool_mode", "engine_segment_size"]
+    assert order[-3:] == ["enable_ha", "ha_backend_connstring", "master_replicas"]
+    assert master.replicas_by == "master_replicas"
+    assert master.address_template == "etcd://{{ha_backend_connstring}}"
+    ha_off = resolved_field_values(provider.managed_fields, {})
+    assert ha_off["master_replicas"] == 1
+    assert render_optional_template(master.address_template, ha_off) is None
+    ha_on = resolved_field_values(
+        provider.managed_fields,
+        {"enable_ha": True, "ha_backend_connstring": "10.0.0.9:2379"},
+    )
+    assert ha_on["master_replicas"] == 3
+    assert (
+        render_optional_template(master.address_template, ha_on)
+        == "etcd://10.0.0.9:2379"
+    )
+    # The leader publishes its own routable address into the election.
+    assert "--rpc_address {{worker_ip}}" in master.run_command
+
     assert fields["pool_mode"].default == "embedded"
     assert fields["pool_mode"].option_values() == ["embedded", "standalone-store"]
     # options carry display labels where the stored value reads poorly

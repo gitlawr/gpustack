@@ -7,7 +7,11 @@ from urllib.parse import urlparse
 import aiohttp
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from gpustack.schemas.cache_providers import CacheProvider, resolved_field_values
+from gpustack.schemas.cache_providers import (
+    CacheProvider,
+    render_optional_template,
+    resolved_field_values,
+)
 from gpustack.schemas.cache_services import (
     CacheConfigSnapshot,
     CacheService,
@@ -210,6 +214,21 @@ async def _resolve_managed_endpoint(
     )
 
 
+def _declared_attach_address(
+    provider: Optional[CacheProvider], resolved_fields: Dict[str, Any]
+) -> Optional[str]:
+    """The address engines should attach to when the attach component
+    declares an indirection instead of answering as one instance — an HA
+    master pool is reached through its coordination backend. None means
+    the resolved instance address stands."""
+    if provider is None or not provider.components:
+        return None
+    spec = provider.get_component(provider.attach_component())
+    if spec is None:
+        return None
+    return render_optional_template(spec.address_template, resolved_fields)
+
+
 async def resolve_instance_cache_config(
     session: AsyncSession,
     model: Model,
@@ -345,6 +364,11 @@ async def resolve_instance_cache_config(
         )
 
     backend = get_backend(model)
+    resolved_fields = resolved_field_values(
+        provider.managed_fields if provider else [],
+        (service.config.fields if service.config else None) or {},
+    )
+    attach_address = _declared_attach_address(provider, resolved_fields)
     render_params: Dict[str, Any] = {
         "host": endpoint.host,
         "port": endpoint.port,
@@ -354,11 +378,17 @@ async def resolve_instance_cache_config(
         # defaults to localhost and would be wrong across nodes.
         "local_hostname": worker.ip if worker and worker.ip else None,
         # Convenience alias for external connectors that take a single
-        # host:port service address.
+        # host:port service address. A component declaring an
+        # address_template answers with that instead while its
+        # placeholders resolve — an HA master pool is reached through the
+        # coordination backend, not through one elected instance.
         "master_server_address": (
-            f"{endpoint.host}:{endpoint.port}"
-            if endpoint.host and endpoint.port
-            else endpoint.url
+            attach_address
+            or (
+                f"{endpoint.host}:{endpoint.port}"
+                if endpoint.host and endpoint.port
+                else endpoint.url
+            )
         ),
     }
     # External-mode connection fields feed additional placeholders declared
@@ -370,10 +400,7 @@ async def resolve_instance_cache_config(
     # templates may reference provider-declared fields too — resolved
     # through their visibility gates (a hidden field must not leak its
     # embedded-mode default into a standalone-store config).
-    for key, value in resolved_field_values(
-        provider.managed_fields,
-        (service.config.fields if service.config else None) or {},
-    ).items():
+    for key, value in resolved_fields.items():
         render_params.setdefault(key, value)
     # The instance worker's accelerator framework selects a
     # framework-scoped integration entry when the provider declares

@@ -305,6 +305,62 @@ async def test_replica_sizing_follows_the_fields_gate(monkeypatch, fields, expec
 
 
 @pytest.mark.asyncio
+async def test_dependents_address_a_pool_through_its_declared_template(monkeypatch):
+    """A dependency that runs several replicas has no single endpoint, so
+    the dependent is stamped with the component's rendered address
+    instead of whichever replica was found running."""
+    from gpustack.schemas.cache_providers import (
+        CacheProviderComponent,
+        CacheProviderField,
+    )
+
+    provider = _pool_provider()
+    provider.managed_fields = [
+        CacheProviderField(name="backend", default=""),
+    ]
+    provider.components["master"] = CacheProviderComponent(
+        replicas=3,
+        attach_endpoint=True,
+        address_template="etcd://{{backend}}",
+        run_command="pool-master --port {{port}}",
+        gpu_access=False,
+    )
+    service = _service(
+        worker_id=None, config=CacheServiceConfig(fields={"backend": "10.0.0.3:2379"})
+    )
+    masters = [
+        _instance(
+            id=21 + offset,
+            worker_id=5 + offset,
+            component="master",
+            state=CacheServiceStateEnum.RUNNING,
+            port=50051,
+        )
+        for offset in range(3)
+    ]
+    create = _patch_reconcile(
+        monkeypatch,
+        provider,
+        workers=[_worker(5), _worker(6), _worker(7)],
+        worker=_worker(5),
+        instance_lists=[masters, masters],
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reconcile_service(MagicMock(), service)
+
+    stores = [
+        row
+        for row in (call.args[1] for call in create.await_args_list)
+        if row.component == "store"
+    ]
+    assert stores
+    assert all(
+        row.component_addresses == {"master": "etcd://10.0.0.3:2379"} for row in stores
+    )
+
+
+@pytest.mark.asyncio
 async def test_replicas_spread_before_stacking(monkeypatch):
     """Two workers take one replica each before either takes a second."""
     service = _service(worker_id=None)

@@ -945,10 +945,21 @@ def _validate_required_fields(
     cache_service_in: CacheServiceBase, provider, values: Dict[str, Any]
 ) -> None:
     """A required field must resolve to something the templates can
-    render — the configured value or the declared default."""
+    render — the configured value or the declared default. A field behind
+    a visibility gate is required only while that gate matches: the form
+    does not offer it otherwise, so demanding it would block every
+    service that leaves the feature off."""
+    declared = {field.name: field for field in provider.managed_fields}
     for field in provider.managed_fields:
         if not field.required:
             continue
+        if field.visible_by:
+            gate = declared.get(field.visible_by)
+            gate_value = values.get(field.visible_by)
+            if gate_value is None and gate is not None:
+                gate_value = gate.default
+            if gate_value != field.visible_when:
+                continue
         value = values.get(field.name, field.default)
         if value is None or value == "":
             raise BadRequestException(

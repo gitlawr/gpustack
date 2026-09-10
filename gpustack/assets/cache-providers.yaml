@@ -375,11 +375,23 @@
       attach_endpoint: true
       serves_metrics: true
       gpu_access: false
+      replicas_by: master_replicas
+      # The leader writes this address into the coordination backend and
+      # clients dial it directly, so it must be the worker's routable
+      # address rather than the bind-any default. The metrics port serves
+      # every interface regardless, so the health probe is unaffected.
       run_command: >-
-        mooncake_master --rpc_port {{port}} --metrics_port {{metrics_port}}
+        mooncake_master --rpc_address {{worker_ip}} --rpc_port {{port}}
+        --metrics_port {{metrics_port}}
         --default_kv_lease_ttl 30000
         --eviction_high_watermark_ratio {{eviction_high_watermark_ratio}}
         --eviction_ratio {{eviction_ratio}}
+        --enable_ha={{enable_ha}} --ha_backend_type=etcd
+        --ha_backend_connstring {{ha_backend_connstring}}
+      # With HA on, clients discover the current leader through etcd
+      # instead of dialing one master; without a connection string this
+      # renders to nothing and the resolved instance address is used.
+      address_template: "etcd://{{ha_backend_connstring}}"
       health_check:
         scheme: http
         path: /metrics
@@ -495,6 +507,38 @@
       min: 0.05
       max: 1
       step: 0.05
+    - name: enable_ha
+      label: High Availability
+      description: >-
+        Run several masters that elect a leader through etcd, so the pool
+        survives losing one; clients discover the current leader
+        themselves. Needs an etcd you provide — the platform does not run
+        one.
+      type: boolean
+      default: false
+    - name: ha_backend_connstring
+      label: etcd Endpoints
+      description: >-
+        host:port of your etcd, comma-separated for several. The masters
+        elect through it and engines read the current leader from it.
+      required: true
+      visible_by: enable_ha
+      visible_when: true
+    - name: master_replicas
+      label: Master Replicas
+      description: >-
+        Masters in the election. One leader serves at a time; the
+        others stand by to take over. They do not vote among themselves —
+        etcd holds the election — so size this by how many workers can
+        hold a master.
+      type: number
+      default: 3
+      min: 2
+      step: 1
+      visible_by: enable_ha
+      visible_when: true
+      # One master without HA: there is nothing to elect against.
+      gated_default: 1
   health_check:
     scheme: tcp
   # The master serves Prometheus text on its metrics port (GET /metrics,
