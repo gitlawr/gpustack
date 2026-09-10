@@ -350,6 +350,14 @@
   # containers and the engines share one wheel source — Mooncake's RPC
   # wire format breaks across builds, and same-image sourcing is what
   # keeps client and master compatible. Version = the bundled wheel.
+  # The label matches the CUDA runner's wheel string only, and a wheel
+  # string does not identify a build: that wheel is
+  # mooncake-transfer-engine 0.3.10.post2 built from commit 0da9dfea3,
+  # which already holds post-0.3.10 HA code (hence the master's
+  # supervisor states). The CANN runner carries a different package
+  # altogether, mooncake-transfer-engine-npu 0.3.11.post1. Since the
+  # wire format is build-exact, read the label as "whatever the runner
+  # bundles", never as a pairing guarantee across accelerators.
   default_version: v0.3.10.post2
   custom_version: true
   versions:
@@ -371,9 +379,11 @@
     # The coordinator: metadata only, no cache capacity, no GPU. Flag
     # values follow the vllm-project/recipes curated Mooncake configs
     # (30s KV lease; eviction starts at 95% pool usage, frees 10% per
-    # pass). Flags verified against the wheel's v0.3.10.post2 source:
-    # rpc_port supersedes the deprecated port, the metrics HTTP server
-    # binds all interfaces on its own (no metrics_host flag exists yet).
+    # pass). Flags verified against the source the CUDA runner's wheel
+    # was built from: rpc_port supersedes the deprecated port, the
+    # metrics HTTP server binds all interfaces on its own (no
+    # metrics_host flag exists), and the HA endpoints ride
+    # etcd_endpoints, the name v0.3.13 keeps as the legacy alias.
     master:
       attach_endpoint: true
       serves_metrics: true
