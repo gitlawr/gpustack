@@ -361,9 +361,12 @@
         cuda:
           "12": gpustack/runner:cuda12.9-vllm0.27.1
           "13": gpustack/runner:cuda13.0-vllm0.27.1
-        # cann: the cann9.0-910b-vllm0.20.2 runner likely bundles a
-        # different wheel version; probe before declaring (wire format
-        # is build-exact).
+        cann:
+          "9": gpustack/runner:cann9.1-910b-vllm0.23.0
+        # The wire format is build-exact, and these runners carry
+        # different engine releases, so one service must not span GPU and
+        # NPU workers: scope it with the worker selector. The master
+        # takes no accelerator and runs from the plain image anywhere.
   components:
     # The coordinator: metadata only, no cache capacity, no GPU. Flag
     # values follow the vllm-project/recipes curated Mooncake configs
@@ -478,11 +481,17 @@
       visible_when: standalone-store
     - name: protocol
       label: Transport Protocol
-      description: RDMA for production performance; TCP for functional setups.
+      description: >-
+        RDMA for production performance on GPU nodes, Ascend for NPU
+        nodes (CANN's ADXL, itself over HCCS or RDMA), TCP for functional
+        setups. Every worker of the service transfers over the one
+        protocol, so a service spanning GPU and NPU nodes has to stay on
+        TCP.
       default: tcp
       options:
         - { value: tcp, label: TCP }
         - { value: rdma, label: RDMA }
+        - { value: ascend, label: Ascend }
     - name: device_name
       label: RDMA Device
       description: NIC device(s) for the RDMA protocol.
@@ -574,7 +583,7 @@
     # mode). The mode field is recent in vLLM; behavior on older
     # connectors is a calibration surface for integration testing.
     - backend: vLLM
-      frameworks: [cuda]
+      frameworks: [cuda, cann]
       versions: ">=0.9.0"
       injection:
         env:

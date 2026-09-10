@@ -521,6 +521,15 @@ def test_mooncake_provider_declaration():
     )
     # CPU-only workers (a RAM-rich store node) run the plain image.
     assert version.image == "gpustack/runner:cuda12.9-vllm0.27.1"
+    # The runner images double as the support matrix, and the wheel they
+    # bundle is what the engines pair with: a NPU worker gets the CANN
+    # build, a GPU worker the CUDA one.
+    assert version.runtime_images["cann"] == {
+        "9": "gpustack/runner:cann9.1-910b-vllm0.23.0"
+    }
+    assert version.supports_runtime("cann") is True
+    integration = provider.integration_for("vLLM", "cann")
+    assert integration is not None
 
     # The master coordinates and serves the metrics; capacity is either
     # engine-contributed (embedded, the default) or owned by optional
@@ -609,7 +618,9 @@ def test_mooncake_provider_declaration():
     # multiplies by the node's GPU count)
     assert fields["engine_segment_size"].default == 20
     assert fields["store_segment_size"].default == 40
-    assert fields["protocol"].option_values() == ["tcp", "rdma"]
+    # Ascend rides CANN's ADXL; one protocol serves the whole service, so
+    # a GPU/NPU mix has to stay on TCP.
+    assert fields["protocol"].option_values() == ["tcp", "rdma", "ascend"]
     assert fields["eviction_high_watermark_ratio"].default == 0.95
     assert fields["eviction_ratio"].default == 0.1
     # the mode-scoped capacity pair renders one at a time, both speaking
