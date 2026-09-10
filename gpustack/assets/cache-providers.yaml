@@ -115,7 +115,7 @@
         --eviction-policy {{eviction_policy}}
         --eviction-trigger-watermark {{eviction_trigger_watermark}}
         --eviction-ratio {{eviction_ratio}} --l1-align-bytes 65536
-        --coordinator-url {{component.coordinator.address}}
+        --coordinator-url http://{{component.coordinator.address}}
         --p2p-advertise-url {{ports.p2p.url}}
   resource_profile:
     ram_gib: "{{ram_size}}"

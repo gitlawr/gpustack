@@ -36,8 +36,8 @@ from gpustack.schemas.cache_providers import (
     CacheProvider,
     CacheProviderHealthCheck,
     CacheProviderVersionConfig,
+    render_argument,
     render_l2_adapter,
-    render_template,
     resolved_field_values,
 )
 from gpustack.schemas.cache_services import (
@@ -559,7 +559,7 @@ class CacheServiceManager:
             # None yields an empty token that is dropped together with
             # the flag it belongs to.
             rendered_tokens = [
-                render_template(token, params) for token in shlex.split(launch_template)
+                render_argument(token, params) for token in shlex.split(launch_template)
             ]
             argv = drop_empty_flag_values(rendered_tokens)
         user_parameters = (
@@ -594,7 +594,7 @@ class CacheServiceManager:
             **(version_config.env or {}),
             **component_env,
         }.items():
-            rendered = render_template(value, params)
+            rendered = render_argument(value, params)
             if rendered:
                 env[key] = rendered
         if cache_service.config and cache_service.config.env:

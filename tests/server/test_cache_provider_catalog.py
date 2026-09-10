@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from gpustack.schemas.cache_providers import (
     CacheProvider,
     CacheProviderVersionConfig,
+    render_argument,
     render_l2_adapter,
     render_optional_template,
     resolved_field_values,
@@ -319,7 +320,7 @@ def test_lmcache_provider_declaration():
         "--eviction-policy {{eviction_policy}} "
         "--eviction-trigger-watermark {{eviction_trigger_watermark}} "
         "--eviction-ratio {{eviction_ratio}} --l1-align-bytes 65536 "
-        "--coordinator-url {{component.coordinator.address}} "
+        "--coordinator-url http://{{component.coordinator.address}} "
         "--p2p-advertise-url {{ports.p2p.url}}"
     )
     # Engines attach per node, and the servers hold the capacity.
@@ -335,6 +336,19 @@ def test_lmcache_provider_declaration():
     assert server.depends_on == "coordinator"
     assert server.enabled_ports({}) == []
     assert server.enabled_ports({"enable_p2p": True}) == ["p2p"]
+    # The coordinator speaks HTTP, so its flag carries a scheme the
+    # stamped address does not — and the whole token has to vanish with
+    # the address, not leave a bare scheme behind.
+    assert render_argument("http://{{component.coordinator.address}}", {}) == (
+        "http://{{component.coordinator.address}}"
+    )
+    assert (
+        render_argument(
+            "http://{{component.coordinator.address}}",
+            {"component.coordinator.address": None},
+        )
+        == ""
+    )
     # Capacity, chunking and the eviction knobs are all ordinary declared
     # fields wired into the run command through their placeholders; the
     # platform reserves only host/port/metrics_port for itself.

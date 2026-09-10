@@ -943,6 +943,30 @@ def render_template(value: str, params: Dict[str, Any]) -> str:
     return _TEMPLATE_PATTERN.sub(replace_var, value)
 
 
+def render_argument(value: str, params: Dict[str, Any]) -> str:
+    """Render one launch argument or env value. A placeholder the params
+    know but have no value for empties the whole token, not just its own
+    span: a flag reading "http://{{addr}}" has to disappear with its
+    address rather than carry a bare scheme. A placeholder the params do
+    not know at all is left as written, so a typo in a declaration fails
+    loudly instead of silently dropping the flag it was meant to fill."""
+    empty = False
+
+    def replace_var(match):
+        nonlocal empty
+        name = match.group(1)
+        if name not in params:
+            return match.group(0)
+        resolved = params[name]
+        if resolved is None or resolved == "":
+            empty = True
+            return ""
+        return str(resolved)
+
+    rendered = _TEMPLATE_PATTERN.sub(replace_var, value)
+    return "" if empty else rendered
+
+
 def render_optional_template(
     value: Optional[str], params: Dict[str, Any]
 ) -> Optional[str]:
