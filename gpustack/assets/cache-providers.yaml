@@ -408,6 +408,7 @@
         --eviction_high_watermark_ratio {{eviction_high_watermark_ratio}}
         --eviction_ratio {{eviction_ratio}}
         --enable_ha={{enable_ha}} --etcd_endpoints {{etcd_endpoints}}
+        --cluster_id gpustack-cache-service-{{service_id}}
       # With HA on, clients discover the current leader through etcd
       # instead of dialing one master; without endpoints this renders to
       # nothing and the resolved instance address is used.
@@ -435,6 +436,7 @@
         python3 -m mooncake.mooncake_store_service --port {{port}}
       env:
         MOONCAKE_MASTER: "{{component.master.address}}"
+        MC_STORE_CLUSTER_ID: "gpustack-cache-service-{{service_id}}"
         MOONCAKE_TE_META_DATA_SERVER: P2PHANDSHAKE
         MOONCAKE_LOCAL_HOSTNAME: "{{worker_ip}}"
         MOONCAKE_PROTOCOL: "{{protocol}}"
@@ -606,6 +608,14 @@
       injection:
         env:
           MOONCAKE_CONFIG_PATH: /tmp/gpustack-mooncake.json
+          # Masters publish the elected leader under a keyspace named
+          # after the service, so every client of that service has to
+          # look in the same place. Upstream disagrees with itself on
+          # the default — the master's --cluster_id falls back to
+          # "mooncake_cluster" while a client with no env falls back to
+          # "mooncake" — so naming it explicitly is what makes them
+          # meet, and it keeps two services sharing one etcd apart.
+          MC_STORE_CLUSTER_ID: "gpustack-cache-service-{{service_id}}"
           # The MP-style chunk hashes must agree across engine processes;
           # a random per-process hash seed would silently break sharing
           # (the recipes set the same).

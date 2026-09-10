@@ -608,6 +608,11 @@ def test_mooncake_provider_declaration():
     # and the endpoints ride the flag this version actually declares.
     assert "--rpc_address {{worker_ip}}" in master.run_command
     assert "--etcd_endpoints {{etcd_endpoints}}" in master.run_command
+    # Masters and clients disagree on the default coordination keyspace
+    # (--cluster_id falls back to "mooncake_cluster", a client with no
+    # env to "mooncake"), so the service names it on both sides.
+    assert "--cluster_id gpustack-cache-service-{{service_id}}" in master.run_command
+    assert store.env["MC_STORE_CLUSTER_ID"] == "gpustack-cache-service-{{service_id}}"
 
     assert fields["pool_mode"].default == "embedded"
     assert fields["pool_mode"].option_values() == ["embedded", "standalone-store"]
@@ -674,6 +679,10 @@ def test_mooncake_injection_renders_store_connector_env():
         # transfer slice, which exhausts ephemeral ports under prefill
         # bursts; the RDMA path ignores the switch.
         "MC_TCP_ENABLE_CONNECTION_POOL": "1",
+        # Every client of a service reads the elected leader from the
+        # keyspace named after it; upstream's master and client defaults
+        # disagree, so it is named explicitly.
+        "MC_STORE_CLUSTER_ID": "gpustack-cache-service-{{service_id}}",
     }
     config = json.loads(files["/tmp/gpustack-mooncake.json"])
     # The managed defaults render the mainstream embedded shape: each

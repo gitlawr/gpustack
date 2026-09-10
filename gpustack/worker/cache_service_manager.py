@@ -596,6 +596,7 @@ class CacheServiceManager:
             "host": "0.0.0.0",
             "port": port,
             "metrics_port": metrics_port,
+            "service_id": cache_service.id,
         }
         field_values = (
             cache_service.config.fields if cache_service.config else None

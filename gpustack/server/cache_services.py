@@ -373,6 +373,9 @@ async def resolve_instance_cache_config(
         "host": endpoint.host,
         "port": endpoint.port,
         "chunk_size": chunk_size,
+        # Identifies the service to whatever the engine shares with its
+        # cache servers — a coordination keyspace, for one.
+        "service_id": service.id,
         # The consuming instance's own worker IP: external connectors (e.g.
         # Mooncake) use it as the client identity / RDMA peer address, which
         # defaults to localhost and would be wrong across nodes.

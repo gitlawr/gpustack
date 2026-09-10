@@ -327,7 +327,7 @@ class CacheProviderField(BaseModel):
 
     name: str
     """Placeholder name; must not collide with the reserved platform
-    placeholders (host/port/metrics_port)."""
+    placeholders (host/port/metrics_port/service_id)."""
 
     label: Optional[str] = None
     description: Optional[str] = None
@@ -986,6 +986,7 @@ RESERVED_INJECTION_PLACEHOLDERS = frozenset(
         "host",
         "port",
         "metrics_port",
+        "service_id",
         "local_hostname",
         "master_server_address",
         "locality",

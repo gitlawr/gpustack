@@ -506,6 +506,9 @@ async def test_resolve_managed_mooncake_injects_store_connector():
         # transfer slice, which exhausts ephemeral ports under prefill
         # bursts; the RDMA path ignores the switch.
         "MC_TCP_ENABLE_CONNECTION_POOL": "1",
+        # Rendered per service, so two services sharing one etcd keep
+        # their elected leaders apart.
+        "MC_STORE_CLUSTER_ID": "gpustack-cache-service-5",
     }
     config = json.loads(snapshot.files["/tmp/gpustack-mooncake.json"])
     assert config["mode"] == "embedded"
