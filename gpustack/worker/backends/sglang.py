@@ -372,7 +372,10 @@ class SGLangServer(InferenceServer):
 
         # Add auto parallelism arguments if needed
         auto_parallelism_arguments = get_auto_parallelism_arguments(
-            self._model.backend_parameters, self._model_instance, is_distributed
+            self._model.backend_parameters,
+            self._model_instance,
+            is_distributed,
+            self._group_workloads(),
         )
         arguments.extend(auto_parallelism_arguments)
 
@@ -591,7 +594,10 @@ class SGLangServer(InferenceServer):
         ):
             return []
 
-        subordinate_workers = subordinate_placements(self._model_instance)
+        subordinate_workers = subordinate_placements(
+            self._model_instance,
+            self._group_workloads(),
+        )
         total_nodes = len(subordinate_workers) + 1  # +1 for the current node
 
         # Find the current node's rank
@@ -725,6 +731,7 @@ def get_auto_parallelism_arguments(
     backend_parameters: List[str],
     model_instance: ModelInstance,
     is_distributed: bool,
+    workloads: list = None,
 ) -> List[str]:
     """
     Get auto parallelism arguments for SGLang based on GPU configuration.
@@ -750,7 +757,7 @@ def get_auto_parallelism_arguments(
 
     if is_distributed:
         # distributed across multiple workers
-        (tp, pp) = cal_distributed_parallelism_arguments(model_instance)
+        (tp, pp) = cal_distributed_parallelism_arguments(model_instance, workloads)
         return [
             "--tp-size",
             str(tp),

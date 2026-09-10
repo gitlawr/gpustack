@@ -447,6 +447,7 @@ class VLLMServer(InferenceServer):
                 self._model_instance,
                 deployment_metadata,
                 parse_user_parallelism(self._model.backend_parameters),
+                self._group_workloads(),
             ).shape
         except ValueError:
             return None
@@ -622,6 +623,7 @@ class VLLMServer(InferenceServer):
                 ctx.is_distributed,
                 ctx.deployment_metadata,
                 self._model.backend_version,
+                self._group_workloads(),
             )
         )
         arguments.extend(self._get_speculative_arguments())
@@ -683,6 +685,7 @@ class VLLMServer(InferenceServer):
                 self._model_instance,
                 deployment_metadata,
                 parse_user_parallelism(self._model.backend_parameters),
+                self._group_workloads(),
             )
         return _VLLMArgsContext(
             port=port,
@@ -987,6 +990,7 @@ def cal_multinode_topology(
     model_instance: ModelInstance,
     deployment_metadata: ModelInstanceDeploymentMetadata,
     user: Optional[MultinodeUserParallelism] = None,
+    workloads: list = None,
 ) -> MultinodeTopology:
     """Translate user-supplied parallelism hints + physical topology into the
     vLLM parameter shape this node should emit.
@@ -1000,7 +1004,7 @@ def cal_multinode_topology(
     # from these counts, and shifting one shifts every rank after it.
     gpu_per_node = [
         (len(p.gpu_indexes or []) or 1) if p.is_leader else len(p.gpu_indexes or [])
-        for p in instance_placements(model_instance)
+        for p in instance_placements(model_instance, workloads)
     ]
     nnodes = len(gpu_per_node)
 
@@ -1044,6 +1048,7 @@ def get_auto_parallelism_arguments(
     is_distributed: bool,
     deployment_metadata: Optional[ModelInstanceDeploymentMetadata] = None,
     backend_version: Optional[str] = None,
+    workloads: list = None,
 ) -> List[str]:
     if (
         is_distributed
@@ -1055,7 +1060,9 @@ def get_auto_parallelism_arguments(
         # the same backend_parameters, so any non-None field acts as a hard
         # cluster-wide constraint.
         user = parse_user_parallelism(backend_parameters)
-        topology = cal_multinode_topology(model_instance, deployment_metadata, user)
+        topology = cal_multinode_topology(
+            model_instance, deployment_metadata, user, workloads
+        )
         derived: List[str] = []
         if user.tp is None:
             derived.extend(["--tensor-parallel-size", str(topology.tp)])
@@ -1087,7 +1094,7 @@ def get_auto_parallelism_arguments(
 
     if is_distributed:
         # distributed across multiple workers (Ray sidecar path)
-        (tp, pp) = cal_distributed_parallelism_arguments(model_instance)
+        (tp, pp) = cal_distributed_parallelism_arguments(model_instance, workloads)
         return [
             "--tensor-parallel-size",
             str(tp),

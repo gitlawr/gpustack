@@ -58,6 +58,7 @@ from gpustack.schemas.models import (
 from gpustack.server.bus import Event, EventType
 from gpustack.server.model_instance_workloads import named_ports, to_workload_state
 from gpustack.worker.controlloop import (
+    group_workloads,
     ContainerLogPersistence,
     PortAllocator,
     ProvisionRunner,
@@ -1184,7 +1185,7 @@ class ServeManager:
         """
         return next(
             p.subordinate_index
-            for p in subordinate_placements(mi)
+            for p in subordinate_placements(mi, group_workloads(self._clientset, mi.id))
             if p.worker_id == self._worker_id
         )
 

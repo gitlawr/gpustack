@@ -41,6 +41,7 @@ from gpustack.schemas.runner_source import (
     RunnerOverrideEntryPublic,
     merged_backend_runners,
 )
+from gpustack.worker.controlloop import group_workloads
 from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.models import (
     BackendEnum,
@@ -499,6 +500,15 @@ class InferenceServer(ABC):
         env[variable] = cache_dir
 
     @lru_cache
+    def _group_workloads(self) -> list:
+        """The workload rows of this instance's group.
+
+        The rows carry the same placement the instance's embedded subordinate
+        list does, indexed by worker rather than by position, and the readers
+        compare the two while the embedded list is still authoritative.
+        """
+        return group_workloads(self._clientset, self._model_instance.id)
+
     def _get_selected_gpu_devices(self) -> GPUDevicesStatus:
         """
         Get the GPU devices assigned to the model instance.
@@ -507,7 +517,7 @@ class InferenceServer(ABC):
             A list of GPU device information assigned to the model instance.
         """
         minstance = self._model_instance
-        subordinates = subordinate_placements(minstance)
+        subordinates = subordinate_placements(minstance, self._group_workloads())
         gpu_type = None
         if subordinates and minstance.worker_id != self._worker.id:
             subworker = next(
@@ -1428,8 +1438,9 @@ def is_ascend(devices: GPUDevicesStatus) -> bool:
 
 def cal_distributed_parallelism_arguments(
     model_instance: ModelInstance,
+    workloads: list = None,
 ) -> tuple[int, int]:
-    subordinates = subordinate_placements(model_instance)
+    subordinates = subordinate_placements(model_instance, workloads)
     pp = len(subordinates) + 1
     tp = len(model_instance.gpu_indexes) if model_instance.gpu_indexes else 1
     uneven_pp = tp

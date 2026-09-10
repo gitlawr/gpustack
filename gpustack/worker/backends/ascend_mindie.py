@@ -1125,7 +1125,10 @@ class AscendMindIEServer(InferenceServer):
             f"Starting Ascend MindIE model instance: {self._model_instance.name}"
         )
         # Prepare distributed information.
-        subworkers = subordinate_placements(self._model_instance)
+        subworkers = subordinate_placements(
+            self._model_instance,
+            self._group_workloads(),
+        )
         deployment_metadata = self._get_deployment_metadata()
 
         # Root path is defined by in Dockerfile ENV

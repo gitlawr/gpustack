@@ -42,6 +42,17 @@ from gpustack.worker.backends.vllm import (
 from gpustack.worker.backends.vox_box import VoxBoxServer
 
 
+def _no_workload_rows(backend):
+    """Complete a backend built with __new__, which skips __init__.
+
+    The argument builders read the instance's workload rows to compare them
+    against the embedded subordinate list; with no rows the comparison is
+    skipped and the embedded list stands, which is what these cases assert on.
+    """
+    backend._group_workloads = lambda: []
+    return backend
+
+
 @pytest.mark.parametrize(
     "image_name, container_registry, expect_image_name, fallback_registry",
     [
@@ -86,7 +97,7 @@ async def test_apply_registry_override(
     fallback_registry,
     monkeypatch,
 ):
-    backend = CustomServer.__new__(CustomServer)
+    backend = _no_workload_rows(CustomServer.__new__(CustomServer))
     # CustomServer inherits _apply_registry_override from InferenceServer,
     # and _apply_registry_override accesses self._config.system_default_container_registry.
     # Since we constructed the instance via __new__ (without __init__),
@@ -189,7 +200,7 @@ async def test_apply_registry_override(
     ],
 )
 def test_flatten_backend_param(backend_parameters, expected):
-    backend = CustomServer.__new__(CustomServer)
+    backend = _no_workload_rows(CustomServer.__new__(CustomServer))
     backend._model = types.SimpleNamespace(backend_parameters=backend_parameters)
     backend.inference_backend = None
     assert backend._flatten_backend_param() == expected
@@ -369,7 +380,7 @@ def test_flatten_backend_param(backend_parameters, expected):
 def test_flatten_backend_param_with_format_conversion(
     backend_parameters, parameter_format, expected
 ):
-    backend = CustomServer.__new__(CustomServer)
+    backend = _no_workload_rows(CustomServer.__new__(CustomServer))
     backend._model = types.SimpleNamespace(backend_parameters=backend_parameters)
 
     # Mock the inference backend with parameter_format configuration
@@ -485,7 +496,7 @@ CACHE_ENV_BACKENDS = [
 def test_set_cache_env_defaults_to_config_cache_dir(
     tmp_path, backend_class, variable, subdirectory
 ):
-    backend = backend_class.__new__(backend_class)
+    backend = _no_workload_rows(backend_class.__new__(backend_class))
     backend._config = types.SimpleNamespace(cache_dir=str(tmp_path))
 
     env = {}
@@ -506,7 +517,7 @@ def test_set_cache_env_defaults_to_config_cache_dir(
 def test_set_cache_env_respects_user_override(
     tmp_path, backend_class, variable, subdirectory
 ):
-    backend = backend_class.__new__(backend_class)
+    backend = _no_workload_rows(backend_class.__new__(backend_class))
     backend._config = types.SimpleNamespace(cache_dir=str(tmp_path))
 
     env = {variable: "/custom/cache"}
@@ -518,7 +529,7 @@ def test_set_cache_env_respects_user_override(
 
 
 def _vllm_backend_with_kv_cache(extended_kv_cache, cache_config=None):
-    backend = VLLMServer.__new__(VLLMServer)
+    backend = _no_workload_rows(VLLMServer.__new__(VLLMServer))
     backend._model = types.SimpleNamespace(extended_kv_cache=extended_kv_cache)
     backend._model_instance = types.SimpleNamespace(cache_config=cache_config)
     backend._get_device_info = lambda: ("cuda", None, None)
@@ -628,14 +639,14 @@ def test_vllm_legacy_local_kv_cache_behavior_unchanged():
 
 
 def test_sglang_shared_kv_cache_disables_hicache_arguments():
-    backend = SGLangServer.__new__(SGLangServer)
+    backend = _no_workload_rows(SGLangServer.__new__(SGLangServer))
     backend._model = types.SimpleNamespace(extended_kv_cache=_shared_kv_cache_config())
 
     assert backend._get_hicache_arguments() == []
 
 
 def test_sglang_local_kv_cache_hicache_arguments_unchanged():
-    backend = SGLangServer.__new__(SGLangServer)
+    backend = _no_workload_rows(SGLangServer.__new__(SGLangServer))
     backend._model = types.SimpleNamespace(
         extended_kv_cache=ExtendedKVCacheConfig(
             enabled=True, ram_size=8, chunk_size=64, ram_ratio=None
@@ -652,7 +663,7 @@ def test_sglang_local_kv_cache_hicache_arguments_unchanged():
 
 
 def test_vllm_command_args_include_late_system_flags_as_injected():
-    backend = VLLMServer.__new__(VLLMServer)
+    backend = _no_workload_rows(VLLMServer.__new__(VLLMServer))
     backend.inference_backend = None
     backend._model_path = "/models/llm"
     backend._worker = types.SimpleNamespace(ip="192.168.50.10")
@@ -699,7 +710,7 @@ def test_vllm_command_args_include_late_system_flags_as_injected():
 
 
 def test_vllm_command_args_exclude_user_backend_parameters_from_injected():
-    backend = VLLMServer.__new__(VLLMServer)
+    backend = _no_workload_rows(VLLMServer.__new__(VLLMServer))
     backend.inference_backend = None
     backend._model_path = "/models/llm"
     backend._worker = types.SimpleNamespace(ip="192.168.50.10")
@@ -734,7 +745,7 @@ def test_vllm_command_args_exclude_user_backend_parameters_from_injected():
 
 
 def test_sglang_command_args_include_model_and_late_system_flags_as_injected():
-    backend = SGLangServer.__new__(SGLangServer)
+    backend = _no_workload_rows(SGLangServer.__new__(SGLangServer))
     backend.inference_backend = None
     backend._model_path = "/models/llm"
     backend._worker = types.SimpleNamespace(ip="192.168.50.10")
@@ -788,7 +799,7 @@ def test_sglang_short_alias_prevents_conflicting_auto_parallelism_arguments(alia
 
 
 def test_vox_box_command_args_return_injected_parameters():
-    backend = VoxBoxServer.__new__(VoxBoxServer)
+    backend = _no_workload_rows(VoxBoxServer.__new__(VoxBoxServer))
     backend.inference_backend = None
     backend._model_path = "/models/audio"
     backend._config = types.SimpleNamespace(data_dir="/var/lib/gpustack")
@@ -813,7 +824,7 @@ def test_vox_box_command_args_return_injected_parameters():
 
 
 def test_custom_command_args_return_injected_parameters_after_entrypoint():
-    backend = CustomServer.__new__(CustomServer)
+    backend = _no_workload_rows(CustomServer.__new__(CustomServer))
     backend._model_path = "/models/custom"
     backend._worker = types.SimpleNamespace(ip="192.168.50.10")
     backend._model_instance = types.SimpleNamespace(
@@ -839,7 +850,7 @@ def test_custom_command_args_return_injected_parameters_after_entrypoint():
 
 
 def test_custom_command_args_include_short_flags_as_injected():
-    backend = CustomServer.__new__(CustomServer)
+    backend = _no_workload_rows(CustomServer.__new__(CustomServer))
     backend._model_path = "/models/custom"
     backend._worker = types.SimpleNamespace(ip="192.168.50.10")
     backend._model_instance = types.SimpleNamespace(
@@ -862,7 +873,7 @@ def test_custom_command_args_include_short_flags_as_injected():
 
 
 def test_injected_parameters_start_at_zero_with_explicit_container_entrypoint():
-    backend = CustomServer.__new__(CustomServer)
+    backend = _no_workload_rows(CustomServer.__new__(CustomServer))
     backend._model_path = "/models/custom"
     backend._worker = types.SimpleNamespace(ip="192.168.50.10")
     backend._model_instance = types.SimpleNamespace(
@@ -910,7 +921,7 @@ def test_custom_backend_configured_entrypoint_injected_parameters(
     expected_entrypoint,
     expected_injected,
 ):
-    backend = CustomServer.__new__(CustomServer)
+    backend = _no_workload_rows(CustomServer.__new__(CustomServer))
     backend._model_path = "/models/custom"
     backend._worker = types.SimpleNamespace(ip="192.168.50.10")
     backend._model_instance = types.SimpleNamespace(
@@ -1272,7 +1283,7 @@ def test_resolve_image_fallback_matches_host_major(
         base_module, "merged_backend_runners", lambda *_, **__: [runner]
     )
 
-    server = VLLMServer.__new__(VLLMServer)
+    server = _no_workload_rows(VLLMServer.__new__(VLLMServer))
     server._model = types.SimpleNamespace(
         image_name=None, backend="vllm", backend_version=None
     )
@@ -1322,7 +1333,7 @@ def test_resolve_image_treats_blank_backend_version_as_auto(
         base_module, "merged_backend_runners", fake_merged_backend_runners
     )
 
-    server = VLLMServer.__new__(VLLMServer)
+    server = _no_workload_rows(VLLMServer.__new__(VLLMServer))
     server._model = types.SimpleNamespace(
         image_name=None, backend="vllm", backend_version=backend_version
     )
@@ -1368,7 +1379,7 @@ def test_parse_image_cuda_version(image, expected):
 
 
 def _make_cuda_compat_server(host_cuda, image, backend="cuda", model_env=None):
-    server = _StubServer.__new__(_StubServer)
+    server = _no_workload_rows(_StubServer.__new__(_StubServer))
     server._model = types.SimpleNamespace(env=model_env)
     server._get_device_info = lambda: (backend, host_cuda, None)
     server._resolve_image = lambda: (image, None)
@@ -1430,7 +1441,7 @@ def test_cuda_compat_switch_is_multi_level(
 
 
 def _make_host_ipc_server(cache_config=None, model_env=None):
-    server = _StubServer.__new__(_StubServer)
+    server = _no_workload_rows(_StubServer.__new__(_StubServer))
     server._model = types.SimpleNamespace(env=model_env)
     server._model_instance = types.SimpleNamespace(cache_config=cache_config)
     return server
@@ -1468,7 +1479,7 @@ def test_host_ipc_follows_cache_attachment(
 
 
 def _script_server(should_disable_compat, cache_files=None):
-    server = _StubServer.__new__(_StubServer)
+    server = _no_workload_rows(_StubServer.__new__(_StubServer))
     server._should_disable_cuda_compat = lambda: should_disable_compat
     server._model_instance = types.SimpleNamespace(
         cache_config=(
@@ -1526,7 +1537,7 @@ def test_configured_env_injects_disable_require_only(monkeypatch):
     monkeypatch.setattr(
         "gpustack.worker.backends.base.filter_env_vars", lambda _env: {}
     )
-    server = _StubServer.__new__(_StubServer)
+    server = _no_workload_rows(_StubServer.__new__(_StubServer))
     server._model = types.SimpleNamespace(env=None)
     server._should_disable_cuda_compat = lambda: True
 
@@ -1540,7 +1551,7 @@ def test_configured_env_respects_user_override(monkeypatch):
     monkeypatch.setattr(
         "gpustack.worker.backends.base.filter_env_vars", lambda _env: {}
     )
-    server = _StubServer.__new__(_StubServer)
+    server = _no_workload_rows(_StubServer.__new__(_StubServer))
     # User explicitly pins NVIDIA_DISABLE_REQUIRE; we must not clobber it.
     server._model = types.SimpleNamespace(env={"NVIDIA_DISABLE_REQUIRE": "0"})
     server._should_disable_cuda_compat = lambda: True
@@ -1554,7 +1565,7 @@ def test_configured_env_no_injection_when_not_triggered(monkeypatch):
     monkeypatch.setattr(
         "gpustack.worker.backends.base.filter_env_vars", lambda _env: {}
     )
-    server = _StubServer.__new__(_StubServer)
+    server = _no_workload_rows(_StubServer.__new__(_StubServer))
     server._model = types.SimpleNamespace(env=None)
     server._should_disable_cuda_compat = lambda: False
 
