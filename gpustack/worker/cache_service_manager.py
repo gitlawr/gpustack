@@ -284,24 +284,41 @@ class CacheServiceManager:
             self._release_ports(instance.id)
 
             component_spec = provider.get_component(instance.component or "")
+            config_fields = (
+                cache_service.config.fields if cache_service.config else None
+            )
             port, metrics_port, extra_ports = self._allocate_ports(
-                instance, component_spec.ports if component_spec else None
+                instance,
+                component_spec.enabled_ports(config_fields) if component_spec else None,
             )
             params = self._build_template_params(
                 cache_service, provider, port, metrics_port
             )
             # Ports the component declared by name, each its own listener
-            # (a transfer channel's handshake socket, say).
-            for name, value in extra_ports.items():
+            # (a transfer channel's handshake socket, say). A port the
+            # configuration did not ask for resolves empty, so a flag
+            # carrying it drops with its value. The .url form is what a
+            # peer on another node would dial.
+            worker_ip = self._worker_ip_getter()
+            for entry in component_spec.ports if component_spec else []:
+                name = entry if isinstance(entry, str) else entry.name
+                value = extra_ports.get(name)
                 params[f"ports.{name}"] = value
+                params[f"ports.{name}.url"] = (
+                    f"{worker_ip}:{value}" if value and worker_ip else None
+                )
             # The worker's own IP: a store advertises it to peers (the
             # P2P handshake publishes it as local_hostname), where the
             # bind-address 0.0.0.0 would be useless.
             params["worker_ip"] = self._worker_ip_getter()
             # Dependency addresses the controller stamped at creation
-            # (e.g. the Mooncake master's host:port for a store).
-            for name, address in (instance.component_addresses or {}).items():
-                params[f"component.{name}.address"] = address
+            # (e.g. the Mooncake master's host:port for a store). Every
+            # declared component gets a key either way: an unstamped one
+            # resolves empty rather than leaving its placeholder in the
+            # command, so the flag holding it drops instead.
+            stamped = instance.component_addresses or {}
+            for name in provider.components:
+                params[f"component.{name}.address"] = stamped.get(name)
 
             argv, overrides_entrypoint = self._build_launch_argv(
                 cache_service, version_config, component_spec, params

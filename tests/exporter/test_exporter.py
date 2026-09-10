@@ -347,7 +347,9 @@ def _instance(**overrides):
         id=31,
         cache_service_id=3,
         worker_id=2,
-        component="",
+        # LMCache's cache servers are its "server" component, the one
+        # that declares it serves the metrics.
+        component="server",
         state=CacheServiceStateEnum.RUNNING,
         metrics_port=40011,
     )

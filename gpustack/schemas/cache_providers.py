@@ -418,6 +418,18 @@ class CacheProviderExternalField(BaseModel):
     """Value of the visible_by field that shows this one."""
 
 
+class CacheProviderComponentPort(BaseModel):
+    """A port a component binds beyond the platform's own, optionally
+    only for the configurations that need it."""
+
+    name: str
+    enabled_by: Optional[str] = None
+    """Name of a managed field that turns this port on; None means
+    always. Without enabled_when the field reads as a boolean."""
+
+    enabled_when: Optional[Any] = None
+
+
 class CacheProviderComponent(BaseModel):
     """One process role of a multi-component managed provider (e.g.
     Mooncake's coordinating master and its per-node memory-segment
@@ -467,13 +479,35 @@ class CacheProviderComponent(BaseModel):
     two roles. {{component.<name>.address}} resolves to a
     single-replica component's host:port."""
 
-    ports: List[str] = []
-    """Names of ports this component needs beyond the two the platform
-    always allocates (the service port and the metrics port) — e.g. the
-    handshake listener a peer-to-peer transfer channel binds. The worker
-    allocates one per name on the instance's worker, records them on the
-    instance so a restart keeps them, and renders each as
-    {{ports.<name>}} in this component's launch templates."""
+    ports: List[Union[str, "CacheProviderComponentPort"]] = []
+    """Ports this component needs beyond the two the platform always
+    allocates (the service port and the metrics port) — e.g. the
+    handshake listener a peer-to-peer transfer channel binds. An entry is
+    a name, or {name, enabled_by, enabled_when} for a port only some
+    configurations need. The worker allocates one per enabled name,
+    records them on the instance so a restart keeps them, and renders
+    each as {{ports.<name>}}, plus {{ports.<name>.url}} for the
+    worker-routable host:port a peer would dial. Both render empty while
+    the port is not allocated, so a flag carrying one drops with it."""
+
+    def enabled_ports(
+        self, config_fields: Optional[Dict[str, Any]] = None
+    ) -> List[str]:
+        """Names of the ports to allocate for the given configuration."""
+        values = config_fields or {}
+        names: List[str] = []
+        for entry in self.ports:
+            if isinstance(entry, str):
+                names.append(entry)
+                continue
+            if entry.enabled_by is None:
+                names.append(entry.name)
+                continue
+            value = values.get(entry.enabled_by)
+            wanted = entry.enabled_when
+            if (value == wanted) if wanted is not None else bool(value):
+                names.append(entry.name)
+        return names
 
     env: Dict[str, str] = {}
     """Env template for this component's container; values support
@@ -545,7 +579,8 @@ def _validate_component_shape(name: str, component: CacheProviderComponent) -> N
             f"component '{name}' declares replicas "
             f"{component.replicas}; at least one is required"
         )
-    for port_name in component.ports:
+    for entry in component.ports:
+        port_name = entry if isinstance(entry, str) else entry.name
         if not port_name.isidentifier():
             raise ValueError(
                 f"component '{name}' declares port '{port_name}', "

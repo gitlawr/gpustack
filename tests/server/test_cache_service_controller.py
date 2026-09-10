@@ -726,6 +726,12 @@ def _patch_aggregate_instances(monkeypatch, instances):
         "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
         AsyncMock(return_value=instances),
     )
+    # These cover folding a single component's states; pin the provider so
+    # they read that path rather than whatever the catalog declares.
+    monkeypatch.setattr(
+        "gpustack.server.controllers.get_cache_provider",
+        lambda name: _provider("per_node"),
+    )
 
 
 @pytest.mark.asyncio
@@ -1162,9 +1168,15 @@ async def test_aggregate_flags_spec_drift():
 
     service = _service(update=AsyncMock())
     stale = _instance(state=CacheServiceStateEnum.RUNNING, spec_digest="0" * 16)
-    with patch(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
-        AsyncMock(return_value=[stale]),
+    with (
+        patch(
+            "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+            AsyncMock(return_value=[stale]),
+        ),
+        patch(
+            "gpustack.server.controllers.get_cache_provider",
+            lambda name: _provider("per_node"),
+        ),
     ):
         controller = CacheServiceController(MagicMock())
         await controller._sync_service_aggregate(MagicMock(), service)
@@ -1182,9 +1194,15 @@ async def test_aggregate_flags_spec_drift():
     legacy = _instance(
         id=22, worker_id=6, state=CacheServiceStateEnum.RUNNING, spec_digest=None
     )
-    with patch(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
-        AsyncMock(return_value=[current, legacy]),
+    with (
+        patch(
+            "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+            AsyncMock(return_value=[current, legacy]),
+        ),
+        patch(
+            "gpustack.server.controllers.get_cache_provider",
+            lambda name: _provider("per_node"),
+        ),
     ):
         controller = CacheServiceController(MagicMock())
         await controller._sync_service_aggregate(MagicMock(), service2)

@@ -66,6 +66,9 @@ def cache_service_instance(**overrides):
         worker_id=2,
         cluster_id=1,
         port=9000,
+        # LMCache's cache servers are its "server" component; engines
+        # attach to that one.
+        component="server",
         state=CacheServiceStateEnum.RUNNING,
     )
     fields.update(overrides)

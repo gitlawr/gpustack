@@ -298,25 +298,43 @@ def test_lmcache_provider_declaration():
         == f"lmcache/vllm-openai:{version}-cu129"
     )
     assert version_config.resolve_image(None, None) == f"lmcache/vllm-openai:{version}"
+    # Two components: the cache servers engines attach to, and the peer
+    # registry P2P needs. A component owns its launch, so the version
+    # slots carry none.
+    assert set(provider.components) == {"server", "coordinator"}
+    for declared in provider.versions.values():
+        assert declared.run_command is None
+        assert declared.run_args is None
+    server = provider.components["server"]
+    coordinator = provider.components["coordinator"]
     # The full CLI entry: the HTTP frontend on --http-port serves
     # /metrics (same registry as the standalone exposition) plus
     # /healthcheck and the admin APIs; --prometheus-port is ignored
     # there, so the frontend port doubles as the metrics port.
-    assert version_config.run_command == (
-        "lmcache server --host {{host}} "
-        "--port {{port}} --l1-size-gb {{ram_size}} "
-        "--chunk-size {{chunk_size}} "
+    assert server.run_command == (
+        "lmcache server --host {{host}} --port {{port}} "
+        "--l1-size-gb {{ram_size}} --chunk-size {{chunk_size}} "
         "--http-host {{host}} --http-port {{metrics_port}} "
         "--supported-transfer-mode auto --worker-reap-timeout-seconds 60 "
         "--eviction-policy {{eviction_policy}} "
         "--eviction-trigger-watermark {{eviction_trigger_watermark}} "
-        "--eviction-ratio {{eviction_ratio}}"
+        "--eviction-ratio {{eviction_ratio}} --l1-align-bytes 65536 "
+        "--coordinator-url {{component.coordinator.address}} "
+        "--p2p-advertise-url {{ports.p2p.url}}"
     )
-    # The server's argument groups are unchanged across the declared
-    # release line, so every version inherits the one command template
-    # and consumers read the effective command off the version config.
-    for declared in provider.versions.values():
-        assert declared.run_command == provider.default_run_command
+    # Engines attach per node, and the servers hold the capacity.
+    assert server.topology == "per_node"
+    assert server.attach_endpoint is True
+    assert server.serves_metrics is True
+    assert server.resource_profile.ram_gib == "{{ram_size}}"
+    # The registry exists only with P2P, holds no cache and takes no GPU;
+    # so does the port its peers dial, which is why both P2P flags above
+    # render empty and drop while the feature is off.
+    assert coordinator.enabled_by == "enable_p2p"
+    assert coordinator.gpu_access is False
+    assert server.depends_on == "coordinator"
+    assert server.enabled_ports({}) == []
+    assert server.enabled_ports({"enable_p2p": True}) == ["p2p"]
     # Capacity, chunking and the eviction knobs are all ordinary declared
     # fields wired into the run command through their placeholders; the
     # platform reserves only host/port/metrics_port for itself.
@@ -327,7 +345,9 @@ def test_lmcache_provider_declaration():
         "eviction_policy",
         "eviction_trigger_watermark",
         "eviction_ratio",
+        "enable_p2p",
     }
+    assert fields["enable_p2p"].default is False
     # capacity always renders (required guards a cleared value, the
     # default seeds the form); chunking may fall through to the engine
     assert fields["ram_size"].required and fields["ram_size"].default == 20
@@ -347,13 +367,22 @@ def test_lmcache_provider_declaration():
         assert fields[name].min == 0
         assert fields[name].max == 1
         assert fields[name].step == 0.05
-    # Every declared field is actually wired into a template, and none
-    # shadows a reserved platform placeholder.
+    # Every declared field earns its place: it either fills a placeholder
+    # somewhere in the declaration or gates something (a component, a
+    # port). And none shadows a reserved platform placeholder.
+    declaration = provider.model_dump_json()
+    gates = {component.enabled_by for component in provider.components.values()} | {
+        entry.enabled_by
+        for component in provider.components.values()
+        for entry in component.ports
+        if not isinstance(entry, str)
+    }
     for name in fields:
-        assert f"{{{{{name}}}}}" in version_config.run_command
+        assert f"{{{{{name}}}}}" in declaration or name in gates
     assert not set(fields) & {"host", "port", "metrics_port"}
     # Capacity flows through --l1-size-gb on the command line, not env.
     assert not version_config.env
+    assert not server.env
 
     compat = provider.integration_for("vLLM")
     assert compat is not None
@@ -727,6 +756,12 @@ def test_meshfusion_provider_is_a_branded_lmcache_clone():
         "dashboard_uid",
     }
     diverging_fields = {
+        # P2P is declared for LMCache alone until XSKY confirms their
+        # image ships the coordinator CLI, so only LMCache splits into
+        # components (and moves its launch and sizing onto one of them).
+        "components",
+        "resource_profile",
+        "managed_fields",
         "l2_backends",
         "versions",
         "default_version",
