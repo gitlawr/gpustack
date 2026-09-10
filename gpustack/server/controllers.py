@@ -726,11 +726,9 @@ class CacheServiceController:
         # (the running process bakes them into its config), so they are
         # resolved once per pass: the dependency's RUNNING instance plus
         # its worker's IP.
+        config_fields = service.config.fields if service.config else None
         addresses = await self._component_addresses(
-            session,
-            provider,
-            instances,
-            service.config.fields if service.config else None,
+            session, provider, instances, config_fields
         )
 
         surviving: List[CacheServiceInstance] = []
@@ -778,7 +776,16 @@ class CacheServiceController:
         for component, layout in desired_by_component.items():
             spec = provider.get_component(component) if provider else None
             instance_addresses: Optional[Dict[str, str]] = None
-            if spec is not None and spec.depends_on:
+            # A dependency turned off by its managed field is not something
+            # to wait for: it will never run, so the dependent stands on
+            # its own (Mooncake's stores need their master; LMCache's
+            # servers only need a coordinator once P2P is on).
+            if (
+                spec is not None
+                and spec.depends_on
+                and provider is not None
+                and provider.component_enabled(spec.depends_on, config_fields)
+            ):
                 if spec.depends_on not in addresses:
                     # Converges on the dependency's RUNNING event.
                     continue

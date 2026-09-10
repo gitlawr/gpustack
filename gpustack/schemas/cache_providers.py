@@ -716,10 +716,20 @@ class CacheProvider(BaseModel):
                     "attach_endpoint component; engines need one address"
                 )
             spec = self.components[attach[0]]
-            if not (spec.addressable_alone() or spec.address_template):
+            # Addressable means an engine can name one endpoint. A single
+            # replica is one; an address_template stands in for one; and
+            # a per_node component is one per consumer, which only holds
+            # while the provider says engines attach node-locally.
+            per_node_local = (
+                spec.topology == "per_node" and self.attach_locality == "node_local"
+            )
+            if not (
+                spec.addressable_alone() or spec.address_template or per_node_local
+            ):
                 raise ValueError(
-                    f"attach_endpoint component '{attach[0]}' must be a "
-                    "single-replica component or declare an address_template"
+                    f"attach_endpoint component '{attach[0]}' must be "
+                    "addressable: a single replica, an address_template, or "
+                    "per_node with node_local attach"
                 )
             if spec.enabled_by:
                 raise ValueError(

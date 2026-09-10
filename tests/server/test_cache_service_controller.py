@@ -361,6 +361,50 @@ async def test_dependents_address_a_pool_through_its_declared_template(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_a_disabled_dependency_does_not_hold_a_dependent_back(monkeypatch):
+    """A dependency a field turned off will never run, so waiting for its
+    address would strand the dependent forever."""
+    from gpustack.schemas.cache_providers import (
+        CacheProviderComponent,
+        CacheProviderField,
+    )
+
+    provider = _pool_provider()
+    provider.managed_fields = [
+        CacheProviderField(name="enable_extra", type="boolean", default=False),
+    ]
+    provider.components["master"] = CacheProviderComponent(
+        enabled_by="enable_extra",
+        run_command="pool-master --port {{port}}",
+        gpu_access=False,
+    )
+    provider.components["store"] = CacheProviderComponent(
+        topology="per_node",
+        depends_on="master",
+        attach_endpoint=True,
+        run_command="pool-store --port {{port}}",
+        gpu_access=False,
+    )
+    provider.attach_locality = "node_local"
+    service = _service(worker_id=None, config=CacheServiceConfig(fields={}))
+    create = _patch_reconcile(
+        monkeypatch,
+        provider,
+        workers=[_worker(5)],
+        worker=_worker(5),
+        instance_lists=[[], []],
+    )
+
+    controller = CacheServiceController(MagicMock())
+    await controller._reconcile_service(MagicMock(), service)
+
+    created = [call.args[1] for call in create.await_args_list]
+    assert [row.component for row in created] == ["store"]
+    # Nothing to stamp: the dependency does not exist to be addressed.
+    assert created[0].component_addresses is None
+
+
+@pytest.mark.asyncio
 async def test_replicas_spread_before_stacking(monkeypatch):
     """Two workers take one replica each before either takes a second."""
     service = _service(worker_id=None)
