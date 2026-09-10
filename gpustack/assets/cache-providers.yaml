@@ -384,6 +384,14 @@
     # metrics HTTP server binds all interfaces on its own (no
     # metrics_host flag exists), and the HA endpoints ride
     # etcd_endpoints, the name v0.3.13 keeps as the legacy alias.
+    # With HA on, the standbys loop candidate -> standby -> await view
+    # change by design, logging a failed standby replication start each
+    # pass: that path reads an oplog key the leader never writes while
+    # oplog stays off. It is upstream noise, not a fault — promotion
+    # goes through the leadership lease, not the oplog, so failover
+    # works; what a promoted leader lacks is the pool contents, which
+    # clients re-register. Upstream is reworking oplog durability, so
+    # enabling it is deferred.
     master:
       attach_endpoint: true
       serves_metrics: true
