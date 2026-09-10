@@ -114,6 +114,7 @@ class DockerManager:
         image: str = None,
         bootstrap_password: str = "Admin@123",
         cache_dir: str = None,
+        data_dir: str = None,
         runtime: str = None,
         privileged: bool = True,
         mount_docker_sock: bool = True,
@@ -156,6 +157,8 @@ class DockerManager:
 
         # Ensure cache directory exists
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        if data_dir:
+            Path(data_dir).mkdir(parents=True, exist_ok=True)
 
         # Build command
         cmd = [
@@ -176,6 +179,8 @@ class DockerManager:
 
         if mount_docker_sock:
             cmd.extend(["--volume", "/var/run/docker.sock:/var/run/docker.sock"])
+        if data_dir:
+            cmd.extend(["--volume", f"{data_dir}:/var/lib/gpustack"])
 
         # Mount cache directory
         cmd.extend(["--volume", f"{cache_dir}:/var/lib/gpustack/cache"])

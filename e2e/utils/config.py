@@ -51,9 +51,9 @@ class GPUConfig:
 class MultimodalModels:
     """Multimodal model configuration."""
 
-    image: str = "Z-Image-Turbo"
-    tts: str = "Qwen3-tts-customvoice"
-    asr: str = "Qwen3-ASR"
+    image: str = "Tongyi-MAI/Z-Image-Turbo"
+    tts: str = "FunAudioLLM/CosyVoice2-0.5B"
+    asr: str = "Systran/faster-whisper-small"
 
 
 @dataclass

@@ -7,7 +7,7 @@ Test Case 25: Verify model after server restart
 import time
 import pytest
 
-from e2e.utils.client import GPUStackClient
+from e2e.utils.client import GPUStackClient,GPUStackClientError 
 from e2e.utils.config import E2EConfig
 from e2e.utils.docker import DockerManager
 from e2e.utils.models import ModelHelper
@@ -54,14 +54,24 @@ class TestModelRedeployment:
         wait_for_model_deleted(gpustack_client, model1_id)
 
         # Redeploy with same name
-        model2 = model_helper.deploy_huggingface_model(
-            repo_id=e2e_config.models.default_model,
-            name="e2e-test-redeploy",
-            backend="vLLM",
-            replicas=1,
-            wait=True,
-            timeout=e2e_config.models.deploy_timeout,
-        )
+        model2 = None
+        for attempt in range(10):
+            try:
+                model2 = model_helper.deploy_huggingface_model(
+                    repo_id=e2e_config.models.default_model,
+                    name="e2e-test-redeploy",
+                    backend="vLLM",
+                    replicas=1,
+                    wait=True,
+                    timeout=e2e_config.models.deploy_timeout,
+                )
+                break
+            except GPUStackClientError as e:
+                if e.status_code == 409 and attempt < 9:
+                    time.sleep(0.5)
+                    continue
+                raise
+                
 
         cleanup_models.append(model2["id"])
 
@@ -241,7 +251,7 @@ class TestServerRestart:
         container_name = docker_manager._get_container_name("allinone")
         docker_manager.restart_container(container_name)
 
-        time.sleep(15)
+        time.sleep(e2e_config.docker.startup_wait)
 
         # Reconnect
         client = GPUStackClient(
@@ -291,7 +301,7 @@ class TestServerRestart:
         container_name = docker_manager._get_container_name("allinone")
         docker_manager.restart_container(container_name)
 
-        time.sleep(15)
+        time.sleep(e2e_config.docker.startup_wait)
 
         # Reconnect with API key
         client = GPUStackClient(

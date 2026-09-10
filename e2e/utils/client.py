@@ -405,6 +405,9 @@ class GPUStackClient:
 
     def update_worker(self, worker_id: int, **kwargs) -> dict:
         """Update worker."""
+        if "name" not in kwargs:
+            current = self.get_worker(worker_id)
+            kwargs = {"name": current["name"], **kwargs}
         return self._put(f"/v2/workers/{worker_id}", json=kwargs)
 
     def delete_worker(self, worker_id: int) -> None:
@@ -508,14 +511,14 @@ class GPUStackClient:
         provider_id: int = None,
         config: dict = None,
         model_name: str = "",
-        api_tokens: list = None,
+        api_token: str = "",
     ) -> dict:
         """Test provider model connection."""
         data = {"model_name": model_name}
         if config:
             data["config"] = config
-        if api_tokens:
-            data["api_tokens"] = api_tokens
+        if api_token:
+            data["api_token"] = api_token
 
         if provider_id:
             return self._post(
@@ -580,11 +583,11 @@ class GPUStackClient:
 
     def list_catalog_models(self, **kwargs) -> dict:
         """List catalog models."""
-        return self._get("/v2/catalogs/models", params=kwargs)
+        return self._get("/v2/model-sets", params=kwargs)
 
     def get_catalog_model(self, model_id: str) -> dict:
         """Get catalog model by ID."""
-        return self._get(f"/v2/catalogs/models/{model_id}")
+        return self._get(f"/v2/model-sets/{model_id}")
 
     # ==================== Benchmarks ====================
 

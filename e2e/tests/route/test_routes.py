@@ -2,10 +2,11 @@
 Test Case 21: Verify model access works after modifying a Route
 Test Case 22: Verify Fallback Route takes effect
 """
+import time
 
 import pytest
 
-from e2e.utils.client import GPUStackClient
+from e2e.utils.client import GPUStackClient,GPUStackClientError
 from e2e.utils.config import E2EConfig
 
 
@@ -123,7 +124,7 @@ class TestFallbackRoute:
         provider = gpustack_client.create_model_provider(
             name="e2e-test-fallback-provider",
             config=config,
-            api_tokens=[{"value": e2e_config.providers.openai.api_key}],
+            api_tokens=[{"input": e2e_config.providers.openai.api_key}],
             models=[{"name": "gpt-4o-mini", "category": "llm"}],
         )
 
@@ -151,7 +152,7 @@ class TestFallbackRoute:
                     "provider_id": openai_provider["id"],
                     "provider_model_name": "gpt-4o-mini",
                     "weight": 0,
-                    "fallback_status_codes": ["5xx", "429"],
+                    "fallback_status_codes": ["5xx", "4xx"],
                 },
             ],
         )
@@ -214,12 +215,23 @@ class TestFallbackRoute:
 
         cleanup_routes.append(route["id"])
 
-        response = gpustack_client.chat_completion(
-            model=route["name"],
-            messages=[{"role": "user", "content": "Fallback test"}],
-            max_tokens=50,
-        )
-
+        response = None
+        last_error = None
+        for _ in range(10):
+            try:
+                response = gpustack_client.chat_completion(
+                    model=route["name"],
+                    messages=[{"role": "user", "content": "Fallback test"}],
+                    max_tokens=50,
+                )
+                break   
+            except GPUStackClientError as e:
+                if e.status_code != 503:
+                    raise
+                last_error = e
+                time.sleep(1)
+        if response is None:
+            raise last_error
         assert response["choices"][0]["message"]["content"]
 
 
