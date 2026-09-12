@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
 from gpustack.api.exceptions import NotFoundException
 from gpustack.schemas.cache_providers import (
     CacheProviderComponent,
@@ -2037,6 +2039,9 @@ def test_declared_mounts_bind_only_the_paths_a_configuration_uses():
     mounts = CacheServiceManager._build_mounts(
         component, {"ssd_offload_path": "/nvme/mooncake"}
     )
+    assert CacheServiceManager._mount_paths(
+        component, {"ssd_offload_path": "/nvme/mooncake"}
+    ) == ["/nvme/mooncake", "/var/lib/gpustack/cache"]
     assert [mount.path for mount in mounts] == [
         "/nvme/mooncake",
         "/var/lib/gpustack/cache",
@@ -2047,3 +2052,22 @@ def test_declared_mounts_bind_only_the_paths_a_configuration_uses():
 
     # a single-component provider declares no component and binds nothing
     assert CacheServiceManager._build_mounts(None, {}) == []
+
+
+def test_data_directories_are_created_before_the_container_starts(tmp_path):
+    """A server told to keep data somewhere expects the directory to
+    exist — it dies rather than creating one — and the worker prepares
+    the same path the container will see."""
+    target = tmp_path / "cache" / "mooncake" / "offload"
+    CacheServiceManager._prepare_mount_paths([str(target)])
+    assert target.is_dir()
+
+    # an existing directory is left alone, keeping what it already holds
+    (target / "bucket-0").write_text("cached")
+    CacheServiceManager._prepare_mount_paths([str(target)])
+    assert (target / "bucket-0").read_text() == "cached"
+
+    blocked = tmp_path / "file"
+    blocked.write_text("not a directory")
+    with pytest.raises(ValueError, match="Failed to create data directory"):
+        CacheServiceManager._prepare_mount_paths([str(blocked / "offload")])

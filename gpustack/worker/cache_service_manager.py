@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import shlex
 import socket
 import threading
@@ -346,6 +347,7 @@ class CacheServiceManager:
                     f"{cache_service.provider_name} version {resolved_version}"
                 )
 
+            self._prepare_mount_paths(self._mount_paths(component_spec, params))
             run_container = Container(
                 image=image,
                 name="default",
@@ -579,25 +581,46 @@ class CacheServiceManager:
         return argv, overrides_entrypoint
 
     @staticmethod
-    def _build_mounts(component_spec, params: Dict[str, Any]) -> List[ContainerMount]:
-        """Host directories the component declares it keeps data in, bound
-        into its container. A path whose placeholders have no value
-        renders empty and is skipped — the configuration that would use it
-        is off. A containerized worker mirrors its own mounts into the
-        workloads it creates, which already carries the platform data
-        directory, so declared binds stay out of its way (same rule the
-        model backends follow)."""
-        if (
-            component_spec is None
-            or runtime_envs.GPUSTACK_RUNTIME_DEPLOY_MIRRORED_DEPLOYMENT
-        ):
+    def _mount_paths(component_spec, params: Dict[str, Any]) -> List[str]:
+        """The data directories this component declares, rendered. A path
+        whose placeholders have no value is skipped — the configuration
+        that would use it is off."""
+        if component_spec is None:
             return []
         paths: List[str] = []
         for template in component_spec.mounts:
             rendered = render_argument(template, params)
             if rendered and rendered not in paths:
                 paths.append(rendered)
-        return [ContainerMount(path=path) for path in paths]
+        return paths
+
+    @staticmethod
+    def _prepare_mount_paths(paths: List[str]) -> None:
+        """Create the data directories before the container starts. A
+        server told to keep data somewhere expects the directory to exist
+        and dies otherwise; creating it here also makes the path the
+        worker prepares and the path the container sees the same one,
+        whether it arrives as a declared bind or through a containerized
+        worker's mirrored mounts."""
+        for path in paths:
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError as e:
+                raise ValueError(f"Failed to create data directory '{path}': {e}")
+
+    @staticmethod
+    def _build_mounts(component_spec, params: Dict[str, Any]) -> List[ContainerMount]:
+        """The declared data directories as container binds. A worker that
+        is itself containerized mirrors its own mounts into the workloads
+        it creates, which already carries the platform data directory, so
+        declared binds stay out of its way (same rule the model backends
+        follow)."""
+        if runtime_envs.GPUSTACK_RUNTIME_DEPLOY_MIRRORED_DEPLOYMENT:
+            return []
+        return [
+            ContainerMount(path=path)
+            for path in CacheServiceManager._mount_paths(component_spec, params)
+        ]
 
     @staticmethod
     def _build_env(
