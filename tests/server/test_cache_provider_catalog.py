@@ -688,6 +688,10 @@ def test_mooncake_provider_declaration():
     # Ascend rides CANN's ADXL; one protocol serves the whole service, so
     # a GPU/NPU mix has to stay on TCP.
     assert fields["protocol"].option_values() == ["tcp", "rdma", "ascend"]
+    # NPU nodes have one working transport, and the connector refuses any
+    # other, so the form takes it from the hardware rather than offering
+    # a choice that only fails once an engine attaches.
+    assert fields["protocol"].framework_defaults == {"cann": "ascend"}
     assert fields["eviction_high_watermark_ratio"].default == 0.95
     assert fields["eviction_ratio"].default == 0.1
     # the mode-scoped capacity pair renders one at a time, both speaking

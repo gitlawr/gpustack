@@ -568,6 +568,10 @@
         protocol, so a service spanning GPU and NPU nodes has to stay on
         TCP.
       default: tcp
+      # NPU nodes have exactly one working transport, so the form picks
+      # it for them rather than leaving a choice that only fails later.
+      framework_defaults:
+        cann: ascend
       options:
         - { value: tcp, label: TCP }
         - { value: rdma, label: RDMA }

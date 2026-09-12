@@ -367,6 +367,13 @@ class CacheProviderField(BaseModel):
     visible_when: Optional[Any] = None
     """Value of the visible_by field that shows this one."""
 
+    framework_defaults: Optional[Dict[str, Any]] = None
+    """Default per accelerator framework of the workers the service will
+    run on (the runtime_images key vocabulary: cuda, cann, ...), falling
+    back to ``default`` for the rest. For a value the hardware decides
+    rather than the operator — Mooncake's transport is Ascend's own on
+    NPU nodes and nothing else works there."""
+
     gated_default: Optional[Any] = None
     """Value the field resolves to while its visible_by gate does not
     match. The form never submits a hidden field, but its plain default
