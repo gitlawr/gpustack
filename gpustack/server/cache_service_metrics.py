@@ -31,6 +31,7 @@ from gpustack.schemas.cache_services import (
     CacheServiceMetricChart,
     CacheServiceMetricSeries,
     CacheServiceMetricsPublic,
+    ModelCacheMetricsPublic,
 )
 
 logger = logging.getLogger(__name__)
@@ -391,6 +392,74 @@ async def _collect_charts(
         raise ValueError(
             f"all {len(fills)} metric queries failed; first: {failures[0]}"
         )
+
+
+async def collect_model_cache_metrics(
+    cluster_id: int,
+    attached: List[CacheServiceAttachedMetrics],
+    window_seconds: int,
+    client: Optional[aiohttp.ClientSession] = None,
+) -> ModelCacheMetricsPublic:
+    """Engine-side external-cache hit accounting for one deployment's
+    instances.
+
+    The rows come in database-enumerated (the caller knows the
+    deployment's instances); this fills their numbers from the same
+    engine counters the cache service's own view reads, bounded to the
+    handed-in rows.
+    """
+    prometheus_url = get_global_config().get_builtin_prometheus_url()
+    if not prometheus_url:
+        return ModelCacheMetricsPublic(
+            available=False,
+            reason=(
+                "The built-in Prometheus is not available (observability is "
+                "disabled or delegated to an external stack)"
+            ),
+            instances=attached,
+        )
+    if not attached:
+        return ModelCacheMetricsPublic(
+            available=True, window=window_seconds, instances=[]
+        )
+
+    owned = client is None
+    try:
+        if owned:
+            client = aiohttp.ClientSession()
+        await asyncio.wait_for(
+            _collect_attached(
+                client,
+                prometheus_url,
+                cluster_id,
+                attached,
+                window_seconds,
+                time.time(),
+            ),
+            timeout=_COLLECT_DEADLINE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return ModelCacheMetricsPublic(
+            available=False,
+            reason="Prometheus queries timed out",
+            instances=attached,
+        )
+    except ValueError as e:
+        return ModelCacheMetricsPublic(
+            available=False, reason=str(e), instances=attached
+        )
+    except (aiohttp.ClientError, OSError) as e:
+        return ModelCacheMetricsPublic(
+            available=False,
+            reason=f"Prometheus is unreachable: {str(e) or e.__class__.__name__}",
+            instances=attached,
+        )
+    finally:
+        if owned and client is not None:
+            await client.close()
+    return ModelCacheMetricsPublic(
+        available=True, window=window_seconds, instances=attached
+    )
 
 
 async def collect_cache_service_metrics(

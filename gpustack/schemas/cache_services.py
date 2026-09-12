@@ -393,6 +393,24 @@ class CacheServiceAttachedMetrics(BaseModel):
     hit_rate: Optional[float] = None
 
 
+class ModelCacheMetricsPublic(BaseModel):
+    """The same hit accounting read from the deployment's side: every
+    instance of one model, so the model view can tell what the shared
+    cache is doing for it without reading the cache service's telemetry
+    (which is the service owner's to see).
+
+    ``available=False`` carries why no numbers can be read at all (the
+    deployment uses no shared cache, observability is off, Prometheus is
+    unreachable); rows stay database-enumerated, so an instance whose
+    engine exports no counters is present with empty values.
+    """
+
+    available: bool = False
+    reason: Optional[str] = None
+    window: Optional[int] = None
+    instances: List[CacheServiceAttachedMetrics] = []
+
+
 class CacheServiceMetricsPublic(BaseModel):
     """Semantic metric series for one cache service, translated from the
     provider's declared mappings and queried from the built-in
