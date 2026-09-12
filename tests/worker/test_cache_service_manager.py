@@ -2023,3 +2023,27 @@ def test_probe_targets_metrics_port_for_http_health_check(monkeypatch):
         assert manager._probe_ready(instance, "mooncake") is True
 
     assert http_get.call_args[0][0] == "http://127.0.0.1:40011/healthcheck"
+
+
+def test_declared_mounts_bind_only_the_paths_a_configuration_uses():
+    """A component's data directory is bound into its container so what
+    it writes lands on host disk; a path whose placeholders have no value
+    belongs to a configuration that is off and is skipped."""
+    component = CacheProviderComponent(
+        run_command="store",
+        mounts=["{{ssd_offload_path}}", "/var/lib/gpustack/cache"],
+    )
+
+    mounts = CacheServiceManager._build_mounts(
+        component, {"ssd_offload_path": "/nvme/mooncake"}
+    )
+    assert [mount.path for mount in mounts] == [
+        "/nvme/mooncake",
+        "/var/lib/gpustack/cache",
+    ]
+
+    off = CacheServiceManager._build_mounts(component, {"ssd_offload_path": ""})
+    assert [mount.path for mount in off] == ["/var/lib/gpustack/cache"]
+
+    # a single-component provider declares no component and binds nothing
+    assert CacheServiceManager._build_mounts(None, {}) == []

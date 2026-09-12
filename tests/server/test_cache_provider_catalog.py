@@ -9,6 +9,8 @@ from gpustack.schemas.cache_providers import (
     render_argument,
     render_l2_adapter,
     render_optional_template,
+    render_template,
+    render_typed_template,
     resolved_field_values,
     validate_injection_templates,
 )
@@ -589,8 +591,19 @@ def test_mooncake_provider_declaration():
     assert store.enabled_by == "pool_mode"
     assert store.enabled_when == "standalone-store"
     assert store.gpu_access is False
-    assert store.env["MOONCAKE_MASTER"] == "{{component.master.address}}"
-    assert store.env["MOONCAKE_LOCAL_HOSTNAME"] == "{{worker_ip}}"
+    # the pool owner is mooncake_client, the process that can hold a disk
+    # tier; its master address and advertised host ride flags, and the
+    # disk-tier settings ride env the client reads only while offload is on
+    assert store.run_command.startswith("mooncake_client")
+    assert "--master_server_address {{component.master.address}}" in store.run_command
+    assert "--host {{worker_ip}}" in store.run_command
+    assert "--enable_offload={{enable_ssd_offload}}" in store.run_command
+    assert store.env["MOONCAKE_OFFLOAD_FILE_STORAGE_PATH"] == "{{ssd_offload_path}}"
+    assert store.env["MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES"] == (
+        "{{ssd_capacity_gb|gib_to_bytes}}"
+    )
+    # spilled cache belongs on host disk, not in the container layer
+    assert store.mounts == ["{{ssd_offload_path}}"]
     assert provider.component_enabled("store", None) is False
     assert (
         provider.component_enabled("store", {"pool_mode": "standalone-store"}) is True
@@ -605,6 +618,9 @@ def test_mooncake_provider_declaration():
         "engine_segment_size",
         "store_replicas",
         "store_segment_size",
+        "enable_ssd_offload",
+        "ssd_offload_path",
+        "ssd_capacity_gb",
         "protocol",
         "device_name",
         "eviction_high_watermark_ratio",
@@ -762,6 +778,9 @@ def test_mooncake_injection_renders_store_connector_env():
     # schema treats empty device_name as "no RDMA device".
     assert config["device_name"] == ""
     assert config["local_buffer_size"] == "4GB"
+    # a declared boolean renders as the literal JSON accepts, not
+    # Python's capitalized repr
+    assert config["enable_offload"] is False
     assert args[0] == "--kv-transfer-config"
     assert '"kv_connector":"MooncakeStoreConnector"' in args[1]
 
@@ -1229,3 +1248,96 @@ def test_injection_contract_flags_violations():
     # "mode" is not present in every locality bucket, so it is
     # unresolvable on the remote path and must be flagged.
     assert "placeholder 'mode'" in joined
+
+
+def test_mooncake_ssd_offload_is_declared_end_to_end():
+    """The disk tier is one switch: the master admits offloading, the
+    store process that owns the pool holds the tier, and the engine is
+    told the pool has one so it sizes its staging for disk reads."""
+    provider = get_cache_provider("Mooncake")
+    values = {
+        "pool_mode": "standalone-store",
+        "enable_ssd_offload": True,
+        "ssd_offload_path": "/nvme/mooncake",
+        "ssd_capacity_gb": 200,
+    }
+    params = resolved_field_values(provider.managed_fields, values)
+
+    master = provider.components["master"]
+    assert "--enable_offload=true" in render_template(master.run_command, params)
+
+    store = provider.components["store"]
+    command = render_template(store.run_command, params)
+    assert "--enable_offload=true" in command
+    env = {key: render_template(value, params) for key, value in store.env.items()}
+    assert env["MOONCAKE_OFFLOAD_FILE_STORAGE_PATH"] == "/nvme/mooncake"
+    # the field states GiB; the client takes bytes and would otherwise
+    # default of 2 TB bounds no real disk
+    assert env["MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES"] == str(200 * 1024**3)
+
+    rendered = render_injection(
+        provider,
+        "vLLM",
+        {
+            "master_server_address": "10.0.0.9:50051",
+            "local_hostname": "10.0.0.7",
+            **values,
+        },
+    )
+    config = json.loads(rendered[2]["/tmp/gpustack-mooncake.json"])
+    assert config["enable_offload"] is True
+
+
+def test_mooncake_ssd_fields_resolve_empty_while_the_tier_is_off():
+    """Off, the path and the cap render to nothing: the env entries drop
+    and the store's mount is skipped, so a disk the service does not use
+    is never bound."""
+    provider = get_cache_provider("Mooncake")
+    params = resolved_field_values(
+        provider.managed_fields, {"pool_mode": "standalone-store"}
+    )
+    assert params["enable_ssd_offload"] is False
+    assert params["ssd_offload_path"] == ""
+    assert params["ssd_capacity_gb"] == ""
+
+    store = provider.components["store"]
+    assert (
+        render_argument(store.env["MOONCAKE_OFFLOAD_FILE_STORAGE_PATH"], params) == ""
+    )
+    assert (
+        render_argument(store.env["MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES"], params)
+        == ""
+    )
+    assert render_argument(store.mounts[0], params) == ""
+
+
+def test_template_filters_convert_on_the_way_out():
+    params = {"cap": 3, "flag": True, "off": False}
+    assert render_template("{{cap|gib_to_bytes}}", params) == str(3 * 1024**3)
+    # a filtered placeholder is a converted value, never the raw one
+    assert render_typed_template("{{cap|gib_to_bytes}}", params) == str(3 * 1024**3)
+    assert render_typed_template("{{cap}}", params) == 3
+    # one declared boolean serves JSON and gflags alike
+    assert render_template("--enable={{flag}} --off={{off}}", params) == (
+        "--enable=true --off=false"
+    )
+
+
+def test_a_gated_gate_closes_the_fields_behind_it():
+    """The disk-tier path hangs off a switch that hangs off the mode. A
+    switch left on in standalone-store must not keep the path alive once
+    the service is embedded: gates resolve through the chain, not one
+    level."""
+    provider = get_cache_provider("Mooncake")
+    params = resolved_field_values(
+        provider.managed_fields,
+        {
+            "pool_mode": "embedded",
+            "enable_ssd_offload": True,
+            "ssd_offload_path": "/nvme/mooncake",
+            "ssd_capacity_gb": 200,
+        },
+    )
+    assert params["enable_ssd_offload"] is False
+    assert params["ssd_offload_path"] == ""
+    assert params["ssd_capacity_gb"] == ""

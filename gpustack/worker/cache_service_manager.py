@@ -8,10 +8,12 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import httpx
 
+from gpustack_runtime import envs as runtime_envs
 from gpustack_runtime.deployer import (
     Container,
     ContainerEnv,
     ContainerExecution,
+    ContainerMount,
     ContainerProfileEnum,
     ContainerResources,
     WorkloadPlan,
@@ -356,6 +358,7 @@ class CacheServiceManager:
                 envs=[
                     ContainerEnv(name=name, value=value) for name, value in env.items()
                 ],
+                mounts=self._build_mounts(component_spec, params),
                 resources=(
                     self._gpu_resources()
                     if component_spec is None or component_spec.gpu_access
@@ -574,6 +577,27 @@ class CacheServiceManager:
                 else list(user_parameters)
             )
         return argv, overrides_entrypoint
+
+    @staticmethod
+    def _build_mounts(component_spec, params: Dict[str, Any]) -> List[ContainerMount]:
+        """Host directories the component declares it keeps data in, bound
+        into its container. A path whose placeholders have no value
+        renders empty and is skipped — the configuration that would use it
+        is off. A containerized worker mirrors its own mounts into the
+        workloads it creates, which already carries the platform data
+        directory, so declared binds stay out of its way (same rule the
+        model backends follow)."""
+        if (
+            component_spec is None
+            or runtime_envs.GPUSTACK_RUNTIME_DEPLOY_MIRRORED_DEPLOYMENT
+        ):
+            return []
+        paths: List[str] = []
+        for template in component_spec.mounts:
+            rendered = render_argument(template, params)
+            if rendered and rendered not in paths:
+                paths.append(rendered)
+        return [ContainerMount(path=path) for path in paths]
 
     @staticmethod
     def _build_env(

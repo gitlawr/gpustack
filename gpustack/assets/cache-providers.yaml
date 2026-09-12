@@ -469,6 +469,7 @@
         --eviction_ratio {{eviction_ratio}}
         --enable_ha={{enable_ha}} --etcd_endpoints {{etcd_endpoints}}
         --cluster_id gpustack-cache-service-{{service_id}}
+        --enable_offload={{enable_ssd_offload}}
       # With HA on, clients discover the current leader through etcd
       # instead of dialing one master; without endpoints this renders to
       # nothing and the resolved instance address is used.
@@ -478,10 +479,13 @@
         path: /metrics
         target: metrics
     # Dedicated pool capacity, present only in standalone-store mode.
-    # Configured purely through env (MooncakeConfig.load_from_env);
-    # local_hostname must be the worker's reachable IP — the P2P
-    # handshake advertises it to peers, where the bind-any address
-    # would be useless.
+    # mooncake_client is the process vLLM's connector documents as the
+    # standalone-store owner ("an external mooncake_client process owns
+    # the pool and the SSD tier"); the REST store service owns a segment
+    # too but calls setup() positionally, which fixes SSD offload off.
+    # --host must be the worker's reachable IP: the P2P handshake
+    # advertises it to peers, and the disk tier advertises its read RPC
+    # on it, where the bind-any address would be useless.
     store:
       topology: replicas
       replicas_by: store_replicas
@@ -493,16 +497,25 @@
       enabled_when: standalone-store
       gpu_access: false
       run_command: >-
-        python3 -m mooncake.mooncake_store_service --port {{port}}
+        mooncake_client --host {{worker_ip}} --port {{port}}
+        --master_server_address {{component.master.address}}
+        --metadata_server P2PHANDSHAKE
+        --protocol {{protocol}} --device_names {{device_name}}
+        --global_segment_size {{store_segment_size}}gb
+        --enable_offload={{enable_ssd_offload}}
       env:
-        MOONCAKE_MASTER: "{{component.master.address}}"
         MC_STORE_CLUSTER_ID: "gpustack-cache-service-{{service_id}}"
-        MOONCAKE_TE_META_DATA_SERVER: P2PHANDSHAKE
-        MOONCAKE_LOCAL_HOSTNAME: "{{worker_ip}}"
-        MOONCAKE_PROTOCOL: "{{protocol}}"
-        MOONCAKE_DEVICE: "{{device_name}}"
-        MOONCAKE_GLOBAL_SEGMENT_SIZE: "{{store_segment_size}}gb"
-        MOONCAKE_LOCAL_BUFFER_SIZE: "4gb"
+        # The disk tier reads these; they mean nothing while offload is
+        # off. The backend descriptor packs many keys per file, which is
+        # what KV chunks want (a file per key exhausts inodes).
+        MOONCAKE_OFFLOAD_FILE_STORAGE_PATH: "{{ssd_offload_path}}"
+        MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR: bucket_storage_backend
+        # Upstream defaults this to 2 TB, which is not a bound on any
+        # real disk; the field states GiB and the program takes bytes.
+        MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES: "{{ssd_capacity_gb|gib_to_bytes}}"
+      # keeps spilled cache on host disk, so it survives the container
+      mounts:
+        - "{{ssd_offload_path}}"
   # Field names keep the component scope (engine_ / store_) for template
   # readability; the labels speak Mooncake's own vocabulary (mode,
   # global_segment_size), and the mode-scoped pair renders one at a time.
@@ -559,6 +572,43 @@
       step: 1
       visible_by: pool_mode
       visible_when: standalone-store
+    # The disk tier lives in the process that owns the pool, so it is
+    # standalone-store only: embedded engines would each offload the
+    # little that lands on their own segment.
+    - name: enable_ssd_offload
+      label: SSD Offload
+      description: >-
+        Spills cold cache from the pool's DRAM to local disk on the store
+        workers, and reads it back on a memory miss. Extends capacity far
+        past RAM at disk latency.
+      type: boolean
+      default: false
+      visible_by: pool_mode
+      visible_when: standalone-store
+      gated_default: false
+    - name: ssd_offload_path
+      label: SSD Path
+      description: >-
+        Directory on each store worker that holds the spilled cache;
+        point it at an NVMe mount.
+      default: /var/lib/gpustack/cache/mooncake/offload
+      required: true
+      visible_by: enable_ssd_offload
+      visible_when: true
+      gated_default: ""
+    - name: ssd_capacity_gb
+      label: SSD Capacity (GiB)
+      description: >-
+        Disk each store replica may fill (per replica); leave room on the
+        filesystem for everything else that shares it.
+      type: number
+      default: 200
+      min: 1
+      step: 1
+      required: true
+      visible_by: enable_ssd_offload
+      visible_when: true
+      gated_default: ""
     - name: protocol
       label: Transport Protocol
       description: >-
@@ -693,6 +743,12 @@
           # EADDRNOTAVAIL). Pooling is the sane default for LLM traffic;
           # the RDMA path never reads this switch.
           MC_TCP_ENABLE_CONNECTION_POOL: "1"
+        # enable_offload tells the connector the pool has a disk tier, so
+        # it sizes its staging buffer for disk-latency reads; the tier
+        # itself belongs to the store process, and reading from it is
+        # transparent to the engine either way. The Ascend entry below
+        # carries no such key: that connector is vllm-ascend's own and
+        # parses this file itself.
         files:
           /tmp/gpustack-mooncake.json: |
             {
@@ -702,7 +758,8 @@
               "global_segment_size": "{{engine_segment_size}}GB",
               "local_buffer_size": "4GB",
               "protocol": "{{protocol}}",
-              "device_name": "{{device_name}}"
+              "device_name": "{{device_name}}",
+              "enable_offload": {{enable_ssd_offload}}
             }
         kv_transfer_config:
           kv_connector: MooncakeStoreConnector

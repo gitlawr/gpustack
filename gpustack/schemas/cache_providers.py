@@ -1,7 +1,7 @@
 import json
 import re
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from pydantic import BaseModel, model_validator
 
@@ -520,6 +520,15 @@ class CacheProviderComponent(BaseModel):
     """Env template for this component's container; values support
     {{placeholder}} including cross-component addresses."""
 
+    mounts: List[str] = []
+    """Host directories this component keeps its data in (templates, e.g.
+    a configured disk-tier path), bound into its container so the data
+    lands on host disk and outlives the container. An entry whose
+    placeholders have no value renders empty and is skipped, so a path
+    only some configurations use costs nothing when unused. A worker that
+    is itself containerized mirrors its own mounts into the workloads it
+    creates, and these are skipped there."""
+
     health_check: Optional[CacheProviderHealthCheck] = None
     """Probe for this component's instances; None inherits the
     provider-level health_check."""
@@ -929,8 +938,38 @@ class CacheProvider(BaseModel):
         return matches[0] if matches else None
 
 
-# Dots namespace cross-component placeholders (component.master.address).
-_TEMPLATE_PATTERN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_.]*)\}\}")
+# Dots namespace cross-component placeholders (component.master.address);
+# a trailing |filter converts the value on the way out.
+_TEMPLATE_PATTERN = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_.]*)(?:\|([a-z_]+))?\}\}")
+
+_GIB_BYTES = 1024**3
+
+
+def _gib_to_bytes(value: Any) -> Any:
+    """A size a field states in GiB, as the byte count a program that
+    takes no unit wants."""
+    try:
+        return int(float(value) * _GIB_BYTES)
+    except (TypeError, ValueError):
+        return value
+
+
+TEMPLATE_FILTERS = {"gib_to_bytes": _gib_to_bytes}
+"""Conversions a placeholder may name (``{{cap_gb|gib_to_bytes}}``), for
+values a declaration states in the unit a user thinks in and a program
+reads in another."""
+
+
+def _render_value(value: Any, filter_name: Optional[str] = None) -> str:
+    """One resolved value as a template renders it. Booleans render
+    lowercase: that is the literal JSON accepts and gflags parses, so one
+    declared boolean serves a config file and a command-line flag
+    alike."""
+    if filter_name:
+        value = TEMPLATE_FILTERS[filter_name](value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def render_template(value: str, params: Dict[str, Any]) -> str:
@@ -944,7 +983,7 @@ def render_template(value: str, params: Dict[str, Any]) -> str:
         var_name = match.group(1)
         if var_name in params:
             resolved = params[var_name]
-            return "" if resolved is None else str(resolved)
+            return "" if resolved is None else _render_value(resolved, match.group(2))
         return match.group(0)
 
     return _TEMPLATE_PATTERN.sub(replace_var, value)
@@ -968,7 +1007,7 @@ def render_argument(value: str, params: Dict[str, Any]) -> str:
         if resolved is None or resolved == "":
             empty = True
             return ""
-        return str(resolved)
+        return _render_value(resolved, match.group(2))
 
     rendered = _TEMPLATE_PATTERN.sub(replace_var, value)
     return "" if empty else rendered
@@ -993,7 +1032,7 @@ def render_optional_template(
         if resolved is None or resolved == "":
             missing = True
             return ""
-        return str(resolved)
+        return _render_value(resolved, match.group(2))
 
     rendered = _TEMPLATE_PATTERN.sub(replace_var, value)
     return None if missing else rendered
@@ -1065,19 +1104,34 @@ def resolved_field_values(
     """Field values as the templates should see them: the configured
     value falling back to the declared default — except that a field
     whose visible_by gate does not match resolves to its gated_default
-    when one is declared."""
+    when one is declared.
+
+    A gate is read resolved, not raw, so gates chain: a field behind a
+    switch that is itself behind a mode closes with the mode, however the
+    switch was left when the mode last offered it."""
     declared = {field.name: field for field in managed_fields}
     resolved: Dict[str, Any] = {}
-    for field in managed_fields:
+    resolving: Set[str] = set()
+
+    def resolve(field: "CacheProviderField") -> Any:
+        if field.name in resolved:
+            return resolved[field.name]
         value = values.get(field.name, field.default)
         if field.visible_by and field.gated_default is not None:
             gate_field = declared.get(field.visible_by)
-            gate_value = values.get(field.visible_by)
-            if gate_value is None and gate_field is not None:
-                gate_value = gate_field.default
+            if gate_field is not None and field.name not in resolving:
+                resolving.add(field.name)
+                gate_value = resolve(gate_field)
+                resolving.discard(field.name)
+            else:
+                gate_value = values.get(field.visible_by)
             if gate_value != field.visible_when:
                 value = field.gated_default
         resolved[field.name] = value
+        return value
+
+    for field in managed_fields:
+        resolve(field)
     return resolved
 
 
@@ -1136,9 +1190,9 @@ def validate_injection_templates(provider: "CacheProvider") -> List[str]:
                 if isinstance(value, str)
             )
         referenced = {
-            name
+            match.group(1)
             for template in templates
-            for name in _TEMPLATE_PATTERN.findall(template)
+            for match in _TEMPLATE_PATTERN.finditer(template)
         }
         prefix = f"'{provider.name}' integration '{integration.backend}'"
         for name in sorted(referenced & excluded):
@@ -1166,7 +1220,9 @@ def render_typed_template(value: Any, params: Dict[str, Any]) -> Any:
     if not isinstance(value, str):
         return value
     match = _TEMPLATE_PATTERN.fullmatch(value)
-    if match and match.group(1) in params:
+    # a filtered placeholder has converted its value, so it renders as
+    # the string the conversion produced rather than passing through
+    if match and not match.group(2) and match.group(1) in params:
         return params[match.group(1)]
     return render_template(value, params)
 
