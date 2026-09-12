@@ -503,6 +503,15 @@
         --protocol {{protocol}} --device_names {{device_name}}
         --global_segment_size {{store_segment_size}}gb
         --enable_offload={{enable_ssd_offload}}
+        --enable_http_server --http_port {{metrics_port}}
+      # The RPC port binds the advertised address alone, so a loopback
+      # probe never reaches it; the client's own HTTP server binds every
+      # interface and answers what readiness actually means here —
+      # initialized, and the master reachable (503 until both hold).
+      health_check:
+        scheme: http
+        path: /health
+        target: metrics
       env:
         MC_STORE_CLUSTER_ID: "gpustack-cache-service-{{service_id}}"
         # The disk tier reads these; they mean nothing while offload is

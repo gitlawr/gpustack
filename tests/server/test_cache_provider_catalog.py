@@ -604,6 +604,13 @@ def test_mooncake_provider_declaration():
     )
     # spilled cache belongs on host disk, not in the container layer
     assert store.mounts == ["{{ssd_offload_path}}"]
+    # the client's RPC port binds the advertised address alone, so
+    # readiness is read from the HTTP server it can be told to run, which
+    # answers 503 until it holds a master
+    assert "--enable_http_server --http_port {{metrics_port}}" in store.run_command
+    assert store.health_check.scheme == "http"
+    assert store.health_check.path == "/health"
+    assert store.health_check.target == "metrics"
     assert provider.component_enabled("store", None) is False
     assert (
         provider.component_enabled("store", {"pool_mode": "standalone-store"}) is True
