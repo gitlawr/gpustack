@@ -615,6 +615,11 @@ def test_mooncake_provider_declaration():
     # master pool sizes itself from a field that resolves to a single
     # master while it is off, and clients reach the elected leader
     # through etcd rather than through whichever replica they found.
+    # The engine floor is the release that registers the connector: an
+    # older one cannot start at all, so it must degrade instead.
+    vllm_integration = provider.integration_for("vLLM", "cuda")
+    assert vllm_integration.versions == ">=0.21.0"
+
     assert fields["enable_ha"].default is False
     assert fields["etcd_endpoints"].required is True
     assert fields["etcd_endpoints"].visible_by == "enable_ha"

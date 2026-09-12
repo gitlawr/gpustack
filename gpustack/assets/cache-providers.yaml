@@ -664,7 +664,10 @@
     # connectors is a calibration surface for integration testing.
     - backend: vLLM
       frameworks: [cuda, cann]
-      versions: ">=0.9.0"
+      # MooncakeStoreConnector enters vLLM's connector registry in
+      # v0.21.0; an older engine fails to construct its config rather
+      # than starting without the cache, so the floor has to be real.
+      versions: ">=0.21.0"
       injection:
         env:
           MOONCAKE_CONFIG_PATH: /tmp/gpustack-mooncake.json
