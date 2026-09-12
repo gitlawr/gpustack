@@ -663,7 +663,7 @@
     # mode). The mode field is recent in vLLM; behavior on older
     # connectors is a calibration surface for integration testing.
     - backend: vLLM
-      frameworks: [cuda, cann]
+      frameworks: [cuda]
       # MooncakeStoreConnector enters vLLM's connector registry in
       # v0.21.0; an older engine fails to construct its config rather
       # than starting without the cache, so the floor has to be real.
@@ -703,6 +703,40 @@
         kv_transfer_config:
           kv_connector: MooncakeStoreConnector
           kv_role: kv_both
+    # Ascend needs its own entry rather than a shared one: upstream's
+    # connector assumes an attention layer's KV is one packed tensor and
+    # asserts on registration, while Ascend keeps K and V apart — which
+    # is why vllm-ascend ships its own pool connector. That one takes
+    # the same MOONCAKE_CONFIG_PATH file and talks to the same master,
+    # so only the connector and its extra config differ. It also refuses
+    # any protocol but "ascend", so the service has to be created with
+    # the Ascend transport (its own NPU transfer path, over HCCS or
+    # RDMA); the field says so.
+    - backend: vLLM
+      frameworks: [cann]
+      versions: ">=0.21.0"
+      injection:
+        env:
+          MOONCAKE_CONFIG_PATH: /tmp/gpustack-mooncake.json
+          MC_STORE_CLUSTER_ID: "gpustack-cache-service-{{service_id}}"
+          PYTHONHASHSEED: "0"
+        files:
+          /tmp/gpustack-mooncake.json: |
+            {
+              "mode": "{{pool_mode}}",
+              "metadata_server": "P2PHANDSHAKE",
+              "master_server_address": "{{master_server_address}}",
+              "global_segment_size": "{{engine_segment_size}}GB",
+              "local_buffer_size": "4GB",
+              "protocol": "{{protocol}}",
+              "device_name": "{{device_name}}"
+            }
+        kv_transfer_config:
+          kv_connector: AscendStoreConnector
+          kv_role: kv_both
+          kv_connector_extra_config:
+            backend: mooncake
+            lookup_rpc_port: "0"
 # PLACEHOLDER. Change as needed.
 - name: XSKY MeshFusion
   display_name: XSKY MeshFusion

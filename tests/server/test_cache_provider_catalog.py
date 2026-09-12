@@ -619,6 +619,20 @@ def test_mooncake_provider_declaration():
     # older one cannot start at all, so it must degrade instead.
     vllm_integration = provider.integration_for("vLLM", "cuda")
     assert vllm_integration.versions == ">=0.21.0"
+    # Ascend attaches through its own pool connector: upstream's asserts
+    # on registration there, because it expects one packed KV tensor per
+    # layer while Ascend keeps K and V apart. Same config file, same
+    # master — only the connector and its extra config differ.
+    ascend = provider.integration_for("vLLM", "cann")
+    assert ascend.injection.kv_transfer_config.kv_connector == "AscendStoreConnector"
+    assert ascend.injection.kv_transfer_config.kv_connector_extra_config == {
+        "backend": "mooncake",
+        "lookup_rpc_port": "0",
+    }
+    assert (
+        ascend.injection.env["MOONCAKE_CONFIG_PATH"]
+        == vllm_integration.injection.env["MOONCAKE_CONFIG_PATH"]
+    )
 
     assert fields["enable_ha"].default is False
     assert fields["etcd_endpoints"].required is True
