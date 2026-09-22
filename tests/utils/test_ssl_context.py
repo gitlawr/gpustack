@@ -230,6 +230,61 @@ def test_make_ssl_context_rejects_untrusted_cert(monkeypatch, tls_server, tmp_pa
         make_ssl_context.cache_clear()
 
 
+def test_insecure_tls_is_off_unless_asked_for(monkeypatch):
+    monkeypatch.delenv("GPUSTACK_INSECURE_TLS", raising=False)
+    assert ssl_context.insecure_tls_enabled() is False
+
+    # get_gpustack_env_bool reads "true"/"1"; anything else is off, so an
+    # operator who explicitly disabled it is not overridden by its presence.
+    monkeypatch.setenv("GPUSTACK_INSECURE_TLS", "false")
+    assert ssl_context.insecure_tls_enabled() is False
+
+    monkeypatch.setenv("GPUSTACK_INSECURE_TLS", "1")
+    assert ssl_context.insecure_tls_enabled() is True
+
+
+def test_make_ssl_context_accepts_any_peer_when_insecure(monkeypatch, tls_server):
+    """GPUSTACK_INSECURE_TLS → a handshake against an untrusted self-signed
+    server succeeds, and the hostname is not checked either.
+
+    Point SSL_CERT_FILE at certifi so the server's cert is definitely not in
+    the bundle: only the insecure switch can make this handshake pass.
+    """
+    port, _cert_path = tls_server
+    monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
+    monkeypatch.setenv("GPUSTACK_INSECURE_TLS", "true")
+    _clear_caches()
+
+    ctx = make_ssl_context()
+    try:
+        assert ctx.check_hostname is False
+        assert ctx.verify_mode is ssl.CERT_NONE
+
+        with httpx.Client(verify=ctx, timeout=5) as client:
+            # 127.0.0.1 is absent from the cert's SAN (DNS:localhost), so this
+            # also fails hostname verification in the secure configuration.
+            resp = client.get(f"https://127.0.0.1:{port}/")
+        assert resp.status_code in (200, 404)
+    finally:
+        _clear_caches()
+
+
+def test_make_ssl_context_warns_when_insecure(monkeypatch, caplog):
+    """Skipping verification must never be silent."""
+    monkeypatch.setenv("GPUSTACK_INSECURE_TLS", "1")
+    _clear_caches()
+
+    try:
+        with caplog.at_level("WARNING", logger="gpustack.ssl_context"):
+            make_ssl_context()
+    finally:
+        _clear_caches()
+
+    assert any(
+        "GPUSTACK_INSECURE_TLS" in record.message for record in caplog.records
+    ), "expected a warning naming the variable that disabled verification"
+
+
 def test_make_ssl_context_loads_nonempty_ca_bundle(monkeypatch):
     """Sanity check: the resolved context comes with some CA roots loaded.
 

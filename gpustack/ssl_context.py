@@ -28,7 +28,25 @@ from functools import lru_cache
 
 import certifi
 
+from gpustack.utils.envs import get_gpustack_env_bool
+
 logger = logging.getLogger(__name__)
+
+INSECURE_TLS_ENV = "GPUSTACK_INSECURE_TLS"
+
+
+def insecure_tls_enabled() -> bool:
+    """Whether outbound TLS verification is disabled for this process.
+
+    ``GPUSTACK_INSECURE_TLS`` is the escape hatch for a deployment whose server
+    certificate cannot be verified anywhere it is needed -- a private CA that
+    cannot be distributed to every worker, for instance. It is deliberately an
+    environment variable rather than a CLI flag: the worker spawns fresh
+    interpreters (model downloads, the co-located worker of a server), and the
+    environment is what crosses that boundary, so a single ``export`` covers
+    the worker and everything it starts.
+    """
+    return bool(get_gpustack_env_bool("INSECURE_TLS"))
 
 
 def resolve_ca_bundle() -> str:
@@ -111,8 +129,29 @@ def make_ssl_context() -> ssl.SSLContext:
         leak across every caller (httpx clients, auth flows, etc.) and
         silently weaken TLS verification elsewhere in the process.
 
-        If you need a customized context (insecure mode, client cert,
-        pinned ciphers, ...), construct your own ``ssl.SSLContext`` --
-        don't reach for this factory.
+        If you need a customized context (client cert, pinned ciphers, ...),
+        construct your own ``ssl.SSLContext`` -- don't reach for this factory.
+
+    With ``GPUSTACK_INSECURE_TLS`` set, the returned context accepts any peer
+    certificate. Every gpustack HTTPS client routes through here, so that one
+    variable covers the worker's connection to the server, the ``/version``
+    probe, and the clients rebuilt inside spawned subprocesses alike.
     """
+    if insecure_tls_enabled():
+        logger.warning(
+            "%s is set: TLS verification is disabled for outbound HTTPS "
+            "connections. Use only on trusted networks.",
+            INSECURE_TLS_ENV,
+        )
+        return _make_insecure_ssl_context()
     return ssl.create_default_context(cafile=resolve_ca_bundle())
+
+
+def _make_insecure_ssl_context() -> ssl.SSLContext:
+    """Return a context that trusts any peer."""
+    context = ssl.create_default_context()
+    # check_hostname must be cleared before verify_mode, otherwise ssl raises
+    # on the inconsistent pair.
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context

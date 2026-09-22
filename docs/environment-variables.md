@@ -68,9 +68,10 @@ The **Applies to** column indicates where the environment variable should be set
 
 ### Authentication & Security
 
-| Variable                            | Description                           | Default | Applies to |
-| ----------------------------------- | ------------------------------------- | ------- | ---------- |
-| `GPUSTACK_JWT_TOKEN_EXPIRE_MINUTES` | JWT token expiration time in minutes. | `120`   | Server     |
+| Variable                            | Description                                                                                                                                                                              | Default | Applies to      |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | --------------- |
+| `GPUSTACK_JWT_TOKEN_EXPIRE_MINUTES` | JWT token expiration time in minutes.                                                                                                                                                    | `120`   | Server          |
+| `GPUSTACK_INSECURE_TLS`             | Skip TLS verification for outbound HTTPS connections, including the worker's connection to the server and its benchmark progress reporting. Use only on trusted networks where the server certificate cannot be verified. | `false` | Server & Worker |
 
 ### Gateway Configuration
 

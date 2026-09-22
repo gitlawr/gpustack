@@ -287,12 +287,11 @@ class TestInsecureFlagForwarding:
 class TestResolveProgressInsecureTLS:
     """What puts the progress channel into insecure mode.
 
-    Only GPUSTACK_INSECURE_TLS, which a worker started with the enterprise
-    plugin's --insecure-tls sets. There is deliberately no benchmark-only switch:
-    it would let benchmarks skip verification while the worker's own connection
-    to the same server could not. The variable cannot reach the benchmark
-    container on its own (stripped by filter_env_vars, and the enterprise
-    sitecustomize shim lives in the gpustack image), so it is read here.
+    Only GPUSTACK_INSECURE_TLS, the worker-wide switch. There is deliberately no
+    benchmark-only one: it would let benchmarks skip verification while the
+    worker's own connection to the same server could not. The variable cannot
+    reach the benchmark container on its own -- filter_env_vars strips
+    GPUSTACK_* -- so it is resolved here and forwarded as a runner flag.
     """
 
     def test_off_by_default(self, monkeypatch):
