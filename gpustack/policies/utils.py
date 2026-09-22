@@ -28,6 +28,13 @@ from gpustack.utils.lora_model_source import (
     normalized_lora_list,
 )
 
+from gpustack.schemas.workloads import Workload
+from gpustack.utils.comparison import tally
+from gpustack.utils.model_instance_workers import (
+    instance_placements,
+    rows_by_owner,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -88,18 +95,94 @@ def compute_worker_allocated(
     return allocated
 
 
+def compute_worker_allocated_from_workloads(
+    workloads: List[Workload],
+    worker_id: int,
+    gpu_type: Optional[str] = None,
+) -> Allocated:
+    """
+    The same aggregate as :func:`compute_worker_allocated`, read off workload
+    rows instead of instances and their embedded subordinate lists.
+
+    Takes every model-instance workload rather than only this worker's,
+    because the subordinate branch below filters on the *instance's* gpu type,
+    which lives on the leader's row and that can be on another worker.
+
+    Both quirks of the original are reproduced deliberately, not tidied:
+    a subordinate contributes vram but no ram (the rpc-server side does not
+    hold the model), and it is filtered by the instance's gpu type rather than
+    its own, without the ``is None`` escape the leader gets. The second looks
+    like a defect -- a subordinate whose type differs from the instance's goes
+    uncounted, which under-reports what is allocated -- but it decides
+    placement today, so changing it belongs in its own change.
+    """
+    allocated = Allocated(ram=0, vram={})
+
+    def add_vram(claim):
+        for gpu_index, vram in (claim or {}).get("vram", {}).items():
+            index = int(gpu_index)
+            allocated.vram[index] = allocated.vram.get(index, 0) + vram
+
+    owner_gpu_type = {
+        w.owner_id: w.gpu_type for w in workloads if (w.group_index or 0) == 0
+    }
+
+    for w in workloads:
+        if w.worker_id != worker_id:
+            continue
+        claim = w.computed_resource_claim
+        if (w.group_index or 0) == 0:
+            mismatched = (
+                gpu_type is not None
+                and w.gpu_type is not None
+                and w.gpu_type != gpu_type
+            )
+            if mismatched:
+                continue
+            if claim is not None:
+                allocated.ram += claim.get("ram") or 0
+                if w.gpu_indexes:
+                    add_vram(claim)
+        else:
+            if gpu_type is not None and owner_gpu_type.get(w.owner_id) != gpu_type:
+                continue
+            if claim:
+                add_vram(claim)
+
+    return allocated
+
+
 def get_worker_allocatable_resource(
     all_model_instances: List[ModelInstance],
     worker: Worker,
     gpu_type: Optional[str] = None,
+    workloads: Optional[List[Workload]] = None,
 ) -> Allocatable:
     """
     Get the worker with the latest allocatable resources, if gpu_type is provided, only consider the GPUs of that type.
+
+    ``workloads`` is every model-instance row in the cluster, not this
+    worker's: the row reading is compared against the instance reading here
+    while the instances stay authoritative, and its subordinate branch filters
+    on the instance's gpu type, which lives on the leader's row and that can be
+    on another worker.
     """
 
     is_unified_memory = worker.status.memory.is_unified_memory
-    model_instances = get_worker_model_instances(all_model_instances, worker)
+    model_instances = get_worker_model_instances(all_model_instances, worker, workloads)
     allocated = compute_worker_allocated(model_instances, worker.id, gpu_type)
+    if workloads is not None:
+        # The scheduler is the only caller that passes a gpu type, so this is
+        # the only place the type-filtered branch of the row reading is
+        # exercised at all -- the cached per-worker aggregate never narrows by
+        # type. Reading it low here would overcommit a worker rather than fail
+        # visibly, so it is compared rather than swapped.
+        tally("Workload allocation").compare(
+            allocated,
+            compute_worker_allocated_from_workloads(workloads, worker.id, gpu_type),
+            f"worker {worker.id} of type {gpu_type}",
+            skip_if_none=False,
+        )
 
     allocatable = Allocatable(ram=0, vram={})
     if worker.status.gpu_devices:
@@ -515,34 +598,33 @@ async def estimate_diffusion_model_vram(
 
 
 def get_worker_model_instances(
-    all_model_instances: List[ModelInstance], worker: Worker
+    all_model_instances: List[ModelInstance],
+    worker: Worker,
+    workloads: Optional[List[Workload]] = None,
 ) -> List[ModelInstance]:
     """
     Get all model instances related to the worker, including:
     1. Model instances assigned to this worker (main worker)
     2. Model instances that use this worker as a subordinate worker in distributed inference
+
+    ``workloads`` is every model-instance row in the cluster; each instance is
+    placed from its own rows and the result compared against the placement
+    read off the instance, which stays authoritative.
     """
+    grouped_rows = rows_by_owner(workloads)
     # Filter to get only the relevant instances:
     # 1. Instances assigned to this worker (main worker)
     # 2. Instances that use this worker as a subordinate worker
-    relevant_instances = []
-    for model_instance in all_model_instances:
-        # Check if this is a main worker instance
-        if model_instance.worker_id == worker.id:
-            relevant_instances.append(model_instance)
-        # Check if this worker is used as a subordinate worker
-        elif (
-            model_instance.distributed_servers
-            and model_instance.distributed_servers.subordinate_workers
-        ):
-            for (
-                subordinate_worker
-            ) in model_instance.distributed_servers.subordinate_workers:
-                if subordinate_worker.worker_id == worker.id:
-                    relevant_instances.append(model_instance)
-                    break
-
-    return relevant_instances
+    return [
+        model_instance
+        for model_instance in all_model_instances
+        if any(
+            p.worker_id == worker.id
+            for p in instance_placements(
+                model_instance, grouped_rows.get(model_instance.id)
+            )
+        )
+    ]
 
 
 class ListMessageBuilder:
@@ -710,6 +792,7 @@ def group_worker_gpu_by_memory(
     model_instances: List[ModelInstance],
     ram_claim: int = 0,
     gpu_type: Optional[str] = None,
+    workloads: Optional[List[Workload]] = None,
 ) -> List[List[WorkerGPUInfo]]:
     """
     Group GPU devices from multiple workers by allocatable memory size with the constraint
@@ -743,7 +826,9 @@ def group_worker_gpu_by_memory(
             continue
 
         # Get allocatable resources for this worker
-        allocatable = get_worker_allocatable_resource(model_instances, worker, gpu_type)
+        allocatable = get_worker_allocatable_resource(
+            model_instances, worker, gpu_type, workloads
+        )
 
         if ram_not_enough(ram_claim, allocatable):
             continue

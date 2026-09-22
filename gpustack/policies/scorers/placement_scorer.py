@@ -12,7 +12,10 @@ from gpustack.policies.base import (
     ModelInstanceScorer,
     ScheduleCandidatesScorer,
 )
+from gpustack.utils.model_instance_workers import subordinate_placements
+from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import (
+    rows_by_owner,
     get_worker_allocatable_resource,
 )
 from gpustack.schemas.models import (
@@ -76,9 +79,14 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
         inference_server_type_weight: Optional[InferenceServerTypeWeight] = None,
         spread_score_weights: Optional[SpreadScoreWeights] = None,
         max_score: Optional[float] = None,
+        workloads: Optional[List[Workload]] = None,
     ):
         self._model = model
         self._model_instances = model_instances
+        # Every model-instance row in the cluster, not this model's: the
+        # allocatable reading compares against them and its subordinate branch
+        # needs the leader's row, which can be on another worker.
+        self._workloads = workloads
         self._resource_weight = resource_weight or ResourceWeight()
         self._model_weight = model_weight or ModelWeight()
         self._inference_server_type_weight = (
@@ -144,7 +152,7 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
         """
         for candidate in candidates:
             allocatable = get_worker_allocatable_resource(
-                self._model_instances, candidate.worker
+                self._model_instances, candidate.worker, workloads=self._workloads
             )
 
             final_score = 0
@@ -182,6 +190,7 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
         Score the candidates with the binpack strategy.
         """
         scored_instances = []
+        rows_by_instance = rows_by_owner(self._workloads)
 
         for instance in instances:
             if instance.worker_id is None:
@@ -197,7 +206,9 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
                 )
                 continue
 
-            allocatable = get_worker_allocatable_resource(self._model_instances, worker)
+            allocatable = get_worker_allocatable_resource(
+                self._model_instances, worker, workloads=self._workloads
+            )
 
             final_score = 0
             score = await self._score_binpack_item(
@@ -208,11 +219,10 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
             )
             final_score = score
 
-            if (
-                instance.distributed_servers
-                and instance.distributed_servers.subordinate_workers
-            ):
-                subordinate_workers = instance.distributed_servers.subordinate_workers
+            subordinate_workers = subordinate_placements(
+                instance, rows_by_instance.get(instance.id)
+            )
+            if subordinate_workers:
                 subordinate_worker_score = (
                     await self._score_binpack_subordinate_workers(
                         subordinate_workers, self._scale_type
@@ -514,6 +524,7 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
                 allocatable = get_worker_allocatable_resource(
                     self._model_instances,
                     worker_map.get(subordinate_worker.worker_id),
+                    workloads=self._workloads,
                 )
 
                 score += await self._score_binpack_item(
@@ -562,6 +573,7 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
             }
         )
 
+        rows_by_instance = rows_by_owner(self._workloads)
         for model_instance in self._model_instances:
             if model_instance.worker_id is None:
                 continue
@@ -583,20 +595,16 @@ class PlacementScorer(ScheduleCandidatesScorer, ModelInstanceScorer):
                     is_current_model,
                 )
 
-            if (
-                model_instance.distributed_servers
-                and model_instance.distributed_servers.subordinate_workers
+            for subordinate_worker in subordinate_placements(
+                model_instance, rows_by_instance.get(model_instance.id)
             ):
-                for (
-                    subordinate_worker
-                ) in model_instance.distributed_servers.subordinate_workers:
-                    for subordinate_gpu_index in subordinate_worker.gpu_indexes:
-                        update_count(
-                            worker_model_instances_count_map,
-                            subordinate_worker.worker_id,
-                            subordinate_gpu_index,
-                            is_current_model,
-                        )
+                for subordinate_gpu_index in subordinate_worker.gpu_indexes:
+                    update_count(
+                        worker_model_instances_count_map,
+                        subordinate_worker.worker_id,
+                        subordinate_gpu_index,
+                        is_current_model,
+                    )
 
         return worker_model_instances_count_map
 

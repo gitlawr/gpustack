@@ -13,6 +13,7 @@ from gpustack.policies.candidate_selectors.base_candidate_selector import (
     ScheduleCandidatesSelector,
 )
 from gpustack.policies.event_recorder.recorder import EventCollector, EventLevelEnum
+from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import (
     get_worker_allocatable_resource,
     ListMessageBuilder,
@@ -44,8 +45,14 @@ class CustomBackendResourceFitSelector(ScheduleCandidatesSelector):
     - Supports both GPU and CPU-only deployments
     """
 
-    def __init__(self, cfg: Config, model: Model, model_instances: List[ModelInstance]):
-        super().__init__(cfg, model, model_instances)
+    def __init__(
+        self,
+        cfg: Config,
+        model: Model,
+        model_instances: List[ModelInstance],
+        workloads: Optional[List[Workload]] = None,
+    ):
+        super().__init__(cfg, model, model_instances, workloads)
         self._event_collector = EventCollector(model, logger)
         self._messages = []
 
@@ -211,7 +218,7 @@ class CustomBackendResourceFitSelector(ScheduleCandidatesSelector):
                     continue
 
                 allocatable = get_worker_allocatable_resource(
-                    self._model_instances, worker, gpu_type
+                    self._model_instances, worker, gpu_type, self._workloads
                 )
 
                 for gpu_device in worker.status.gpu_devices:
@@ -265,7 +272,7 @@ class CustomBackendResourceFitSelector(ScheduleCandidatesSelector):
                     continue  # Need at least 2 GPUs for multi-GPU
 
                 allocatable = get_worker_allocatable_resource(
-                    self._model_instances, worker, gpu_type
+                    self._model_instances, worker, gpu_type, self._workloads
                 )
 
                 # Try to distribute VRAM across multiple GPUs
@@ -324,7 +331,9 @@ class CustomBackendResourceFitSelector(ScheduleCandidatesSelector):
         candidates = []
 
         for worker in workers:
-            allocatable = get_worker_allocatable_resource(self._model_instances, worker)
+            allocatable = get_worker_allocatable_resource(
+                self._model_instances, worker, workloads=self._workloads
+            )
 
             # Check if worker has enough RAM for CPU inference
             if allocatable.ram >= self._ram_claim:

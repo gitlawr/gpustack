@@ -21,11 +21,14 @@ from gpustack.schemas.models import (
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.serve_manager import (
     _LOG_TAIL_CHUNK_SIZE,
+    _WORKLOAD_FAILED_MESSAGE,
     ServeManager,
-    _describe_workload_failure,
     _LogPersistence,
+    _execution_state_patch,
     _tail_lines,
 )
+from gpustack.schemas.workloads import WorkloadStateEnum
+from gpustack.worker.controlloop import describe_workload_failure
 from gpustack_runtime.deployer import WorkloadStatusStateEnum
 from tests.utils.model import new_model, new_model_instance
 
@@ -83,7 +86,7 @@ def _get_workload_sequence(states):
 def _build_serve_manager(worker_id: int = 1):
     clientset = MagicMock()
     clientset.model_instances.list.return_value = SimpleNamespace(items=[])
-    cfg = SimpleNamespace(log_dir="/tmp")
+    cfg = SimpleNamespace(log_dir="/tmp", service_port_range="40000-41000")
     manager = ServeManager(lambda: worker_id, lambda: clientset, cfg)
     manager._inference_backend_manager = MagicMock()
     return manager, clientset
@@ -124,7 +127,7 @@ def test_sync_model_instances_state_marks_main_unreachable_when_subordinate_unre
     with (
         patch(
             "gpustack.worker.serve_manager.get_workload",
-            return_value=SimpleNamespace(state="running"),
+            return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
         ),
         patch.object(manager, "_is_provisioning", return_value=False),
         patch.object(manager, "_get_model", return_value=model),
@@ -896,7 +899,7 @@ def test_adoption_reattaches_container_log_persistence(tmp_path: Path):
         with (
             patch(
                 "gpustack.worker.serve_manager.get_workload",
-                return_value=SimpleNamespace(state="running"),
+                return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
             ),
             patch.object(manager, "_is_provisioning", return_value=False),
             patch.object(manager, "_get_model", return_value=model),
@@ -1012,7 +1015,7 @@ def test_sync_retires_log_persistence_the_server_no_longer_assigns(tmp_path: Pat
     with (
         patch(
             "gpustack.worker.serve_manager.get_workload",
-            return_value=SimpleNamespace(state="running"),
+            return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
         ),
         # Provisioning: still assigned, so its generation must be left alone.
         patch.object(manager, "_is_provisioning", return_value=True),
@@ -1101,7 +1104,7 @@ def _build_vgpu_manager(worker_id=1, device_index=1):
             gpu_devices=[SimpleNamespace(uuid="GPU-uuid-1", index=device_index)]
         )
     )
-    cfg = SimpleNamespace(log_dir="/tmp")
+    cfg = SimpleNamespace(log_dir="/tmp", service_port_range="40000-41000")
     manager = ServeManager(lambda: worker_id, lambda: clientset, cfg)
     manager._inference_backend_manager = MagicMock()
     return manager, clientset
@@ -1342,7 +1345,7 @@ def test_workload_failure_appends_the_exit_code():
     differently: Docker names the reason on state_message, Kubernetes leaves it
     empty and the exits are the only source."""
     assert (
-        _describe_workload_failure(
+        describe_workload_failure(
             SimpleNamespace(
                 state_message="OOMKilled",
                 exits=[_workload_exit(exit_code=137, reason="OOMKilled")],
@@ -1351,7 +1354,7 @@ def test_workload_failure_appends_the_exit_code():
         == "OOMKilled (exit code 137)"
     )
     assert (
-        _describe_workload_failure(
+        describe_workload_failure(
             SimpleNamespace(
                 state_message="",
                 exits=[_workload_exit(exit_code=1, reason="Error")],
@@ -1372,7 +1375,7 @@ def test_workload_failure_keeps_the_image_pull_diagnosis():
     )
 
     assert (
-        _describe_workload_failure(
+        describe_workload_failure(
             SimpleNamespace(
                 state_message=message,
                 exits=[_workload_exit(reason="ImagePullBackOff")],
@@ -1384,7 +1387,7 @@ def test_workload_failure_keeps_the_image_pull_diagnosis():
 
 def test_workload_failure_names_each_container_when_several_exit():
     assert (
-        _describe_workload_failure(
+        describe_workload_failure(
             SimpleNamespace(
                 state_message="",
                 exits=[
@@ -1401,14 +1404,20 @@ def test_workload_failure_falls_back_when_the_workload_explains_nothing():
     # A workload reaped out from under the sync, and one that failed without a
     # message or any exit entry (the pre-0.2.3 shape, which has no `exits` at
     # all) both land on the generic message.
-    assert _describe_workload_failure(None) == "Inference server exited or unhealthy."
     assert (
-        _describe_workload_failure(SimpleNamespace(state="Failed"))
+        describe_workload_failure(None, _WORKLOAD_FAILED_MESSAGE)
         == "Inference server exited or unhealthy."
     )
     assert (
-        _describe_workload_failure(
-            SimpleNamespace(state_message="", exits=[_workload_exit(exit_code=2)])
+        describe_workload_failure(
+            SimpleNamespace(state="Failed"), _WORKLOAD_FAILED_MESSAGE
+        )
+        == "Inference server exited or unhealthy."
+    )
+    assert (
+        describe_workload_failure(
+            SimpleNamespace(state_message="", exits=[_workload_exit(exit_code=2)]),
+            _WORKLOAD_FAILED_MESSAGE,
         )
         == "Inference server exited or unhealthy. (exit code 2)"
     )
@@ -1489,3 +1498,166 @@ def test_sync_vgpu_allocation_steady_state_skips_worker_fetch():
         manager.sync_model_instances_state()
 
     clientset.workers.get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Mirroring execution state onto the instance's workloads
+# ---------------------------------------------------------------------------
+
+
+def test_execution_patch_of_the_leader_lands_at_group_position_zero():
+    group_index, fields = _execution_state_patch(
+        {
+            "state": ModelInstanceStateEnum.RUNNING,
+            "state_message": "",
+            "port": 8000,
+            "ports": [8000, 8001],
+            "pid": 999,
+        }
+    )
+
+    assert group_index == 0
+    assert fields["state"] == WorkloadStateEnum.RUNNING
+    assert fields["ports"] == {"service": 8000, "port1": 8001}
+    assert fields["pid"] == 999
+
+
+def test_execution_patch_of_a_subordinate_lands_at_its_group_position():
+    """A subordinate worker patches its own entry by index; that index is
+    what says which workload of the group reported."""
+    sw = ModelInstanceSubordinateWorker(
+        worker_id=2,
+        state=ModelInstanceStateEnum.ERROR,
+        state_message="boom",
+        pid=321,
+        ports=[40001],
+    )
+
+    group_index, fields = _execution_state_patch(
+        {"distributed_servers.subordinate_workers.1": sw}
+    )
+
+    assert group_index == 2
+    assert fields["state"] == WorkloadStateEnum.ERROR
+    assert fields["state_message"] == "boom"
+    assert fields["pid"] == 321
+    assert fields["ports"] == {"service": 40001}
+
+
+def test_fields_a_workload_does_not_carry_are_dropped():
+    """The instance's own lifecycle and its model files stay on the instance."""
+    _, fields = _execution_state_patch(
+        {"resolved_path": "/models/x", "download_progress": 42.0}
+    )
+
+    assert fields == {}
+
+
+def test_pre_container_states_mirror_as_pending():
+    _, fields = _execution_state_patch({"state": ModelInstanceStateEnum.DOWNLOADING})
+
+    assert fields["state"] == WorkloadStateEnum.PENDING
+
+
+def _distributed_subordinate_view(subordinate_state):
+    """The instance as the subordinate worker on worker 2 sees it: itself in
+    the subordinate list, its own container running."""
+    model_instance = new_model_instance(
+        1,
+        "distributed-instance",
+        1,
+        worker_id=1,
+        state=ModelInstanceStateEnum.STARTING,
+    )
+    model_instance.worker_ip = "10.0.0.1"
+    model_instance.port = 8000
+    model_instance.distributed_servers = DistributedServers(
+        mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER,
+        subordinate_workers=[
+            ModelInstanceSubordinateWorker(
+                worker_id=2,
+                worker_name="worker-2",
+                worker_ip="10.0.0.2",
+                state=subordinate_state,
+            )
+        ],
+    )
+    return model_instance
+
+
+def _sync_as_subordinate(manager, clientset, model_instance):
+    clientset.model_instances.list.return_value = SimpleNamespace(
+        items=[model_instance]
+    )
+    model = new_model(1, "test", 1, huggingface_repo_id="Qwen/Qwen2.5-0.5B-Instruct")
+    model.backend = BackendEnum.VLLM
+    model.backend_version = "0.8.0"
+
+    with (
+        patch(
+            "gpustack.worker.serve_manager.get_workload",
+            return_value=SimpleNamespace(state=WorkloadStatusStateEnum.RUNNING),
+        ),
+        patch.object(manager, "_is_provisioning", return_value=False),
+        patch.object(manager, "_get_model", return_value=model),
+        patch.object(manager, "_update_model_instance") as update_model_instance,
+    ):
+        manager.sync_model_instances_state()
+    return update_model_instance
+
+
+def test_an_initialize_later_subordinate_re_reports_a_lost_running():
+    """initialize_later writes RUNNING once, when it spawns the process. If
+    that write is lost -- two workers read-modify-writing the same row drop
+    each other's fields -- the main worker sees a subordinate that never came
+    up and holds the instance in STARTING for good. The sync pass is the only
+    thing that can notice, so it has to look."""
+    manager, clientset = _build_serve_manager(worker_id=2)
+    model_instance = _distributed_subordinate_view(ModelInstanceStateEnum.PENDING)
+
+    update_model_instance = _sync_as_subordinate(manager, clientset, model_instance)
+
+    update_model_instance.assert_called_once()
+    patched = update_model_instance.call_args[1][
+        "distributed_servers.subordinate_workers.0"
+    ]
+    assert patched.state == ModelInstanceStateEnum.RUNNING
+
+
+def test_a_subordinate_already_reported_running_writes_nothing():
+    """The re-report is level-triggered, so it must be silent in the steady
+    state: a write per sync pass would publish an event per pass to everything
+    watching instances."""
+    manager, clientset = _build_serve_manager(worker_id=2)
+    model_instance = _distributed_subordinate_view(ModelInstanceStateEnum.RUNNING)
+
+    update_model_instance = _sync_as_subordinate(manager, clientset, model_instance)
+
+    update_model_instance.assert_not_called()
+
+
+def test_a_worker_finds_its_own_position_in_the_subordinate_list():
+    """The patch key a subordinate writes under is its index, and the same
+    lookup was inlined at four call sites. Getting it wrong writes another
+    node's state."""
+    manager, _ = _build_serve_manager(worker_id=2)
+    mi = _distributed_subordinate_view(ModelInstanceStateEnum.PENDING)
+    mi.distributed_servers.subordinate_workers.insert(
+        0,
+        ModelInstanceSubordinateWorker(
+            worker_id=9, worker_name="worker-9", worker_ip="10.0.0.9"
+        ),
+    )
+
+    assert manager._own_subordinate_position(mi) == 1
+
+
+def test_a_worker_that_is_not_a_subordinate_is_not_silently_zero():
+    """Every caller reaches this having established it is one, so absence
+    means the row and the worker disagree; returning a position anyway would
+    have it write over the first subordinate's state."""
+    manager, _ = _build_serve_manager(worker_id=99)
+    mi = _distributed_subordinate_view(ModelInstanceStateEnum.PENDING)
+
+    with pytest.raises(StopIteration):
+        manager._own_subordinate_position(mi)

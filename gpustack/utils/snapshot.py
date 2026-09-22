@@ -7,6 +7,7 @@ from gpustack.schemas.benchmark import (
     ModelInstanceSnapshot,
     WorkerSnapshot,
 )
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.models import Model, ModelInstance
 from gpustack.schemas.workers import Worker
 from gpustack.utils.gpu import make_gpu_id
@@ -22,28 +23,27 @@ def create_model_instance_snapshot(
     which holds the session): the config carries only the id, and the
     snapshot keeps the name after the service is deleted."""
 
-    subordinate_workers_snapshots: Optional[List[ModelInstanceRuntimeInfo]] = None
-    if (
-        model_instance.distributed_servers
-        and model_instance.distributed_servers.subordinate_workers
-    ):
-        subordinate_workers_snapshots = []
-        for subworker in model_instance.distributed_servers.subordinate_workers:
-            subordinate_workers_snapshots.append(
-                ModelInstanceRuntimeInfo(
-                    worker_id=subworker.worker_id,
-                    worker_name=subworker.worker_name,
-                    worker_ip=subworker.worker_ip,
-                    ports=subworker.ports,
-                    gpu_type=subworker.gpu_type,
-                    gpu_indexes=subworker.gpu_indexes,
-                    gpu_ids=[
-                        make_gpu_id(subworker.worker_name, subworker.gpu_type, idx)
-                        for idx in (subworker.gpu_indexes or [])
-                    ],
-                    computed_resource_claim=subworker.computed_resource_claim,
-                )
+    subordinates = subordinate_placements(model_instance)
+    subordinate_workers_snapshots: Optional[List[ModelInstanceRuntimeInfo]] = (
+        [
+            ModelInstanceRuntimeInfo(
+                worker_id=p.worker_id,
+                worker_name=p.worker_name,
+                worker_ip=p.worker_ip,
+                ports=p.ports,
+                gpu_type=p.gpu_type,
+                gpu_indexes=p.gpu_indexes,
+                gpu_ids=[
+                    make_gpu_id(p.worker_name, p.gpu_type, idx)
+                    for idx in (p.gpu_indexes or [])
+                ],
+                computed_resource_claim=p.computed_resource_claim,
             )
+            for p in subordinates
+        ]
+        if subordinates
+        else None
+    )
 
     return ModelInstanceSnapshot(
         id=model_instance.id,

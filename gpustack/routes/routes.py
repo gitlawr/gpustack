@@ -8,6 +8,7 @@ from gpustack.routes import (
     cache_providers,
     cacerts,
     cache_service_instances,
+    workloads,
     cache_services,
     cluster_access,
     config,
@@ -197,6 +198,15 @@ model_routers = [
         "router": cache_service_instances.router,
         "prefix": "/cache-service-instances",
         "tags": ["Cache Service Instances"],
+        "dependencies": _org_owner_only,
+    },
+    {
+        # Not part of the user-facing API: the domain resources compile into
+        # workloads and workers read them back. Exposed because that read-back
+        # is what the worker clientset talks to.
+        "router": workloads.router,
+        "prefix": "/workloads",
+        "tags": ["Workloads"],
         "dependencies": _org_owner_only,
     },
     {

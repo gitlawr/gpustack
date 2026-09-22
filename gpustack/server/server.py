@@ -51,10 +51,12 @@ from gpustack.config.config import Config
 from gpustack.schemas.config import GatewayModeEnum
 from gpustack.config import registration
 from gpustack.server.controllers import (
+    BenchmarkController,
     CacheServiceController,
     ModelController,
     ModelFileController,
     ModelInstanceController,
+    ModelInstanceWorkloadStateController,
     WorkerController,
     ClusterController,
     WorkerPoolController,
@@ -469,6 +471,9 @@ class Server:
         model_instance_controller = ModelInstanceController(self._config)
         tasks.append(asyncio.create_task(model_instance_controller.start()))
 
+        workload_state_controller = ModelInstanceWorkloadStateController()
+        tasks.append(asyncio.create_task(workload_state_controller.start()))
+
         worker_controller = WorkerController(self._config)
         tasks.append(asyncio.create_task(worker_controller.start()))
 
@@ -520,6 +525,9 @@ class Server:
 
         cache_service_controller = CacheServiceController(self._config)
         tasks.append(asyncio.create_task(cache_service_controller.start()))
+
+        benchmark_controller = BenchmarkController(self._config)
+        tasks.append(asyncio.create_task(benchmark_controller.start()))
 
         logger.debug("Controllers started.")
         return tasks

@@ -18,6 +18,7 @@ from gpustack_runtime.deployer import (
 from gpustack_runtime.deployer.__utils__ import compare_versions
 
 from gpustack.scheduler.model_registry import is_multimodal_model
+from gpustack.utils.model_instance_workers import subordinate_placements
 from gpustack.schemas.models import (
     LoraListEntry,
     ModelInstance,
@@ -371,7 +372,10 @@ class SGLangServer(InferenceServer):
 
         # Add auto parallelism arguments if needed
         auto_parallelism_arguments = get_auto_parallelism_arguments(
-            self._model.backend_parameters, self._model_instance, is_distributed
+            self._model.backend_parameters,
+            self._model_instance,
+            is_distributed,
+            self._group_workloads(),
         )
         arguments.extend(auto_parallelism_arguments)
 
@@ -584,15 +588,12 @@ class SGLangServer(InferenceServer):
         arguments = []
 
         # Check if this is a multi-node deployment
-        if not (
-            self._model_instance.distributed_servers
-            and self._model_instance.distributed_servers.subordinate_workers
-        ):
-            return []
-
-        subordinate_workers = (
-            self._model_instance.distributed_servers.subordinate_workers
+        subordinate_workers = subordinate_placements(
+            self._model_instance,
+            self._group_workloads(),
         )
+        if not subordinate_workers:
+            return []
         total_nodes = len(subordinate_workers) + 1  # +1 for the current node
 
         # Find the current node's rank
@@ -726,6 +727,7 @@ def get_auto_parallelism_arguments(
     backend_parameters: List[str],
     model_instance: ModelInstance,
     is_distributed: bool,
+    workloads: list = None,
 ) -> List[str]:
     """
     Get auto parallelism arguments for SGLang based on GPU configuration.
@@ -751,7 +753,7 @@ def get_auto_parallelism_arguments(
 
     if is_distributed:
         # distributed across multiple workers
-        (tp, pp) = cal_distributed_parallelism_arguments(model_instance)
+        (tp, pp) = cal_distributed_parallelism_arguments(model_instance, workloads)
         return [
             "--tp-size",
             str(tp),

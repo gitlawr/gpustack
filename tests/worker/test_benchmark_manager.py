@@ -1,9 +1,16 @@
 from collections import deque
 from types import SimpleNamespace
 
+from datetime import datetime, timedelta, timezone
+
+import time
+
 import pytest
+from unittest.mock import MagicMock, patch
 
 import gpustack.worker.benchmark_manager as bm
+from gpustack.schemas.benchmark import BenchmarkStateEnum
+from gpustack.schemas.workloads import WorkloadStateEnum
 from gpustack.schemas import benchmark as bm_schemas
 from gpustack.worker.benchmark import analysis, artifacts
 from gpustack.worker.benchmark.runner import BenchmarkRunner
@@ -669,13 +676,13 @@ class TestQueueCancelGuard:
         mgr = object.__new__(BenchmarkManager)
         mgr._benchmark_queue = deque()
         mgr._canceled_ids = set()
-        mgr._provisioning_processes = {}
         mgr._benchmark_by_id = {}
         mgr._container_log_offset = {}
         mgr._last_log_snapshot_at = {}
         mgr._partial_synced_count = {}
         mgr._last_partial_sync_at = {}
         mgr._active_benchmark_id = None
+        mgr._provisioning = MagicMock()
         mgr._is_provisioning = lambda _b: False
         mgr._clear_active_benchmark = lambda _i: None
         return mgr
@@ -725,21 +732,18 @@ class TestQueueCancelGuard:
         # Same argument one step earlier: the provisioning kill is also on the path
         # to the cleanup, so it cannot be the thing that skips it.
         monkeypatch.setattr(bm, "delete_workload", lambda _name: None)
-        monkeypatch.setattr(
-            bm,
-            "terminate_process_tree",
-            lambda _pid: (_ for _ in ()).throw(RuntimeError()),
-        )
         mgr = self._manager()
         cleared = []
         mgr._clear_active_benchmark = lambda i: cleared.append(i)
-        mgr._is_provisioning = lambda _b: True
-        mgr._provisioning_processes[1] = SimpleNamespace(pid=4242)
+
+        def _explode(_key):
+            raise RuntimeError()
+
+        mgr._provisioning.terminate = _explode
 
         mgr._stop_benchmark(SimpleNamespace(id=1, name="a"))
 
         assert cleared == [1]
-        assert 1 not in mgr._provisioning_processes
 
     def test_queue_worker_skips_a_canceled_benchmark(self, monkeypatch):
         # The real cancel path: a benchmark stopped/deleted while QUEUED stays in
@@ -2135,3 +2139,133 @@ class TestTheProbesCapIsNotTheUsersRange:
         }
         codes = [w["code"] for w in self._validity(ramp)["warnings"]]
         assert codes == ["not_saturated"]
+
+
+class TestDeadlineFromWorkload:
+    """The timeout, taken from the workload row instead of worker memory."""
+
+    def _manager(self, limit=None):
+        mgr = object.__new__(bm.BenchmarkManager)
+        mgr._config = SimpleNamespace(benchmark_max_duration_seconds=limit)
+        mgr._clientset_getter = lambda: self._clientset
+        mgr._worker_id_getter = lambda: 1
+        mgr._active_benchmark_id = None
+        mgr._active_benchmark_started_at = None
+        self._clientset = MagicMock()
+        self._clientset.workloads.list.return_value = SimpleNamespace(items=[])
+        return mgr
+
+    def _workload(self, deadline, started_ago_seconds):
+        started_at = (
+            None
+            if started_ago_seconds is None
+            else datetime.now(timezone.utc) - timedelta(seconds=started_ago_seconds)
+        )
+        return SimpleNamespace(
+            id=9,
+            owner_id=5,
+            active_deadline_seconds=deadline,
+            started_at=started_at,
+        )
+
+    def test_a_run_past_its_deadline_times_out(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=61)]
+        )
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is True
+
+    def test_a_run_inside_its_deadline_does_not(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=59)]
+        )
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is False
+
+    def test_the_deadline_survives_a_worker_restart(self):
+        """The hole this closes: after a restart the in-memory clock is None,
+        so a run that was already going answers False forever and holds its
+        GPU until someone notices."""
+        mgr = self._manager(limit=60)
+        mgr._active_benchmark_id = None  # as a freshly started worker has it
+        mgr._active_benchmark_started_at = None
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=600)]
+        )
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is True
+
+    def test_a_workload_that_has_not_started_has_nothing_to_measure_from(self):
+        """Queued behind another run: the row exists, the container does not."""
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=None)]
+        )
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is False
+
+    def test_without_a_row_the_worker_local_clock_still_applies(self):
+        """No regression while the rows are still being rolled out."""
+        mgr = self._manager(limit=60)
+        mgr._active_benchmark_id = 5
+        mgr._active_benchmark_started_at = time.time() - 61
+
+        assert mgr._is_benchmark_timed_out(SimpleNamespace(id=5)) is True
+
+    def test_marking_the_start_records_when_the_container_began(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=60, started_ago_seconds=None)]
+        )
+
+        with patch("gpustack.worker.benchmark_manager.patch_status") as update:
+            mgr._mark_workload_started(SimpleNamespace(id=5))
+
+        assert update.call_args[0][1] == 9
+        assert update.call_args[1]["started_at"] is not None
+        # State is the mirror's business; this records only when it began.
+        assert "state" not in update.call_args[1]
+
+    def test_state_is_mirrored_onto_the_workload(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=None, started_ago_seconds=1)]
+        )
+
+        with patch("gpustack.worker.benchmark_manager.patch_status") as update:
+            mgr._mirror_execution_state(
+                5, {"state": BenchmarkStateEnum.COMPLETED, "state_message": "done"}
+            )
+
+        assert update.call_args[0][1] == 9
+        assert update.call_args[1]["state"] == WorkloadStateEnum.SUCCEEDED
+        assert update.call_args[1]["state_message"] == "done"
+
+    def test_a_state_sent_as_a_plain_string_still_maps(self):
+        """The state write-back goes out as JSON, so what comes back through
+        this funnel is whatever the caller passed -- often the bare value."""
+        mgr = self._manager()
+        self._clientset.workloads.list.return_value = SimpleNamespace(
+            items=[self._workload(deadline=None, started_ago_seconds=1)]
+        )
+
+        with patch("gpustack.worker.benchmark_manager.patch_status") as update:
+            mgr._mirror_execution_state(5, {"state": "running"})
+
+        assert update.call_args[1]["state"] == WorkloadStateEnum.RUNNING
+
+    def test_a_failed_mirror_never_fails_the_state_write_back(self):
+        mgr = self._manager()
+        self._clientset.workloads.list.side_effect = RuntimeError("api down")
+
+        mgr._mirror_execution_state(5, {"state": BenchmarkStateEnum.RUNNING})
+
+    def test_a_patch_with_nothing_a_workload_carries_writes_nothing(self):
+        mgr = self._manager()
+
+        with patch("gpustack.worker.benchmark_manager.patch_status") as update:
+            mgr._mirror_execution_state(5, {"results": [1, 2, 3]})
+
+        update.assert_not_called()

@@ -17,6 +17,10 @@ from gpustack_runtime.deployer import (
 )
 from gpustack_runtime.deployer.__utils__ import compare_versions
 from gpustack_runtime.detector import ManufacturerEnum, manufacturer_to_backend
+from gpustack.utils.model_instance_workers import (
+    instance_placements,
+    subordinate_placements,
+)
 from gpustack.schemas.models import (
     ModelInstance,
     SpeculativeAlgorithmEnum,
@@ -472,6 +476,7 @@ class VLLMServer(InferenceServer):
                 self._model_instance,
                 deployment_metadata,
                 parse_user_parallelism(self._model.backend_parameters),
+                self._group_workloads(),
             ).shape
         except ValueError:
             return None
@@ -596,15 +601,11 @@ class VLLMServer(InferenceServer):
         vram = 0
         computed_resource_claim = self._model_instance.computed_resource_claim
         if self._worker.id != self._model_instance.worker_id:
-            dservers = self._model_instance.distributed_servers
-            subworkers = (
-                dservers.subordinate_workers
-                if dservers and dservers.subordinate_workers
-                else []
-            )
-            for subworker in subworkers:
-                if subworker.worker_id == self._worker.id:
-                    computed_resource_claim = subworker.computed_resource_claim
+            for placement in subordinate_placements(
+                self._model_instance, self._group_workloads()
+            ):
+                if placement.worker_id == self._worker.id:
+                    computed_resource_claim = placement.computed_resource_claim
                     break
 
         if not computed_resource_claim:
@@ -647,6 +648,7 @@ class VLLMServer(InferenceServer):
                 ctx.is_distributed,
                 ctx.deployment_metadata,
                 self._model.backend_version,
+                self._group_workloads(),
             )
         )
         arguments.extend(self._get_speculative_arguments())
@@ -708,6 +710,7 @@ class VLLMServer(InferenceServer):
                 self._model_instance,
                 deployment_metadata,
                 parse_user_parallelism(self._model.backend_parameters),
+                self._group_workloads(),
             )
         return _VLLMArgsContext(
             port=port,
@@ -1081,6 +1084,7 @@ def cal_multinode_topology(
     model_instance: ModelInstance,
     deployment_metadata: ModelInstanceDeploymentMetadata,
     user: Optional[MultinodeUserParallelism] = None,
+    workloads: list = None,
 ) -> MultinodeTopology:
     """Translate user-supplied parallelism hints + physical topology into the
     vLLM parameter shape this node should emit.
@@ -1089,14 +1093,13 @@ def cal_multinode_topology(
     :func:`validate_multinode_topology`, then layers on the node-perspective
     fields (``my_idx`` / ``start_rank`` / ``is_follower``).
     """
-    g_main = len(model_instance.gpu_indexes) if model_instance.gpu_indexes else 1
-    subordinate = (
-        model_instance.distributed_servers.subordinate_workers
-        if model_instance.distributed_servers
-        and model_instance.distributed_servers.subordinate_workers
-        else []
-    )
-    gpu_per_node = [g_main] + [len(s.gpu_indexes or []) for s in subordinate]
+    # A leader with no GPUs recorded counts as one node's worth, a follower
+    # with none counts as none. Kept as it was: the ranks below are derived
+    # from these counts, and shifting one shifts every rank after it.
+    gpu_per_node = [
+        (len(p.gpu_indexes or []) or 1) if p.is_leader else len(p.gpu_indexes or [])
+        for p in instance_placements(model_instance, workloads)
+    ]
     nnodes = len(gpu_per_node)
 
     # This node's physical rank.
@@ -1139,6 +1142,7 @@ def get_auto_parallelism_arguments(
     is_distributed: bool,
     deployment_metadata: Optional[ModelInstanceDeploymentMetadata] = None,
     backend_version: Optional[str] = None,
+    workloads: list = None,
 ) -> List[str]:
     if (
         is_distributed
@@ -1150,7 +1154,9 @@ def get_auto_parallelism_arguments(
         # the same backend_parameters, so any non-None field acts as a hard
         # cluster-wide constraint.
         user = parse_user_parallelism(backend_parameters)
-        topology = cal_multinode_topology(model_instance, deployment_metadata, user)
+        topology = cal_multinode_topology(
+            model_instance, deployment_metadata, user, workloads
+        )
         derived: List[str] = []
         if user.tp is None:
             derived.extend(["--tensor-parallel-size", str(topology.tp)])
@@ -1182,7 +1188,7 @@ def get_auto_parallelism_arguments(
 
     if is_distributed:
         # distributed across multiple workers (Ray sidecar path)
-        (tp, pp) = cal_distributed_parallelism_arguments(model_instance)
+        (tp, pp) = cal_distributed_parallelism_arguments(model_instance, workloads)
         return [
             "--tensor-parallel-size",
             str(tp),

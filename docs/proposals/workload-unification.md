@@ -1,0 +1,412 @@
+# Workload 统一与资源账本收敛
+
+## 概述
+
+本文回答三个问题:
+
+1. **Docker 与 k8s 集群的定位和演进思路?** —— 这决定了两者各自应当承担多少调度职责(见下节「集群形态的定位」)
+2. **当前的扩展遇到了什么问题?** —— 为什么需要 Workload 统一(见「当前的问题」)
+3. **k8s 上模型服务与 GPU instance 的调度与账本如何统一?** —— 见「解决方案 / k8s 上模型服务与 GPU instance 的统一」
+
+### 集群形态的定位
+
+| | Docker 集群 | k8s 集群 |
+|---|---|---|
+| 面向 | 快速验证、小规模部署、一体机等特定场景 | 生产、大规模运营、功能完备的 AI 平台 |
+| 调度 | gpustack 自己调度 | 交给集群(Kueue 准入 + k8s 调度) |
+| 生态集成 | 无 | 可对接生态内组件 |
+
+**这条定位意味着两种集群不必在能力上对齐**:k8s 上可复用生态里成熟的东西,Docker 上则保持轻量、够用即可。
+
+### 当前的问题
+
+worker 上跑着三类由它启动的负载——模型实例、基准测试、共享缓存服务实例——微调任务在计划中。容器执行层已经统一(`gpustack_runtime` 的 `WorkloadPlan` 加 Docker/Podman/K8s deployer),但 **worker 侧的控制回路每类各写一遍**:事件监听、周期对账、卡死自愈、崩溃重启退避、状态写回及其重试、端口分配、日志通道、孤儿容器回收。
+
+代价在于**每类负载各自踩一遍同样的坑**。缓存服务上线时处理的那批问题(事件丢失、写回竞态、级联删除回收滞后、非优雅终止),模型实例那边有的修过、有的没有。加第四类就再来一轮。
+
+另一个问题在数据模型:领域语义、执行语义、分布式拓扑挤在同一行,于是调度器、worker、供给子进程、控制器都写它。而写回是"读整行 / 改一字段 / 写回整行",两个写者互相覆盖。
+
+### 解决方案概要
+
+引入通用 `Workload` 资源,只承载执行语义(spec / binding / status)。领域资源由各自的 controller **编译**成 Workload,再把执行状态**聚合**回领域状态。worker 只 watch 这一种资源,维护一套状态机。用户面 API 不变。
+
+在此之上,把资源账本收敛到一处,并在 k8s 集群上把调度交还给集群已有的机制(Kueue 准入 + operator 的设备账本)。
+
+## 需求
+
+1. **控制回路只实现一次** —— 监听、对账、退避、写回、端口、日志、回收对四类负载共用。
+2. **一行一个写者** —— 执行状态有唯一写入方,消除整行覆盖导致的状态丢失。
+3. **用户面 API 不变** —— 三类资源的对外接口与语义保持;用户不直接创建 Workload。
+4. **分布式实例可表达** —— 一个实例映射为一组行(leader + follower),取代按索引寻址的嵌套列表。
+5. **服务与任务共用一套抽象** —— 以 `restartPolicy` 区分:`always` 是服务,`never` 是任务(基准测试、未来的微调)。
+6. **资源账本覆盖所有负载** —— 现在只有模型实例进账;缓存服务实际占显存却对调度器不可见,调度器会把模型实例排到已被它占用的卡上。
+7. **k8s 集群不再运行第二个调度器** —— 接入集群已有的准入与设备账本。
+
+## 解决方案
+
+### Workload 资源
+
+```
+Model ──────────┐
+CacheService ───┼── controller 编译 ──> Workload ──> worker 控制回路 ──> 容器
+Benchmark ──────┤         ▲                  │
+(FineTuneJob) ──┘         └── 状态聚合 ───────┘
+```
+
+**Workload 只装执行语义:**
+
+| 部分 | 内容 | 谁写 |
+|---|---|---|
+| spec | 镜像、命令、端口、资源、重启策略、超时 | controller |
+| binding | worker、加速器、预留 | 调度器(Docker)/ 从集群观测(k8s) |
+| status | 状态、消息、PID、端口、进度、重启计数 | worker |
+
+**领域语义留在上层:** 副本数、逐节点扇出、run-to-completion 由各自 controller 编译;执行状态聚合回领域状态。
+
+**账本与调度按集群类型分工:**
+
+```
+              资源需求估算       用估算做什么              binding 从哪来
+Docker 集群    （相同）      →   自己调度、自己记账     →  调度器写入
+k8s 集群       （相同）      →   换算成配额单位交给 Kueue →  从 Pod / CRD 观测回写
+```
+
+**估算两边是同一件事**:这个模型在这个后端、这种量化、这个上下文长度下要占多少显存。差别在**拿估算去做什么**——Docker 上直接与本机余量相减完成放置;k8s 上要把它表达成 Kueue 记账用的单位,由 Kueue 决定准入。
+
+这一步换算不是恒等变换:
+
+- **单位不同。** 估算的产物是物理量(字节);Kueue 记的是**一张卡的份额**,整卡为 1000。同样 40GB 的需求,在 80GB 卡上是 500,在 40GB 卡上是 1000——**必须知道卡的容量才能换算**。
+- **维度会丢。** CPU 与内存不进这个尺子。加速节点上它们是超分的,不计入加速器队列。
+- **取整方向有讲究。** 配额侧向下取整以免超配物理容量,计费侧向上取整以免少收。同一把尺子,两个方向。
+
+尺子本身已经存在:operator 的 Pod webhook 就是这么给 GPU instance 折算 credit 的。**待定的是模型实例的换算由谁做**——复用同一个 webhook(其 Pod 需带上同样的标注),还是由我们在编译 Workload 时算好。
+
+这个分工直接来自开头的定位。估算归我们是因为它是领域知识,k8s 不懂;放置归 k8s 是因为在面向生产的集群上,我们不该在它旁边再算一遍——尤其算不准,因为看不见非 gpustack 的 Pod,包括 GPU instance 的。
+
+Docker 集群不接这一套:它面向快速验证与小规模部署,自带调度器足够,引入队列与准入只会增加部署负担。
+
+k8s 那一侧不是新架构:**GPU instance 现在就这么工作**——gpustack 写 `Instance` CRD,operator 变成 Pod,gpustack 从 status 读回节点与设备分配。常规模型服务反而是那个特例。
+
+### k8s 上模型服务与 GPU instance 的统一
+
+现状是三本账并存,而 k8s 上已有的机制模型服务大多没接:
+
+| | 设备账本(operator `Devices` CRD) | 准入与配额(Kueue) |
+|---|---|---|
+| GPU instance | ✅ | ✅ |
+| vGPU 模型实例 | ✅ | ❌ |
+| 常规模型实例、缓存服务 | ❌ | ❌ |
+
+Kueue 由 gpustack 分发、operator 安装,按 GPU 型号建 ClusterQueue,operator 的 Pod webhook 折入**以显存为标尺**的 credit 请求。计量层的表述是 **"kueue admits → resource is reserved"**——在 k8s 上,"占住一张卡"的定义就是 Kueue 准入。
+
+因此**统一账本不是新建一本,而是把缺席者接进已有的那套**。不应引入第二个排队器:同一批卡上出现两个互不知情的配额视图,正是要修的问题的翻版。
+
+具体做法:
+
+1. **接入设备账本与 Kueue。** 模型实例把资源估算换算成配额单位提交,由 Kueue 决定准入;容量以 operator 的 `Devices` 为准,不再用我们自己的 `Allocated`。
+2. **binding 从观测中来。** 编译成 Pod 后不填 `worker_id` / `gpu_indexes`,待 k8s 调度完成,从 Pod 的 `nodeName` 与设备分配回写。
+3. **GPU instance 成为第五种 `owner_kind`。** 它已经是 spec/status 加观测回写的形状,并入之后与模型服务共用一本账、一套回收、一套横向能力。
+4. **经 helm 等 k8s 机制部署的 Pod 同步入库。** 账本因此覆盖它们,而它们不必知道 gpustack 的存在。
+
+分步与依赖见「研发计划」第四阶段;`WorkloadPlan` 走不到 operator 这一点见「已知问题和限制」。
+
+---
+
+## 已考虑的替代方案
+
+### 不引入新资源,由三类资源引用统一的 workload 字段声明(鸭子模式)
+
+**方案。** 不建 `Workload` 表。让 ModelInstance / CacheServiceInstance / Benchmark 各自嵌入同一组 workload 字段,worker 按字段而非按类型来部署。没有第二份数据,也就没有状态同步。
+
+**它解决的问题是真实的,而且是本方案代价最大的一块。** 服务端同事务派生、状态聚合、双读比对、收敛判据——这些机制存在的唯一理由就是有两份数据要对齐。鸭子模式一次性消除这一整类。
+
+但它把两个问题当成了一个:
+
+| | 鸭子模式 |
+|---|---|
+| **状态同步**(两份数据要对齐) | 消除 |
+| **一行多个写者**(整行覆盖丢状态) | **不解决** |
+
+"实例永久卡在 STARTING"的根因不是两份数据,是同一行被调度器、控制器、worker、供给子进程四方写,而写回是读整行 / 改一字段 / 写回整行。workload 字段并进领域行之后,这四方仍然写同一行。(该问题的修法——字段级 PATCH——与资源有几种无关,两种方案都要做。)
+
+**决定性的障碍是多容器。** 三类里有两类是 1:N:
+
+| | 一个领域资源对应几个容器 |
+|---|---|
+| 模型实例 | 分布式 = leader + N follower |
+| 缓存服务 | `per_node` 拓扑 = 每台匹配的 worker 一个 |
+| 基准测试 | 1:1 |
+
+领域行只能嵌一套 workload 字段,1:N 只有三条出路:
+
+1. **行上放嵌套列表** —— 即现在的 `subordinate_workers[]`:按索引寻址的路径 patch、无唯一约束、JSON 列无法按 worker 过滤(资源核算因此要捞出所有分布式实例在 Python 里筛)。这正是要消除的东西。
+2. **每类各建一张子表** —— 三张列相同的表,worker 对三张表鸭子类型。
+3. **共用一张子表** —— 即 Workload,换个名字。
+
+这不是假设:缓存服务原本就有独立的 `cache_service_instances` 表(本方案将其并入 workloads),模型实例用嵌套列表。**现状已经是"两类各有子表 + 一类嵌套列表"。**
+
+两处次要代价:
+
+- **worker 要认识每一种资源。** 控制回路的逻辑可共享,但监听与写回的管道按类:三个客户端、三个端点、三条写回路径、三个孤儿回收的活跃集。加微调任务要改 worker;单一资源下只是服务端多一个编译器。
+- **k8s 的观测入库无处安放。** helm 部署的 Pod 没有对应的领域资源可挂;GPU instance 并入同理。单一资源下它们只是 `owner_kind` 不同的行。
+
+**这个方案会胜出的条件:** 如果确定分布式编排全部交给 k8s 原语(JobSet / LeaderWorkerSet),gpustack 不再自己表达"一个实例 N 个容器",则每类退化为 1:1,多容器这条不成立,鸭子模式明显更省。这取决于 Docker 集群是否仍要支持分布式推理。
+
+### 一个澄清
+
+评审看到的复杂度,有相当一部分来自**过渡脚手架而非终态**:服务端同事务派生行、双向映射、比对装置,都是为了让已发布的模型实例能够无损迁移。它们在「研发计划」3.5 之后整段删除。终态是 worker 只写行、服务端只写 spec,没有第二份数据要同步。
+
+---
+
+## 用户交互
+
+**绝大多数场景不变。** 模型部署、基准测试、缓存服务的创建、查看、删除接口与语义保持原样;`Workload` 不出现在用户面。
+
+变化的部分:
+
+| 场景 | 变更前 | 变更后 |
+|---|---|---|
+| 分布式从属节点状态 | 丢失一次上报即永久停在 pending,实例卡 STARTING | 周期重报,丢失可自愈 |
+| 模型实例状态 | worker 直接写 | 由执行状态聚合而来,**用户可见的状态序列不变** |
+
+**接入 Kueue 会带来一处语义变化:** 资源不足时,当前是创建时判断并拒绝;接入后是 **Workload 挂起等待准入**。排队比当场拒绝更接近用户预期,但**创建成功不再等于马上会跑**,界面需如实呈现"在队列中",不能沿用原措辞。
+
+---
+
+## 已知问题和限制
+
+1. **聚合在启动阶段沉默。** 领域资源的 `analyzing`/`scheduled`/`downloading`/`starting`/`pending` 五个状态都映射到执行层的 `pending`,反向不是函数,因此聚合对整个启动过程不发言,那段仍由领域资源自己写。执行层无法完整复现领域生命周期。
+
+   这条限制只约束**领域资源自身**的状态。从属 worker 的状态取值域窄得多(只有 `pending`/`initializing`/`running`/`unreachable`/`error`,从属不经历分析、调度与下载——那是整组准备一次的事),五个值映射到五个不同的执行状态,往返是恒等。因此读从属状态的消费方可以改读行,与读绑定的消费方走同一套比对;读领域资源自身状态的不行。该前提由测试守住:任何人把从属置入一个不在该取值域的状态,测试会失败——否则它会被读回成 `pending`,而调用方把 `pending` 当作"还没跑起来",在真出问题之前一直是"因为错误的理由而正确"。
+
+2. **`INITIALIZING` 依赖一条推断规则。** worker 停写领域资源后,该状态由"leader 行转为 starting 且实例尚在调度前状态"推出。判别器可靠(只有真正拉起过进程,行才会变 starting),但最坏情况——worker 启动中途死亡、行停在 starting——会提前报告,由下一次启动纠正。
+
+3. **binding 是原地更新,而非不可变。** 重新调度在同一领域资源上改绑定,已有的行随之改写。k8s 的 Pod 不是这样:绑定不可变,重新调度建新 Pod。若行也如此,"两个写者改同一行"这一类竞争在构造上消失。代价是行 id 会变、回收面变大、日志命名要调整。**建议单独立项。**
+
+4. **GPU instance 的运行时不是我们的 worker。** 它由集群内 operator 执行,没有 `WorkloadPlan` 可交给 deployer。要么 spec 增加"由谁执行"这一维,要么承认这类 Workload 的 deployer 就是"写 CRD 并观测"——后者与 k8s 集群本就要做的事是同一件。
+
+5. **同步调用方拿不到行。** 调度器一侧的资源核算与放置打分是同步函数,持有别处批量加载的领域资源;worker 侧则完全没有数据库会话。它们改读行需要先决定:调度器是把行沿调用链传下去(涉及 8+ 个函数签名)还是改为异步;worker 是每次启动拉一次整组的行(端点已支持按 owner 过滤)还是给 watch 缓存加按 owner 的视图。
+
+6. **两个既存缺陷不在本方案范围内**(已定位):DELEGATED 模式的从属节点会被对账循环写成 ERROR(可达性待产品确认);与 leader 同机的 follower 永远不被管理。
+
+---
+
+# 实现细节
+
+## 架构
+
+整体架构不变。
+
+### 资源模型的关键取舍
+
+- **`owner_kind` + `owner_id` 而非外键。** 目标表随 kind 变化,生命周期归 controller 管、不归数据库。代价是级联删除要用三层机制替代:删除时同步删、controller 孤儿对账、worker 侧回收——缺一不可。
+
+- **`group_key` / `group_index` / `role` 取代嵌套列表。** 一个分布式实例是**一组行**,leader 在 `group_index=0`,从属 i 在 `group_index=i+1`。这个差一关系是最易静默出错处——错位会写到别的节点的状态上——应集中到一处并有测试钉住。
+
+- **`reserved_claims` 表示"占了资源但不跑容器"。** DELEGATED 模式下从属容器归别的框架管,gpustack 只占资源。这些并入 leader 行的预留列表,而不产生"存在但不跑"的行,以保住 **"有行就有容器"** 这个不变式。
+
+- **枚举列存 VARCHAR,读出时转回枚举。** 数据库不需要原生枚举类型(加成员是代码改动而非迁移),但由此产生的不对称——ORM 读回是字符串、API 校验回来是枚举——会让 `.value` 之类的取值在一条路径上正常、另一条上抛异常。由类型装饰器在读出边界统一。
+
+### 状态机是三套,不要合并
+
+| | 归属 | 用途 |
+|---|---|---|
+| 领域状态(如 `ModelInstanceStateEnum`) | 领域资源 | 用户可见的完整生命周期 |
+| `WorkloadStateEnum` | Workload 行 | 执行子集:pending / starting / running / unreachable / succeeded / error |
+| `WorkloadPhase` | worker 内存 | 容器运行时状态的中性分类,不落库 |
+
+### 执行状态的派生方向
+
+过渡期(领域资源上仍有执行字段的副本):worker 写领域资源 → **服务端在同一事务内派生行** → 聚合回领域资源。
+
+同一事务是必需的:两个进程(worker 的周期线程、供给子进程)都写领域资源,若由 worker 另发一次调用做镜像,该调用可能落在另一个写者之后,使行报告一个领域资源已经离开的状态——聚合读到更新的行,会把刚死掉的容器写回 RUNNING。
+
+副本摘除之后方向反转:worker 直接写行,服务端派生代码删除。
+
+## API 改动
+
+**用户面:无变更。**
+
+### 端点
+
+内部(仅 system principal 可访问):
+
+| 端点 | 说明 |
+|---|---|
+| `GET /v2/workloads` | 支持按 `worker_id` / `owner_kind` / `owner_id` / `group_key` / `state` 过滤;worker 以 watch 消费,按集群隔离 |
+| `GET /v2/workloads/{id}` | 按 owner 归属做租户隔离 |
+| `PUT /v2/workloads/{id}` | 整行更新 |
+| **`PATCH /v2/workloads/{id}/status`** | **只报告 status**。请求模型不含任何 spec 字段,因此"controller 写 spec、worker 写 status"这条边界由端点强制,而不靠调用方自觉 |
+
+数据库:新增 `workloads` 表;删除 `cache_service_instances` 表——该资源未发布,其公开视图由 Workload 行投影而成,对外形态不变。
+
+### Workload schema
+
+```python
+class WorkloadOwnerKindEnum(str, Enum):
+    MODEL_INSTANCE = "model_instance"
+    BENCHMARK      = "benchmark"
+    CACHE_SERVICE  = "cache_service"      # 将来:finetune_job / gpu_instance
+
+class WorkloadRoleEnum(str, Enum):
+    LEADER   = "leader"
+    FOLLOWER = "follower"
+
+class WorkloadRestartPolicyEnum(str, Enum):
+    ALWAYS     = "always"                 # 服务
+    ON_FAILURE = "on_failure"
+    NEVER      = "never"                  # 任务
+
+class WorkloadStateEnum(str, Enum):
+    PENDING = "pending"                   # 还没有容器
+    STARTING = "starting"                 # 已拉起，未通过健康检查
+    RUNNING = "running"
+    UNREACHABLE = "unreachable"
+    SUCCEEDED = "succeeded"               # 仅 restart_policy=never 会到达
+    ERROR = "error"
+
+class ReservedClaim(BaseModel):
+    worker_id: int
+    gpu_indexes: list[int] | None
+    gpu_addresses: list[str] | None
+    computed_resource_claim: dict | None
+
+
+class Workload:
+    id: int
+    name: str                             # worker 上的容器名，跨重启稳定
+
+    # ── 归属 ──────────────────────────────────────────────
+    owner_kind: WorkloadOwnerKindEnum
+    owner_id: int                         # 非外键：目标表随 kind 变化
+    owner_principal_id: int | None        # 创建时从 owner 复制，用于租户隔离
+    cluster_id: int | None
+
+    # ── 分组：一个分布式实例 = 一组行 ──────────────────────
+    group_key: str | None                 # 单机为 None
+    group_index: int = 0                  # 0 = leader，从属 i 在 i+1
+    role: WorkloadRoleEnum
+
+    # ── spec：controller 写 ───────────────────────────────
+    restart_policy: WorkloadRestartPolicyEnum
+    active_deadline_seconds: int | None    # 任务的墙钟上限
+    spec_digest: str | None                # owner 塑形参数的摘要，用于发现漂移
+    labels: dict[str, str] | None
+
+    # ── binding：Docker 由调度器写 / k8s 从集群观测 ────────
+    worker_id: int | None
+    worker_name: str | None
+    worker_ip: str | None                  # 反范式化：worker 拼命令行时无会话可联表
+    worker_ifname: str | None
+    gpu_type: str | None
+    gpu_indexes: list[int] | None
+    gpu_addresses: list[str] | None
+    computed_resource_claim: dict | None   # 本行自己占用
+    reserved_claims: list[ReservedClaim] | None   # 替别的框架在别处占住的
+
+    # ── status：worker 写（经 PATCH /status）──────────────
+    state: WorkloadStateEnum
+    state_message: str | None
+    ports: dict[str, int] | None           # {"service": 40001}
+    pid: int | None
+    restart_count: int = 0                 # 单调，给日志文件编号，不可重置
+    last_restart_time: datetime | None
+    started_at: datetime | None            # 容器开始运行的时刻，任务超时从此计
+    healthy: bool | None
+    last_check_at: datetime | None
+    progress: float | None                 # 供给进度 0-100
+
+    arguments: list[str] | None            # 见下
+
+    __table_args__ = (
+        # 含组内位置：leader 与 follower 可能落在同一台 worker 上
+        UniqueConstraint("owner_kind", "owner_id", "worker_id", "group_index"),
+        Index("ix_workloads_worker_id", "worker_id"),
+        Index("ix_workloads_owner", "owner_kind", "owner_id"),
+        Index("ix_workloads_owner_state", "owner_kind", "owner_id", "state"),
+        Index("ix_workloads_cluster_id", "cluster_id"),
+        Index("ix_workloads_group_key", "group_key"),
+    )
+```
+
+不变式:**有行就有容器**。DELEGATED 的从属节点因此不产生行,而并入 leader 的 `reserved_claims`。
+
+`arguments` 从嵌套列表原样带过来,当前无人写入,也不在 status 端点的模型里。要么给它真实的写入方(记录本次启动的 argv),要么随嵌套列表一并删除。
+
+
+## 其他
+
+### 迁移方法:先比对,后切换
+
+每一次"把某个值换个来源读",都同时跑两种读法并比较,旧的仍然权威,**沉默才是可以切换的证据**。
+
+这一步不可省。要防的是**同一类问题:两个写者、不同时刻**——它们不是逻辑分支的错误,单元测试碰不到。三个例子:
+
+- 实例失败后被重新调度,行还留着上一轮的 ERROR。聚合一旦生效就把 ERROR 写回去,**撤销重启**。
+- worker 失联由服务端标记,worker 自己不可能上报,行还停在 RUNNING。聚合会**撤销失联标记**。
+- worker 先写领域资源、再写行,两次写之间读到的组合自相矛盾,聚合据此把**刚死掉的容器写回 RUNNING**。
+
+还有一类更隐蔽:比对本身失效。例如对 ORM 读回的字符串取 `.value` 抛异常,聚合对每个实例崩溃,分歧日志恒空——闸门会读成"通过"。
+
+### 由此得到的一条规则
+
+**比较必须能自证它跑过。** 只在不一致时打日志的比对,空日志同时意味着"一致"和"根本没跑"(控制器停摆、缓存未失效、分支未走到)。所有比对统一为:一致也计数,按倍增节奏输出,并区分"新读法无答案"与"两者不一致"。
+
+**账本收敛的每一步都适用同一方法。**
+
+--|---|
+| GPU instance | ✅ | ✅ |
+| vGPU 模型实例 | ✅ | ❌ |
+| 常规模型实例、缓存服务 | ❌ | ❌ |
+
+Kueue 由 gpustack 分发、operator 安装,按 GPU 型号建 ClusterQueue,operator 的 Pod webhook 折入**以显存为标尺**的 credit 请求。计量层的表述是 **"kueue admits → resource is reserved"**——在 k8s 上,"占住一张卡"的定义就是 Kueue 准入。
+
+因此"统一账本"不是新建一本,而是把缺席者接进已有的那套。**不应引入第二个排队器**:同一批卡上出现两个互不知情的配额视图,正是要修的问题的翻版。
+
+---
+
+## 研发计划
+
+### 一、共享控制回路
+
+把监听、对账、退避、写回、端口分配、日志、回收抽成一套,三类负载改用。**不改数据模型**,可独立发布。
+
+### 二、Workload 资源
+
+建表与端点,按影响面从小到大接入:
+
+1. **缓存服务实例** —— 未发布,可直接以 Workload 行替代原表,公开视图由行投影
+2. **基准测试** —— 编译成行,领域行仍权威(`restart_policy=never` 与超时在此首次有消费者)
+3. **模型实例** —— 已发布,需双写、比对、可回退
+
+### 三、模型实例迁移
+
+| 步骤 | 内容 | 可回退 |
+|---|---|---|
+| 3.1 | 编译成行(写入,无人消费) | 是 |
+| 3.2 | 执行状态派生到行,并聚合回领域资源;先比对不采信,再按开关切换 | 是(开关) |
+| 3.3 | 消费方从嵌套列表迁移到行 | 是(比对) |
+| 3.4 | worker 停写领域资源、改写行;删除服务端派生 | 是(开关) |
+| 3.5 | 摘除领域资源上的重复字段与开关 | **否**,数据迁移 |
+
+3.3 必须先于 3.4:**先停读,再停写**。3.4 是原子切换(worker 开始写行的同时必须删除服务端派生,否则派生会覆盖 worker 刚写的行),此时依赖嵌套列表的读者越少越好。
+
+### 四、账本与调度收敛
+
+| 步骤 | 内容 | 依赖 | 可回退 |
+|---|---|---|---|
+| 4.1 | 缓存服务 / 基准测试声明资源需求 | — | 是 |
+| 4.2 | 账本按 Workload 聚合,去掉 kind 过滤 | 4.1 | 是(比对) |
+| 4.3 | k8s:把估算换算成配额单位、接入 Kueue、从 Pod / CRD 观测回写 binding | 4.2 | 是(按集群类型) |
+| 4.4 | 经 helm 等 k8s 机制部署的 Pod 同步入库 | 4.3 | 是 |
+| 4.5 | GPU instance 并入 Workload(第五种 owner) | 4.3 | 数据迁移 |
+
+4.1 必须先于 4.2:未声明资源的负载若被计入,"未声明"会被当成"不占用",账反而更不准。
+
+4.5 排在 4.3 之后:那时"从 CRD 观测回写 binding"已是走通的路径,并入只是再挂一个 `owner_kind`,不必同时发明机制又迁移数据。
+
+### 风险
+
+**账本口径重复计数。** 一个负载若既被"预留"(我们写 binding)又被"观测"(从 Pod 读回),会算两遍。**每种集群类型必须只有一个 binding 来源**,这是方案表要精确到"binding 从哪来"这一列的原因。
+
+**3.5 不可回退。** 该步删除领域资源上的重复字段与开关,此后无法通过配置退回。前序每一步都保留回退能力,应在 3.5 之前完成全部验证。

@@ -1,4 +1,5 @@
 from datetime import timezone, datetime
+import enum
 import json
 from typing import ClassVar, Generic, List, Optional, Tuple, Type, TypeVar
 
@@ -124,6 +125,51 @@ class UTCDateTime(sa.TypeDecorator):
             # Assume stored datetime is in UTC and attach tzinfo
             value = value.replace(tzinfo=timezone.utc)
         return value
+
+
+class EnumString(sa.TypeDecorator):
+    """
+    A VARCHAR column whose value is an enum member on both sides of the ORM.
+
+    Declaring an enum-typed field as a plain string keeps the database free of
+    native enum types, which is what makes adding a member a code change rather
+    than a migration. The cost is an asymmetry: a row loaded through the ORM
+    holds a ``str`` where the same row validated from the API holds the enum,
+    so anything reaching for ``.value`` works on one and raises on the other,
+    and serializing the model warns that the field is not the declared type.
+    Converting on the way out removes the asymmetry rather than making every
+    reader defend against it.
+
+    Only for enums that mix in ``str``: the members compare equal to their own
+    values, so a reader already comparing against a bare string is unaffected.
+    """
+
+    impl = sa.String
+
+    cache_ok = True
+
+    def __init__(self, enum_type: Type[enum.Enum], length: int = 64, **kwargs):
+        if not issubclass(enum_type, str):
+            raise TypeError(
+                f"{enum_type.__name__} does not mix in str, so loading it as an "
+                "enum would break comparisons against bare strings"
+            )
+        self.enum_type = enum_type
+        super().__init__(length=length, **kwargs)
+
+    def process_bind_param(self, value, dialect):
+        return value.value if isinstance(value, enum.Enum) else value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        try:
+            return self.enum_type(value)
+        except ValueError:
+            # A value this build has no member for -- a row written by a newer
+            # version, then rolled back to this one. Returning it raw keeps the
+            # row readable, which is what happened before this type existed.
+            return value
 
 
 def pydantic_column_type(

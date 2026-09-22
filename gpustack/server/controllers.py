@@ -4,7 +4,18 @@ import string
 import asyncio
 from importlib.resources import files
 from functools import partial
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Tuple, Optional, Set
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Tuple,
+    Optional,
+    Set,
+)
 from pydantic import BaseModel
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -83,6 +94,24 @@ from gpustack.server.cache_provider_catalog import (
     builtin_catalog_text,
     get_cache_provider,
 )
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
+from gpustack.schemas.benchmark import Benchmark
+from gpustack.server.benchmark_workloads import compile_benchmark
+from gpustack.server.model_instance_workloads import (
+    AWAITING_EXECUTION_STATES,
+    FoldDeclineReason,
+    aggregate_instance_runtime,
+    aggregate_instance_state,
+    fold_decline_reason,
+    rows_are_behind,
+    spec_differs,
+    sync_model_instance_workloads,
+    workload_spec,
+)
 from gpustack.server.cache_services import resolve_instance_cache_config_safe
 from gpustack.schemas.workers import (
     Worker,
@@ -150,7 +179,12 @@ from gpustack.server.services import (
     revoke_model_access_cache,
 )
 from gpustack.server.lora_model_routes import cleanup_orphan_lora_routes
-from gpustack.utils.model_instance_workers import get_model_instance_worker_match
+from gpustack.utils.model_instance_workers import (
+    get_model_instance_worker_match,
+    subordinate_placements,
+    get_worker_matches_from_workloads,
+    report_match_disagreement,
+)
 from gpustack.cloud_providers.common import (
     get_client_from_provider,
     construct_cloud_instance,
@@ -292,6 +326,7 @@ class ModelInstanceController:
         """
 
         model_instance: ModelInstance = event.data
+        await self._sync_workloads(event)
         # A cross-instance DELETE may carry only the id (see Event), so take
         # what the payload can give: the id always resolves, model_id only
         # when the event is hydrated.
@@ -375,6 +410,580 @@ class ModelInstanceController:
                 "Failed to reconcile model instance "
                 f"{event_field(model_instance, 'name', instance_id)}: {e}"
             )
+
+    async def _sync_workloads(self, event: Event):
+        """
+        Keep the instance's workload rows in step with its binding.
+
+        Written but not yet read: the worker still drives itself from the
+        model instance row. Compiling now means the mapping runs against real
+        instances -- including the distributed ones -- before anything depends
+        on it, and a wrong row is a wrong row rather than a stopped container.
+
+        See docs/proposals/workload-resource.md, stage 3.
+        """
+        instance_id = resolve_event_id(event)
+        if instance_id is None:
+            return
+        try:
+            async with async_session() as session:
+                if event.type == EventType.DELETED:
+                    for workload in await Workload.all_by_fields(
+                        session,
+                        {
+                            "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                            "owner_id": instance_id,
+                        },
+                    ):
+                        await workload.delete(session)
+                    return
+
+                instance = await ModelInstance.one_by_id(session, instance_id)
+                if instance is None:
+                    return
+                await sync_model_instance_workloads(session, instance)
+        except Exception as e:
+            logger.error(
+                f"Failed to sync workloads of model instance {instance_id}: {e}"
+            )
+
+
+class _Fold(NamedTuple):
+    instance: Optional[ModelInstance]
+    folded: Optional[dict]
+    reason: Optional[FoldDeclineReason]
+    distributed: bool
+    workloads: tuple = ()
+
+
+_FOLD_FLAPPING_AT = 5
+"""Corrections to one instance before it is called what it is. A start writes
+a handful legitimately; returning to the same row past that means nobody is
+converging."""
+
+_FOLD_CONFIRM_SECONDS = 3 * envs.MODEL_INSTANCE_HEALTH_CHECK_INTERVAL
+"""
+How long a difference has to persist before it counts.
+
+Derived from the worker's sync interval rather than picked: the fold is being
+compared against what the worker writes, and for a distributed outage that is
+not written on the event at all but on the main worker's next pass. A wait
+equal to the interval races that pass and reports a difference the pass was
+about to remove -- one where the fold had already proposed exactly the value
+the worker went on to write, only sooner. A few intervals outlast it while
+still reporting a real disagreement promptly.
+"""
+
+
+def _differing(instance, folded: dict) -> dict:
+    """The fields where the instance and the fold do not say the same thing,
+    as (what the instance says, what the fold would write)."""
+    return {
+        name: (getattr(instance, name, None), value)
+        for name, value in folded.items()
+        if getattr(instance, name, None) != value
+    }
+
+
+def _tally(counts: Dict[Any, int]) -> str:
+    """A counter as ``{name=n, name=n}``, ordered by name so two runs can be
+    diffed by eye."""
+    if not counts:
+        return "{}"
+    return (
+        "{"
+        + ", ".join(
+            f"{getattr(key, 'value', key)}={count}"
+            for key, count in sorted(
+                counts.items(), key=lambda kv: str(getattr(kv[0], "value", kv[0]))
+            )
+        )
+        + "}"
+    )
+
+
+_BEFORE_SPAWNING = frozenset(
+    {
+        ModelInstanceStateEnum.PENDING,
+        ModelInstanceStateEnum.ANALYZING,
+        ModelInstanceStateEnum.SCHEDULED,
+    }
+)
+"""Instance states from which INITIALIZING is the next step, which is only the
+scheduler's three.
+
+Everything the server writes afterwards is excluded, DOWNLOADING as much as
+STARTING: the sequence is INITIALIZING -> DOWNLOADING -> STARTING, so reporting
+INITIALIZING from either walks the lifecycle backwards. Worse, it does not
+settle -- the controller writes DOWNLOADING from the file events, the fold puts
+it back, and the two take turns."""
+
+
+def _freshness(instance, workloads) -> str:
+    """When the instance and each of its rows were last written.
+
+    A correction is either the fold reading a row the instance has moved past
+    or the two genuinely disagreeing, and the two are told apart only by which
+    was written last. Two diagnoses of the same correction were wrong for want
+    of this, so it goes on the line rather than being reasoned about.
+    """
+    rows = ", ".join(
+        f"g{w.group_index or 0}={w.state}@{getattr(w, 'updated_at', None)}"
+        for w in sorted(workloads or [], key=lambda w: w.group_index or 0)
+    )
+    return f"(instance@{getattr(instance, 'updated_at', None)} rows: {rows})"
+
+
+def _with_runtime(folded: dict, workloads, instance=None) -> dict:
+    """The fold's verdict plus what the leader's container is.
+
+    Carried on the same write rather than separately: they come from one row,
+    and splitting them would publish two events per change to everything
+    watching instances.
+    """
+    return {**aggregate_instance_runtime(workloads, instance), **folded}
+
+
+def _spawned_but_not_reported(instance, workloads) -> Optional[dict]:
+    """
+    INITIALIZING, when the leader's container exists and the instance has not
+    been told.
+
+    The worker writes INITIALIZING today, and stops at stage 3 step 4. Nothing
+    else produces it: the fold is silent through the whole of coming up
+    because two instance states mirror onto one workload state, so without
+    this the state disappears from what a user sees the moment the worker
+    stops writing.
+
+    A starting workload is the discriminator, and it is not ambiguous the way
+    the state alone is. After a failure the rows keep the ERROR that caused
+    the restart while the instance is rescheduled; only the run that actually
+    spawned turns a row starting. The worst case is a row left starting by a
+    worker that died mid-launch, which reports INITIALIZING a little early and
+    is corrected by the next launch.
+    """
+    if instance.state not in _BEFORE_SPAWNING:
+        return None
+    leader = next((w for w in workloads if (w.group_index or 0) == 0), None)
+    if leader is None or leader.state != WorkloadStateEnum.STARTING:
+        return None
+    return {"state": ModelInstanceStateEnum.INITIALIZING}
+
+
+class ModelInstanceWorkloadStateController:
+    """
+    Folds a model instance's workload states back onto the instance.
+
+    Stage 3 step 2b of docs/proposals/workload-resource.md. The worker mirrors
+    execution state onto the workload rows; this is the other direction, and
+    the thing that lets the worker stop writing the instance at all -- which
+    is what retires the write races, since two writers stop sharing a row.
+
+    Off by default. The fold runs regardless and logs where it disagrees with
+    what the worker wrote, so that it can be shown correct against real
+    instances -- including distributed ones -- before it becomes the only
+    source of an instance's state. If it were wrong and authoritative,
+    instances would simply never leave STARTING.
+    """
+
+    def __init__(self):
+        # Agreements are counted per state rather than in total: the gate is
+        # not "the fold was right N times" but "the fold was right about each
+        # state an instance passes through", and a run that only ever agreed
+        # about RUNNING has not exercised the rest.
+        self._agreed: Dict[Any, int] = {}
+        self._disagreed = 0
+        self._declined: Dict[Optional[FoldDeclineReason], int] = {}
+        # Agreements about a group that has followers. A single-worker
+        # instance never reaches _distributed_override, so a run made only of
+        # those says nothing about the part of the fold most likely to be
+        # wrong -- and both shapes agree about "running", so one counter
+        # cannot tell them apart.
+        self._agreed_distributed: Dict[Any, int] = {}
+        # A difference the instance later resolved the fold's way: right, and
+        # ahead of the mechanism it is compared against.
+        self._converged = 0
+        # One it resolved the other way: the proposal never came true, so the
+        # fold would have written something the instance never reached.
+        self._overtaken = 0
+        # Only once authoritative: what the fold wrote over what the worker
+        # had put there.
+        self._corrected = 0
+        self._corrections: Dict[int, int] = {}
+        self._confirming: Set[int] = set()
+        self._confirm_tasks: Set[asyncio.Task] = set()
+        self._next_tally_at = 1
+
+    async def start(self):
+        async for event in Workload.subscribe(
+            source="model_instance_workload_state", replay_existing=False
+        ):
+            if event.type not in (EventType.CREATED, EventType.UPDATED):
+                continue
+            workload: Workload = event.data
+            if workload is None or workload.owner_id is None:
+                continue
+            if workload.owner_kind != WorkloadOwnerKindEnum.MODEL_INSTANCE:
+                continue
+            await self._reconcile(workload.owner_id)
+
+    async def _evaluate(self, session, instance_id: int):
+        """Read the group and fold it. ``folded`` is None when the fold has
+        nothing to say and ``reason`` says which condition turned it away;
+        ``distributed`` is whether the group has followers, which is the part
+        of the fold a single-worker instance never exercises."""
+        instance = await ModelInstance.one_by_id(session, instance_id)
+        if instance is None:
+            return _Fold(None, None, None, False)
+
+        workloads = await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                "owner_id": instance_id,
+            },
+        )
+        distributed = any(w.group_index != 0 for w in workloads)
+
+        if instance.state in AWAITING_EXECUTION_STATES:
+            spawned = _spawned_but_not_reported(instance, workloads)
+            if spawned is not None:
+                return _Fold(
+                    instance,
+                    _with_runtime(spawned, workloads, instance),
+                    None,
+                    distributed,
+                    tuple(workloads),
+                )
+            # Nothing is waiting on a container here -- the instance was
+            # freshly scheduled, or is preparing model files. Whatever its
+            # workloads say describes a run that is over: after a restart the
+            # rows still carry the failure that caused it, and folding that
+            # back would put the instance into ERROR again and undo the
+            # restart. Its own STARTING is deliberately not in that set; that
+            # is where it waits for the fold to report the container running.
+            return _Fold(
+                instance,
+                None,
+                FoldDeclineReason.INSTANCE_NOT_EXECUTING,
+                distributed,
+                tuple(workloads),
+            )
+
+        if rows_are_behind(instance, workloads):
+            return _Fold(
+                instance,
+                None,
+                FoldDeclineReason.ROWS_BEHIND,
+                distributed,
+                tuple(workloads),
+            )
+
+        folded = aggregate_instance_state(
+            workloads, await self._follower_worker_ips(session, workloads)
+        )
+        if folded is None:
+            return _Fold(
+                instance,
+                None,
+                fold_decline_reason(workloads),
+                distributed,
+                tuple(workloads),
+            )
+        return _Fold(
+            instance,
+            _with_runtime(folded, workloads, instance),
+            None,
+            distributed,
+            tuple(workloads),
+        )
+
+    async def _reconcile(self, instance_id: int):
+        try:
+            async with async_session() as session:
+                result = await self._evaluate(session, instance_id)
+                instance, folded = result.instance, result.folded
+                if instance is None:
+                    return
+
+                if folded is None:
+                    reason = result.reason
+                    self._declined[reason] = self._declined.get(reason, 0) + 1
+                    if reason is FoldDeclineReason.NO_LEADER:
+                        # Not a point in a normal start: every group is
+                        # compiled with a leader at group_index 0, so its
+                        # absence means the rows are wrong, and every other
+                        # fold for this instance will decline for as long as
+                        # they stay that way.
+                        logger.warning(
+                            f"Workload fold found no leader for model instance "
+                            f"{instance.name} (id={instance.id})"
+                        )
+                    self._report_tally()
+                    return
+
+                if not envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS:
+                    self._compare(instance, folded, result.distributed)
+                    return
+
+                changing = _differing(instance, folded)
+                if not changing:
+                    self._count_agreement(folded, result.distributed)
+                    self._report_tally()
+                    return
+                # The worker still writes the instance too, so this is the
+                # fold overruling it -- the same comparison the flag turns off
+                # reporting for, and the window where it matters most. Once
+                # the worker writes only workloads there is no second writer
+                # to overrule and this goes quiet on its own.
+                self._corrected += 1
+                self._corrections[instance.id] = (
+                    self._corrections.get(instance.id, 0) + 1
+                )
+                logger.info(
+                    f"Workload fold corrected model instance {instance.name} "
+                    f"(id={instance.id}): {changing} "
+                    f"[agreed={_tally(self._agreed)} corrected={self._corrected}] "
+                    f"{_freshness(instance, result.workloads)}"
+                )
+                if self._corrections[instance.id] == _FOLD_FLAPPING_AT:
+                    # Correcting one instance over and over is not the fold
+                    # winning an argument, it is two writers taking turns: the
+                    # fold writes, the other writer writes back, and the count
+                    # climbs without either state sticking. It reads as a large
+                    # number rather than as a fault unless it is named.
+                    logger.warning(
+                        f"Workload fold has corrected model instance "
+                        f"{instance.name} (id={instance.id}) "
+                        f"{_FOLD_FLAPPING_AT} times; something is writing it "
+                        f"back and the two are taking turns"
+                    )
+                await instance.update(session, folded)
+        except Exception as e:
+            logger.error(
+                f"Failed to fold workload state onto model instance "
+                f"{instance_id}: {e}"
+            )
+
+    @staticmethod
+    async def _follower_worker_ips(session, workloads) -> Dict[int, str]:
+        """
+        The IPs of the workers a group's followers run on.
+
+        Only a follower's failure puts a worker in the instance's state
+        message, so a group without followers -- every single-worker instance,
+        which is most of them -- skips the query entirely rather than paying
+        for it on each of its events.
+        """
+        worker_ids = {
+            w.worker_id
+            for w in workloads
+            if w.group_index != 0 and w.worker_id is not None
+        }
+        if not worker_ids:
+            return {}
+        workers = await Worker.all_by_fields(session, {})
+        return {worker.id: worker.ip for worker in workers if worker.id in worker_ids}
+
+    def _compare(self, instance: ModelInstance, folded: dict, distributed: bool):
+        """
+        Say where the fold would have written something else.
+
+        Silence is the evidence that flipping is safe, so it has to be
+        distinguishable from silence for other reasons -- the controller not
+        running, no events arriving, the fold declining every group. Hence the
+        running tally: a report of many agreements and no disagreements is
+        evidence, whereas an empty log on its own says nothing.
+
+        A difference is not reported until it has been seen twice. The worker
+        writes the instance and then mirrors onto the workload, so between the
+        two the row and its workload genuinely disagree; reading in that window
+        says nothing about whether the fold is right, and it is a window that
+        closes on its own once the worker writes only the workload.
+        """
+        differing = _differing(instance, folded)
+        if not differing:
+            self._count_agreement(folded, distributed)
+            logger.debug(
+                f"Workload fold agrees with model instance {instance.name} "
+                f"(id={instance.id}): {folded}"
+            )
+            self._report_tally()
+            return
+        if instance.id not in self._confirming:
+            self._confirming.add(instance.id)
+            # Held in a set until it finishes: asyncio keeps only a weak
+            # reference to a task, so one whose result nobody awaits can be
+            # collected mid-flight.
+            task = asyncio.create_task(self._confirm(instance.id, differing))
+            self._confirm_tasks.add(task)
+            task.add_done_callback(self._confirm_tasks.discard)
+
+    async def _confirm(self, instance_id: int, first: dict):
+        """
+        Re-read once the difference has had time to resolve, and judge it by
+        where the two ended up rather than by whether they still differ.
+
+        "Still different" is a poor question to ask of two writers that are
+        only eventually consistent: a difference that resolves inside the wait
+        passes whatever the wait is, including one caused by two writers
+        flipping a row between them. The question that does not depend on the
+        clock is whether the instance arrived at what the fold proposed. If it
+        did, the fold was right and merely earlier -- which is what a fold that
+        reads an outage the moment the server records it looks like. If it did
+        not, the fold proposed something that never came true: the difference
+        is gone only because the fold changed its mind, and had it been
+        authoritative it would have written the proposal instead.
+        """
+        proposed = {name: value for name, (_, value) in first.items()}
+        try:
+            await asyncio.sleep(_FOLD_CONFIRM_SECONDS)
+            async with async_session() as session:
+                result = await self._evaluate(session, instance_id)
+            instance, folded = result.instance, result.folded
+            if instance is None or folded is None:
+                return
+            differing = _differing(instance, folded)
+            if not differing:
+                reached = {name: getattr(instance, name, None) for name in proposed}
+                if reached == proposed:
+                    self._converged += 1
+                else:
+                    self._overtaken += 1
+                    logger.info(
+                        f"Workload fold was overtaken on model instance "
+                        f"{instance.name} (id={instance.id}): proposed "
+                        f"{proposed}, the instance settled on {reached}"
+                    )
+                return
+            self._disagreed += 1
+            logger.info(
+                f"Workload fold disagrees with model instance {instance.name} "
+                f"(id={instance.id}): {differing} "
+                f"[agreed={_tally(self._agreed)} disagreed={self._disagreed} "
+                f"converged={self._converged} overtaken={self._overtaken} "
+                f"declined={self._declined_summary()}]"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to confirm a workload fold disagreement for model "
+                f"instance {instance_id}: {e}"
+            )
+        finally:
+            self._confirming.discard(instance_id)
+
+    def _count_agreement(self, folded: dict, distributed: bool):
+        """One place for both modes. They had a tally each, and the
+        authoritative one never touched the distributed counter -- so the
+        figure that says whether the followers were exercised read empty for
+        every run made after the flag went on, which is every run where it
+        mattered."""
+        state = folded.get("state")
+        self._agreed[state] = self._agreed.get(state, 0) + 1
+        if distributed:
+            self._agreed_distributed[state] = self._agreed_distributed.get(state, 0) + 1
+
+    def _report_tally(self):
+        """
+        Surface the tally at INFO on a widening cadence, so a run that is going
+        well says so without a line per event.
+
+        Declines count towards the cadence as well as agreements. They produce
+        no output of their own, so a stretch where the fold declines every
+        time -- every instance still coming up, which is most of a start --
+        was silent, and silence is what a controller that has stopped running
+        also looks like.
+        """
+        total = (
+            sum(self._agreed.values()) + self._disagreed + sum(self._declined.values())
+        )
+        if total < self._next_tally_at:
+            return
+        self._next_tally_at = total * 2
+        # Which mode it is in belongs on the line: the two produce the same
+        # counters when everything agrees, so a healthy tally cannot otherwise
+        # say whether the fold is deciding anything or only watching.
+        mode = (
+            f"authoritative corrected={self._corrected}"
+            if envs.MODEL_INSTANCE_STATE_FROM_WORKLOADS
+            else f"comparing disagreed={self._disagreed} "
+            f"converged={self._converged} overtaken={self._overtaken}"
+        )
+        logger.info(
+            f"Workload fold [{mode}]: agreed={_tally(self._agreed)} "
+            f"of which distributed={_tally(self._agreed_distributed)} "
+            f"declined={self._declined_summary()}"
+        )
+
+    def _declined_summary(self) -> str:
+        """Declines by reason. leader_pending and followers_not_ready are
+        ordinary points in a start; no_leader is not, and lumping them together
+        hid that."""
+        return _tally(self._declined)
+
+
+class BenchmarkController:
+    """
+    Keeps a benchmark's workload row in step with the benchmark.
+
+    Stage 2 of docs/proposals/workload-resource.md, and the one that gives
+    ``restart_policy=never`` and ``active_deadline_seconds`` a consumer: a
+    benchmark is the task-shaped workload, and the service-shaped ones never
+    exercise either.
+
+    Written but not yet read, as the cache service and model instance rows
+    were before it. The worker still drives itself from the benchmark row.
+    """
+
+    def __init__(self, cfg: Config):
+        self._config = cfg
+
+    async def start(self):
+        async for event in Benchmark.subscribe(source="benchmark_controller"):
+            if event.type == EventType.HEARTBEAT:
+                continue
+            await self._reconcile(event)
+
+    async def _reconcile(self, event: Event):
+        benchmark_id = resolve_event_id(event)
+        if benchmark_id is None:
+            return
+        try:
+            async with async_session() as session:
+                existing = await Workload.all_by_fields(
+                    session,
+                    {
+                        "owner_kind": WorkloadOwnerKindEnum.BENCHMARK,
+                        "owner_id": benchmark_id,
+                    },
+                )
+
+                if event.type == EventType.DELETED:
+                    for workload in existing:
+                        await workload.delete(session)
+                    return
+
+                benchmark = await Benchmark.one_by_id(session, benchmark_id)
+                if benchmark is None:
+                    return
+
+                compiled = compile_benchmark(
+                    benchmark,
+                    max_duration_seconds=getattr(
+                        self._config, "benchmark_max_duration_seconds", None
+                    ),
+                )
+                if not existing:
+                    await Workload.create(session, compiled)
+                    return
+                # Spec and binding only, for the same reason as the other
+                # kinds: the worker will own execution state, and recompiling
+                # it from the benchmark on every event would overwrite it.
+                spec = workload_spec(compiled)
+                if spec_differs(existing[0], spec):
+                    await existing[0].update(session, spec)
+        except Exception as e:
+            logger.error(f"Failed to sync workload of benchmark {benchmark_id}: {e}")
 
 
 def _component_replica_count(
@@ -2221,6 +2830,55 @@ async def calculate_model_destinations(
     )
 
 
+async def _mark_workloads_unreachable(session, instance_id: int, worker_id: int):
+    """
+    Report the same outage on the workload rows the worker was running.
+
+    A workload describes a container on one worker, so a worker the server
+    cannot reach makes its containers unreachable by definition. Nothing else
+    can write it: the mirror only runs when the worker writes, and the worker
+    is what is missing. Left alone the rows keep reporting RUNNING, and the
+    fold reading them would put the instance back to RUNNING and undo the
+    outage the moment it becomes authoritative.
+    """
+    try:
+        workloads = await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                "owner_id": instance_id,
+                "worker_id": worker_id,
+            },
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to read workloads of model instance {instance_id} on "
+            f"worker {worker_id} to mark them unreachable: {e}"
+        )
+        return
+
+    for workload in workloads:
+        # Which rows change is copied from the rule applied to the instance
+        # just above, asymmetry included: the main worker's entry moves only
+        # out of RUNNING, a subordinate's from anything it is not already. The
+        # fold has to reproduce what the instance says, so a row marked here
+        # that the instance-side rule would have left alone becomes a
+        # disagreement -- which is exactly what marking a leader still coming
+        # up produced.
+        if workload.group_index == 0:
+            if workload.state != WorkloadStateEnum.RUNNING:
+                continue
+        elif workload.state == WorkloadStateEnum.UNREACHABLE:
+            continue
+        await workload.update(
+            session,
+            {
+                "state": WorkloadStateEnum.UNREACHABLE,
+                "state_message": "Worker is unreachable from the server",
+            },
+        )
+
+
 class WorkerController:
     def __init__(self, cfg: Config):
         self._provisioning = WorkerProvisioningController(cfg)
@@ -2278,12 +2936,18 @@ class WorkerController:
             )
             if not all_instances:
                 return
+            from_workloads = (
+                await get_worker_matches_from_workloads(session, [worker.id])
+            ).get(worker.id, {})
             matched_instances = []
             for instance in all_instances:
                 match = get_model_instance_worker_match(
                     instance,
                     worker_name=worker.name,
                     worker_id=worker.id,
+                )
+                report_match_disagreement(
+                    instance, worker.id, match, from_workloads.get(instance.id)
                 )
                 if match.matched:
                     matched_instances.append((instance, match))
@@ -2310,6 +2974,7 @@ class WorkerController:
                     session,
                     matched_instances,
                     worker.name,
+                    worker.id,
                 )
                 return
 
@@ -2318,6 +2983,7 @@ class WorkerController:
         session,
         matched_instances,
         worker_name,
+        worker_id=None,
     ):
         instance_names = set()
         subordinate_worker_names = set()
@@ -2353,6 +3019,9 @@ class WorkerController:
 
             if patch:
                 await ModelInstanceService(session).update(instance, patch)
+
+            if worker_id is not None:
+                await _mark_workloads_unreachable(session, instance.id, worker_id)
         if instance_names:
             logger.info(
                 f"Marked instance {', '.join(instance_names)} unreachable "
@@ -3272,9 +3941,7 @@ def _get_worker_ids_for_file_download(
         and instance.distributed_servers.download_model_files
     ):
         worker_ids += [
-            item.worker_id
-            for item in instance.distributed_servers.subordinate_workers or []
-            if item.worker_id
+            p.worker_id for p in subordinate_placements(instance) if p.worker_id
         ]
 
     return worker_ids

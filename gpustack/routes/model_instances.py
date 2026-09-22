@@ -20,6 +20,11 @@ from gpustack.api.exceptions import (
     InternalServerErrorException,
     NotFoundException,
 )
+from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
+from gpustack.utils.model_instance_workers import (
+    instance_placements,
+    subordinate_placements,
+)
 from gpustack.schemas.workers import Worker
 from gpustack.schemas.clusters import Cluster
 from gpustack.api.tenant import (
@@ -259,16 +264,19 @@ async def get_serving_logs(  # noqa: C901
                 container_name, model_instance, is_main
             )
 
-        # Build valid worker IDs (main worker + subordinate workers for distributed instances)
-        valid_worker_ids = {model_instance.worker_id}
-        if (
-            model_instance.distributed_servers
-            and model_instance.distributed_servers.subordinate_workers
-        ):
-            valid_worker_ids.update(
-                sw.worker_id
-                for sw in model_instance.distributed_servers.subordinate_workers
-            )
+        # Every worker running part of this instance, its own included. The
+        # rows are passed so the two readings are compared; the embedded list
+        # still decides until that comparison has been silent.
+        rows = await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+                "owner_id": model_instance.id,
+            },
+        )
+        valid_worker_ids = {
+            p.worker_id for p in instance_placements(model_instance, rows)
+        }
 
         # Determine target worker ID
         target_worker_id = worker_id or model_instance.worker_id
@@ -574,18 +582,23 @@ async def resolve_instance_log_worker_targets(
         targets.append((main_id, main_worker.name or "", main_worker))
         seen.add(main_id)
 
-    dservers = model_instance.distributed_servers
-    if dservers and dservers.subordinate_workers:
-        for sw in dservers.subordinate_workers:
-            wid = sw.worker_id
-            if wid is None or wid in seen:
-                continue
-            name = sw.worker_name or ""
-            w = await Worker.one_by_id(session, wid)
-            if not name:
-                name = w.name if w else ""
-            targets.append((wid, name or "", w))
-            seen.add(wid)
+    rows = await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.MODEL_INSTANCE,
+            "owner_id": model_instance.id,
+        },
+    )
+    for placement in subordinate_placements(model_instance, rows):
+        wid = placement.worker_id
+        if wid is None or wid in seen:
+            continue
+        name = placement.worker_name or ""
+        w = await Worker.one_by_id(session, wid)
+        if not name:
+            name = w.name if w else ""
+        targets.append((wid, name or "", w))
+        seen.add(wid)
 
     return targets
 

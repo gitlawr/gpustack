@@ -23,6 +23,11 @@ def _patch_worker_side(monkeypatch):
     monkeypatch.setattr(
         benchmarks_route, "create_worker_snapshot", lambda *args: (None, None)
     )
+    # The snapshot reads the instance's rows to compare them against the
+    # embedded list it still uses.
+    monkeypatch.setattr(
+        benchmarks_route.Workload, "all_by_fields", AsyncMock(return_value=[])
+    )
 
 
 def _instance() -> ModelInstance:

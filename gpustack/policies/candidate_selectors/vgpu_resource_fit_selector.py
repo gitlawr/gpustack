@@ -10,6 +10,7 @@ from gpustack.policies.base import (
 from gpustack.policies.candidate_selectors.base_candidate_selector import (
     ScheduleCandidatesSelector,
 )
+from gpustack.schemas.workloads import Workload
 from gpustack.policies.utils import (
     estimate_model_vram,
     get_model_ram_claim,
@@ -134,8 +135,9 @@ class VGPUResourceFitSelector(ScheduleCandidatesSelector):
         config: Config,
         model: Model,
         model_instances: List[ModelInstance],
+        workloads: Optional[List[Workload]] = None,
     ):
-        super().__init__(config, model, model_instances)
+        super().__init__(config, model, model_instances, workloads)
         self._messages: List[str] = []
         self._vram_claim = 0
         self._ram_claim = 0

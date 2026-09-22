@@ -1,25 +1,24 @@
 import asyncio
-from collections import deque
 import contextlib
+import threading
+from collections import deque
+from functools import partial
 from datetime import datetime, timezone
 import json
-import multiprocessing
 import re
-import threading
 import time
 
 import requests
-import setproctitle
 import os
-from typing import Dict, Optional, Set, List, Callable
+from typing import Dict, Optional, List, Callable
 from pathlib import Path
 import logging
 
 from gpustack_runtime.deployer import (
     get_workload,
-    WorkloadStatusStateEnum,
     delete_workload,
     logs_workload,
+    WorkloadStatusStateEnum,
 )
 from gpustack_runtime.deployer.__utils__ import compare_versions
 
@@ -27,9 +26,6 @@ from gpustack import envs
 from gpustack.api.exceptions import NotFoundException
 from gpustack.config.config import Config
 from gpustack.config import registration
-from gpustack.logging import (
-    RedirectStdoutStderr,
-)
 from gpustack.schemas.inference_backend import (
     InferenceBackend,
     is_built_in_backend,
@@ -37,9 +33,7 @@ from gpustack.schemas.inference_backend import (
 )
 from gpustack.utils import network
 from gpustack.utils.convert import safe_int
-from gpustack.utils.attrs import set_attr
 from gpustack.utils.command import find_int_parameter
-from gpustack.utils.process import terminate_process_tree, add_signal_handlers
 from gpustack.worker.backends.ascend_mindie import AscendMindIEServer
 from gpustack.worker.backends.sglang import SGLangServer
 from gpustack.utils.command import resolve_executor_backend
@@ -54,6 +48,10 @@ from gpustack.worker.log_sources import (
 )
 from gpustack.worker.model_meta import get_meta_from_running_instance
 from gpustack.client import ClientSet
+from gpustack.utils.model_instance_workers import (
+    InstancePlacement,
+    subordinate_placements,
+)
 from gpustack.schemas.models import (
     BackendEnum,
     Model,
@@ -67,6 +65,20 @@ from gpustack.schemas.models import (
     CategoryEnum,
 )
 from gpustack.server.bus import Event, EventType
+from gpustack.server.model_instance_workloads import named_ports, to_workload_state
+from gpustack.worker.controlloop import (
+    workloads_by_instance,
+    group_workloads,
+    PortAllocator,
+    ProvisionRunner,
+    RestartActionEnum,
+    RestartBudget,
+    WorkloadPhase,
+    classify_workload,
+    describe_workload_failure,
+    update_resource,
+    watch_forever,
+)
 from gpustack.worker.inference_backend_manager import InferenceBackendManager
 
 logger = logging.getLogger(__name__)
@@ -90,8 +102,16 @@ _LOG_TAIL_MAX_READ = 1 << 20
 # A line count cannot bound this: live output reaches the same skip as replay.
 _LOG_RESUME_SKIP_TIMEOUT = 30.0
 
-# Global lock for port assignment to avoid pickle serialization issues
-_port_lock = threading.Lock()
+RESTART_BUDGET = RestartBudget(
+    base_delay_seconds=10,
+    max_delay_seconds=300,
+    # Unlike a cache server, an inference server is not given up on: the
+    # failure is often outside it (a registry outage, a node coming back), and
+    # a user who wants it to stop retrying turns off the model's
+    # restart_on_error. See _restart_backoff_counts for what is not persisted.
+    max_attempts=None,
+    first_attempt_immediate=True,
+)
 
 _SERVER_CLASS_MAPPING = {
     BackendEnum.VLLM: VLLMServer,
@@ -273,52 +293,62 @@ class _LogPersistence:
                     )
 
 
-def _describe_workload_failure(workload) -> str:
+_SUBORDINATE_PATCH = re.compile(r"^distributed_servers\.subordinate_workers\.(\d+)$")
+
+
+def _execution_state_patch(patch: dict):
     """
-    Explain why a workload stopped serving, for the instance's state message.
+    Split a model instance write-back into (group position, workload fields).
 
-    The workload's `state_message` is the most specific text the runtime has --
-    a Pod's admission rejection, or an image-pull reason plus the registry error
-    behind it (gpustack/gpustack#5869) -- but it never carries an exit code, and
-    a container that merely crashed leaves it empty on Kubernetes. The
-    per-container `exits` carry both, so take the reason from there when there
-    is no message, and append the exit code either way
-    (gpustack/gpustack#4217).
-
-    Args:
-        workload: The runtime WorkloadStatus, None if the workload is gone.
-
-    Returns:
-        The failure message to surface on the model instance.
+    A subordinate worker patches its own entry by index, so the position comes
+    from the patch key; anything else is the leader, at position 0. Fields the
+    workload does not carry -- the instance's own lifecycle, its model files --
+    are dropped.
     """
-    if not workload:
-        return _WORKLOAD_FAILED_MESSAGE
+    for key, value in patch.items():
+        match = _SUBORDINATE_PATCH.match(key)
+        if match:
+            return int(match.group(1)) + 1, _subordinate_fields(value)
 
-    message = getattr(workload, "state_message", "") or ""
-    # A container blocked from starting reports no exit code, and its reason is
-    # already what the state message is built from, so it adds nothing here.
-    exits = [
-        exit_
-        for exit_ in (getattr(workload, "exits", None) or [])
-        if exit_.exit_code is not None
-    ]
-    if not exits:
-        return message or _WORKLOAD_FAILED_MESSAGE
+    fields = {}
+    if "state" in patch:
+        fields["state"] = to_workload_state(patch["state"])
+    for name in ("state_message", "pid", "restart_count", "last_restart_time"):
+        if name in patch:
+            fields[name] = patch[name]
+    if "port" in patch or "ports" in patch:
+        fields["ports"] = named_ports(patch.get("port"), patch.get("ports")) or None
+    return 0, fields
 
-    if not message:
-        # Deduplicated but order-preserving: sidecars usually die of one cause.
-        message = ", ".join(
-            dict.fromkeys(exit_.reason for exit_ in exits if exit_.reason)
-        )
-    codes = ", ".join(
-        (
-            f"{exit_.name} exit code {exit_.exit_code}"
-            if len(exits) > 1
-            else f"exit code {exit_.exit_code}"
-        )
-        for exit_ in exits
-    )
-    return f"{message or _WORKLOAD_FAILED_MESSAGE} ({codes})"
+
+def _subordinate_fields(sw) -> dict:
+    return {
+        "state": to_workload_state(getattr(sw, "state", None)),
+        "state_message": getattr(sw, "state_message", None),
+        "pid": getattr(sw, "pid", None),
+        "ports": named_ports(None, getattr(sw, "ports", None)) or None,
+    }
+
+
+def provision_model_instance(
+    mi: ModelInstance,
+    backend: BackendEnum,
+    worker_id: int,
+    inference_backend: InferenceBackend,
+    fallback_registry: Optional[str],
+    clientset: ClientSet,
+    cfg: Config,
+):
+    """
+    The domain half of provisioning, run by the shared subprocess entry point.
+
+    Module level so spawn can pickle it by reference; the leading arguments are
+    bound with functools.partial at the call site.
+    """
+    server_cls = _SERVER_CLASS_MAPPING.get(backend, CustomServer)
+    server_cls(
+        clientset, mi, cfg, worker_id, inference_backend, fallback_registry
+    ).start()
 
 
 class ServeManager:
@@ -348,12 +378,6 @@ class ServeManager:
     _inference_backend_manager: InferenceBackendManager
     """
     The inference backend manager.
-    """
-    _provisioning_processes: Dict[int, multiprocessing.Process]
-    """
-    The mapping of model instance ID to provisioning (sub)process.
-    When the (sub)process is alive, the model instance is provisioning.
-    If the (sub)process exited, the model instance is either running or failed.
     """
     _log_persistence: Dict[int, _LogPersistence]
     """
@@ -392,15 +416,31 @@ class ServeManager:
         self._serve_log_dir = f"{cfg.log_dir}/serve"
         self._clientset_getter = clientset_getter
 
-        self._provisioning_processes = {}
+        self._provisioning = ProvisionRunner(cfg, lambda: self._clientset.headers)
         self._log_persistence = {}
         self._log_persistence_lock = threading.Lock()
         self._error_model_instances = {}
         self._model_cache_by_instance = {}
         self._model_instance_by_instance_id = {}
 
-        # Instance-level port tracking to avoid conflicts
-        self._assigned_ports: Dict[int, Set[int]] = {}
+        # Instance-level port tracking to avoid conflicts. No peer lookup:
+        # unlike a cache service instance, a model instance that already has a
+        # port keeps it, so the only conflicts to avoid are within this
+        # process. A worker restart therefore starts from an empty set, which
+        # is the same gap the cache service manager's peer read closes.
+        self._ports = PortAllocator(cfg.service_port_range)
+
+        # Consecutive restarts per instance, cleared once it serves again, so
+        # a crash long after a recovery meets a fresh set of attempts.
+        #
+        # In-process only, so a worker restart forgets the backoff and the
+        # instances still crash-looping get one immediate retry each. The
+        # instance row cannot hold it: restart_count is the log-file
+        # generation number ({id}.{restart_count}.log, with _cleanup_old_logs
+        # reading 0 as "fresh lifecycle, purge everything"), so it has to keep
+        # increasing and cannot double as a consecutive-crash counter the way
+        # a cache service instance's does. Persisting this needs a column of
+        # its own.
         self._restart_backoff_counts: Dict[int, int] = {}
 
         # Inference health check failure tracking
@@ -429,17 +469,20 @@ class ServeManager:
 
         """
 
-        logger.debug("Watching models.")
+        # No callback: the stream is consumed only to keep the client cache warm.
+        await watch_forever("models", self._clientset.models.awatch)
 
-        while True:
-            try:
-                # Watch models without callback to keep the cache updated.
-                await self._clientset.models.awatch(callback=None)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error watching models: {e}")
-                await asyncio.sleep(5)
+    async def watch_model_instance_workloads(self):
+        """
+        Keep the workload cache warm.
+
+        No callback: this worker does not act on workload events yet. It reads
+        them, to find the row an instance's execution state mirrors onto, and
+        without a running watch every one of those reads is an API call.
+        """
+        await watch_forever(
+            "model instance workloads", self._clientset.workloads.awatch
+        )
 
     async def watch_model_instances_event(self):
         """
@@ -447,18 +490,11 @@ class ServeManager:
 
         """
 
-        logger.debug("Watching model instances event.")
-
-        while True:
-            try:
-                await self._clientset.model_instances.awatch(
-                    callback=self._handle_model_instance_event
-                )
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error watching model instances: {e}")
-                await asyncio.sleep(5)
+        await watch_forever(
+            "model instances",
+            self._clientset.model_instances.awatch,
+            callback=self._handle_model_instance_event,
+        )
 
     async def watch_model_instances(self):
         """
@@ -574,6 +610,7 @@ class ServeManager:
             # local state.
             return
 
+        rows_by_instance = workloads_by_instance(self._clientset)
         model_instances: List[ModelInstance] = []
         for model_instance in all_items:
             # if the model instance is assigned to this worker, it must be scheduled.
@@ -583,14 +620,11 @@ class ServeManager:
                 and model_instance.state != ModelInstanceStateEnum.SCHEDULED
             ):
                 model_instances.append(model_instance)
-            if (
-                model_instance.distributed_servers
-                and model_instance.distributed_servers.subordinate_workers
-            ):
-                for sw in model_instance.distributed_servers.subordinate_workers:
-                    if sw.worker_id == self._worker_id:
-                        model_instances.append(model_instance)
-                        break
+            subordinates = subordinate_placements(
+                model_instance, rows_by_instance.get(model_instance.id)
+            )
+            if any(p.worker_id == self._worker_id for p in subordinates):
+                model_instances.append(model_instance)
 
         # Retire log persistence the server no longer assigns here: a DELETED
         # event landing mid-pass leaves a generation nothing will ever stop, and
@@ -629,28 +663,24 @@ class ServeManager:
                 )
                 workload = get_workload(workload_name)
 
-            if workload and workload.state in [
-                WorkloadStatusStateEnum.PENDING,
-                WorkloadStatusStateEnum.INITIALIZING,
-            ]:
+            phase = classify_workload(workload)
+            if phase == WorkloadPhase.LAUNCHING:
                 logger.trace(
                     f"Model instance {model_instance.name} workload is still launching. Skipping sync."
                 )
                 continue
 
-            # Update model instance state to ERROR if the workload is not existed, unhealthy, inactive or failed.
-            if not workload or workload.state in [
-                WorkloadStatusStateEnum.UNKNOWN,  # Rare, but possible, for example, leaving pause container.
-                WorkloadStatusStateEnum.UNHEALTHY,
-                WorkloadStatusStateEnum.INACTIVE,
-                WorkloadStatusStateEnum.FAILED,
-            ]:
+            # An inference server is a service: it has no successful end, so a
+            # clean exit is an error alongside a failure or a vanished workload.
+            if phase != WorkloadPhase.RUNNING:
                 # Only if not in ERROR state yet.
                 if model_instance.state != ModelInstanceStateEnum.ERROR:
                     # Surface the workload's own diagnosis (e.g. a device-plugin
                     # admission rejection, an image-pull failure, an exit code)
                     # when available.
-                    failure_message = _describe_workload_failure(workload)
+                    failure_message = describe_workload_failure(
+                        workload, _WORKLOAD_FAILED_MESSAGE
+                    )
                     with contextlib.suppress(NotFoundException):
                         # Get patch dict for main worker.
                         if is_main_worker:
@@ -660,15 +690,7 @@ class ServeManager:
                             }
                         # Get patch dict for subordinate worker.
                         else:
-                            sw_pos = next(
-                                (
-                                    i
-                                    for i, sw in enumerate(
-                                        model_instance.distributed_servers.subordinate_workers
-                                    )
-                                    if sw.worker_id == self._worker_id
-                                ),
-                            )
+                            sw_pos = self._own_subordinate_position(model_instance)
                             sw = model_instance.distributed_servers.subordinate_workers[
                                 sw_pos
                             ]
@@ -709,7 +731,10 @@ class ServeManager:
                 # Get patch dict for main worker.
                 if is_main_worker:
                     subordinate_state = self._get_main_worker_distributed_state(
-                        model_instance
+                        model_instance,
+                        subordinate_placements(
+                            model_instance, self._group_workloads(model_instance)
+                        ),
                     )
                     if subordinate_state is None:
                         if model_instance.state == ModelInstanceStateEnum.RUNNING:
@@ -749,23 +774,14 @@ class ServeManager:
                         continue
                 # Get patch dict for subordinate worker.
                 else:
-                    # For initialize later mode, the state is set to RUNNING directly,
-                    # which means the subordinate worker doesn't need to wait for the main worker to be healthy.
-                    if (
-                        model_instance.distributed_servers.mode
-                        == DistributedServerCoordinateModeEnum.INITIALIZE_LATER
-                    ):
-                        continue
-                    # Otherwise, update subordinate worker state to RUNNING.
-                    sw_pos = next(
-                        (
-                            i
-                            for i, sw in enumerate(
-                                model_instance.distributed_servers.subordinate_workers
-                            )
-                            if sw.worker_id == self._worker_id
-                        ),
-                    )
+                    # Every mode, including initialize_later: that one writes
+                    # RUNNING once when it spawns the process and never again,
+                    # so a lost write left the subordinate reported as pending
+                    # for good and the main worker holding the instance in
+                    # STARTING forever. The branch above already marks a
+                    # subordinate ERROR whatever its mode, so skipping this one
+                    # also made the reporting one-way.
+                    sw_pos = self._own_subordinate_position(model_instance)
                     sw = model_instance.distributed_servers.subordinate_workers[sw_pos]
                     if sw.state == ModelInstanceStateEnum.RUNNING:
                         continue
@@ -777,19 +793,21 @@ class ServeManager:
                 # Update model instance.
                 self._update_model_instance(model_instance.id, **patch_dict)
 
+    def _group_workloads(self, model_instance: ModelInstance) -> list:
+        """The workload rows of one instance's group.
+
+        The rows carry the subordinates' placement and, unlike the instance's
+        own state, their lifecycle survives the round trip: a subordinate is
+        only ever pending, initializing, running, unreachable or errored, and
+        each of those maps to a distinct workload state.
+        """
+        return group_workloads(self._clientset, model_instance.id)
+
     @staticmethod
     def _get_main_worker_distributed_state(
         model_instance: ModelInstance,
+        subordinate_workers: List[InstancePlacement],
     ) -> Optional[dict]:
-        subordinate_workers = (
-            model_instance.distributed_servers.subordinate_workers
-            if (
-                model_instance.distributed_servers
-                and model_instance.distributed_servers.subordinate_workers
-            )
-            else []
-        )
-
         if not subordinate_workers:
             return None
 
@@ -960,61 +978,6 @@ class ServeManager:
                     **{f"distributed_servers.subordinate_workers.{sw_pos}": sw},
                 )
 
-    @staticmethod
-    def _serve_model_instance(
-        mi: ModelInstance,
-        backend: BackendEnum,
-        client_headers: dict,
-        log_file_path: str,
-        cfg: Config,
-        worker_id: int,
-        inference_backend: InferenceBackend,
-        fallback_registry: Optional[str] = None,
-    ):
-        """
-        Serve model instance in a subprocess.
-        Exits the subprocess when serving ends.
-
-        Args:
-            mi: The model instance to serve.
-            backend: The backend of the model instance.
-            client_headers: The headers for the clientset.
-            log_file_path: The path to the log file.
-            cfg: The configuration.
-            worker_id: The ID of the worker.
-            inference_backend: The inference backend configuration.
-            fallback_registry: The fallback container registry to use if needed.
-        """
-
-        setproctitle.setproctitle(f"gpustack_model_instance_{mi.id}")
-        add_signal_handlers()
-
-        clientset = ClientSet(
-            base_url=cfg.get_server_url(),
-            headers=client_headers,
-        )
-
-        with open(log_file_path, "w", buffering=1, encoding="utf-8") as log_file:
-            with RedirectStdoutStderr(log_file):
-                try:
-                    server_cls = _SERVER_CLASS_MAPPING.get(backend, CustomServer)
-                    server_ins = server_cls(
-                        clientset,
-                        mi,
-                        cfg,
-                        worker_id,
-                        inference_backend,
-                        fallback_registry,
-                    )
-                    logger.info(f"Provisioning model instance {mi.name}")
-                    server_ins.start()
-                    logger.info(f"Finished provisioning model instance {mi.name}")
-                except Exception as e:
-                    logger.exception(
-                        f"Error provisioning model instance {mi.name}: {e}"
-                    )
-                    raise e
-
     def sync_model_instances_inference_health(self):
         """
         Synchronize model instances' inference health by sending actual inference requests.
@@ -1144,13 +1107,12 @@ class ServeManager:
                 mi.distributed_servers
                 and mi.distributed_servers.mode
                 == DistributedServerCoordinateModeEnum.RUN_FIRST
-                and mi.distributed_servers.subordinate_workers
             ):
-                ready = all(
-                    sw.state == ModelInstanceStateEnum.RUNNING
-                    for sw in mi.distributed_servers.subordinate_workers
+                subordinates = subordinate_placements(mi, self._group_workloads(mi))
+                ready = subordinates and all(
+                    p.state == ModelInstanceStateEnum.RUNNING for p in subordinates
                 )
-                if not ready:
+                if subordinates and not ready:
                     logger.info(
                         f"Model instance {mi.name} waits for all subordinate workers to be ready."
                     )
@@ -1168,8 +1130,8 @@ class ServeManager:
                 return
             # Return if it isn't the member of the distribution serving.
             joined = any(
-                sw.worker_id == self._worker_id
-                for sw in mi.distributed_servers.subordinate_workers or []
+                p.worker_id == self._worker_id
+                for p in subordinate_placements(mi, self._group_workloads(mi))
             )
             if not joined:
                 return
@@ -1192,7 +1154,7 @@ class ServeManager:
                 return
             # FIXME: This is a temporary solution to prevent the main worker from being unable to start due to phantom reads.
             #        We confirm whether the operation should be performed by checking the state of the earlier subordinate worker.
-            for sw in mi.distributed_servers.subordinate_workers:
+            for sw in subordinate_placements(mi, self._group_workloads(mi)):
                 if sw.worker_id == self._worker_id:
                     break
                 if sw.state not in [
@@ -1246,12 +1208,10 @@ class ServeManager:
                     logger.trace(
                         f"UPDATED event: started model instance {mi.name} on subordinate worker."
                     )
-                elif workload.state in [
-                    WorkloadStatusStateEnum.UNKNOWN,
-                    WorkloadStatusStateEnum.UNHEALTHY,
-                    WorkloadStatusStateEnum.INACTIVE,
-                    WorkloadStatusStateEnum.FAILED,
-                ]:
+                elif classify_workload(workload) in (
+                    WorkloadPhase.EXITED,
+                    WorkloadPhase.FAILED,
+                ):
                     self._stop_model_instance(mi, clear_restart_backoff=False)
                     self._start_model_instance(mi)
                     logger.trace(
@@ -1755,6 +1715,23 @@ class ServeManager:
             except Exception as e:
                 logger.warning(f"Failed to delete {log_type} log file {f}: {e}")
 
+    def _own_subordinate_position(self, mi) -> int:
+        """
+        Where this worker sits in the instance's subordinate list.
+
+        Raises StopIteration if it is not there, as the inline lookups this
+        replaces did -- every caller reaches it having already established
+        that it is a subordinate of this instance, so absence means the row
+        and the worker disagree about that, and swallowing it would start a
+        container nothing reports on. The one caller that tolerates absence
+        asks for it separately.
+        """
+        return next(
+            p.subordinate_index
+            for p in subordinate_placements(mi, self._group_workloads(mi))
+            if p.worker_id == self._worker_id
+        )
+
     def _purge_instance_logs(self, model_instance_id: int):
         """Delete all serve logs (main/container/sidecar) for a model instance id."""
         try:
@@ -1799,13 +1776,7 @@ class ServeManager:
         sw_pos: Optional[int] = None
         sw: Optional[ModelInstanceSubordinateWorker] = None
         if not is_main_worker:
-            sw_pos = next(
-                (
-                    i
-                    for i, sw in enumerate(mi.distributed_servers.subordinate_workers)
-                    if sw.worker_id == self._worker_id
-                ),
-            )
+            sw_pos = self._own_subordinate_position(mi)
             sw = mi.distributed_servers.subordinate_workers[sw_pos]
 
         try:
@@ -1827,14 +1798,15 @@ class ServeManager:
                 else None
             )
 
-            process = multiprocessing.Process(
-                target=ServeManager._serve_model_instance,
-                args=(
+            process = self._provisioning.start(
+                mi.id,
+                description=f"model instance {mi.name}",
+                proctitle=f"gpustack_model_instance_{mi.id}",
+                log_path=log_file_path,
+                provision=partial(
+                    provision_model_instance,
                     mi,
                     backend,
-                    self._clientset.headers,
-                    log_file_path,
-                    self._config,
                     self._worker_id,
                     self._inference_backend_manager.get_backend_by_name(
                         backend, model.owner_principal_id
@@ -1842,9 +1814,6 @@ class ServeManager:
                     fallback_registry,
                 ),
             )
-            process.daemon = False
-            process.start()
-            self._provisioning_processes[mi.id] = process
 
             # Start container log persistence for containerized backends
             self._start_container_log_persistence(mi)
@@ -1880,7 +1849,7 @@ class ServeManager:
 
         except Exception as e:
             # Clean up provisioning process if started.
-            if mi.id in self._provisioning_processes:
+            if self._provisioning.is_running(mi.id):
                 self._stop_model_instance(mi)
 
             # Get patch dict for main worker.
@@ -1923,24 +1892,10 @@ class ServeManager:
             # Port already assigned, skip.
             return
 
-        with _port_lock:
-            if mi.port:
-                # Port already assigned, skip.
-                return
-
-            if self._assigned_ports:
-                unavailable_ports = set.union(*self._assigned_ports.values())
-            else:
-                unavailable_ports = set()
-
+        with self._ports.session(mi.id, host=mi.worker_ip) as session:
             # Main serving port
-            mi.port = network.get_free_port(
-                port_range=self._config.service_port_range,
-                unavailable_ports=unavailable_ports,
-                host=mi.worker_ip,
-            )
+            mi.port = session.take()
             mi.ports = [mi.port]
-            unavailable_ports.add(mi.port)
 
             # Additional ports for distributed servers (mp path allocates all):
             #   ports[0]: HTTP API (always)
@@ -1953,12 +1908,7 @@ class ServeManager:
                 # Allocate first so we can fence off the 10-port band vLLM reserves
                 # around VLLM_DP_MASTER_PORT (= connecting port), keeping the cross
                 # ports (incl. VLLM_PORT) outside it.
-                connecting_port = network.get_free_port(
-                    port_range=self._config.service_port_range,
-                    unavailable_ports=unavailable_ports,
-                    host=mi.worker_ip,
-                )
-                unavailable_ports.add(connecting_port)
+                connecting_port = session.take()
 
                 cross_ports: List[int] = []
                 if backend == BackendEnum.VLLM:
@@ -1972,7 +1922,7 @@ class ServeManager:
                         _, end_port = network.parse_port_range(
                             self._config.service_port_range
                         )
-                        unavailable_ports |= set(
+                        session.exclude(
                             range(
                                 connecting_port, min(connecting_port + 10, end_port + 1)
                             )
@@ -1985,18 +1935,10 @@ class ServeManager:
                         )
                         cross_port_count = 1 if dps and dps > 1 else 0
                     for _ in range(cross_port_count):
-                        cross_port = network.get_free_port(
-                            port_range=self._config.service_port_range,
-                            unavailable_ports=unavailable_ports,
-                            host=mi.worker_ip,
-                        )
-                        cross_ports.append(cross_port)
-                        unavailable_ports.add(cross_port)
+                        cross_ports.append(session.take())
 
                 mi.ports.extend(cross_ports)
                 mi.ports.append(connecting_port)
-
-            self._assigned_ports[mi.id] = set(mi.ports)
 
     def _restart_model_instance(self, mi: ModelInstance):
         """
@@ -2009,47 +1951,41 @@ class ServeManager:
         self._stop_model_instance(mi, clear_restart_backoff=False)
         self._start_model_instance(mi)
 
-    def _update_model(self, id: int, **kwargs):
+    def _update_model(self, id: int, **kwargs) -> bool:
+        """
+        Update model with given fields.
+
+        Args:
+            id: The ID of the model to update.
+            **kwargs: The fields to update, group by field name and value.
+        """
+
+        return update_resource(
+            self._clientset.models, id, ModelUpdate, "Model", **kwargs
+        )
+
+    def _update_model_instance(self, id: int, **kwargs) -> bool:
         """
         Update model instance with given fields.
+
+        The workload rows follow from this write, applied by the server in the
+        transaction that makes it. Mirroring from here instead meant a second
+        call that could land after another writer's update -- and the
+        provisioning subprocess writes instances too, where a lock in this
+        process reaches nothing.
 
         Args:
             id: The ID of the model instance to update.
             **kwargs: The fields to update, group by field name and value.
         """
-
-        try:
-            m_public = self._clientset.models.get(id=id)
-
-            m = ModelUpdate(**m_public.model_dump())
-            for key, value in kwargs.items():
-                set_attr(m, key, value)
-
-            self._clientset.models.update(id=id, model_update=m)
-        except NotFoundException:
-            logger.warning(f"Model with ID {id} not found when trying to update.")
-
-    def _update_model_instance(self, id: int, **kwargs):
-        """
-        Update model instance with given fields.
-
-        Args:
-            id: The ID of the model instance to update.
-            **kwargs: The fields to update, group by field name and value.
-        """
-
-        try:
-            mi_public = self._clientset.model_instances.get(id=id)
-
-            mi = ModelInstanceUpdate(**mi_public.model_dump())
-            for key, value in kwargs.items():
-                set_attr(mi, key, value)
-
-            self._clientset.model_instances.update(id=id, model_update=mi)
-        except NotFoundException:
-            logger.warning(
-                f"Model instance with ID {id} not found when trying to update."
-            )
+        applied = update_resource(
+            self._clientset.model_instances,
+            id,
+            ModelInstanceUpdate,
+            "Model instance",
+            **kwargs,
+        )
+        return applied
 
     def _stop_model_instance(
         self,
@@ -2077,8 +2013,7 @@ class ServeManager:
             self._purge_instance_logs(mi.id)
 
         # Teardown provisioning process if still alive.
-        if self._is_provisioning(mi):
-            terminate_process_tree(self._provisioning_processes[mi.id].pid)
+        self._provisioning.terminate(mi.id)
 
         # Delete workload.
         deployment_metadata = mi.get_deployment_metadata(self._worker_id)
@@ -2086,8 +2021,8 @@ class ServeManager:
             delete_workload(deployment_metadata.name)
 
         # Cleanup internal states.
-        self._provisioning_processes.pop(mi.id, None)
-        self._assigned_ports.pop(mi.id, None)
+        self._provisioning.forget(mi.id)
+        self._ports.release(mi.id)
         self._error_model_instances.pop(mi.id, None)
         self._model_cache_by_instance.pop(mi.id, None)
         self._model_instance_by_instance_id.pop(mi.id, None)
@@ -2116,22 +2051,22 @@ class ServeManager:
         last_restart_time = mi.last_restart_time or mi.updated_at
 
         current_time = datetime.now(timezone.utc)
-        delay = min(10 * (2 ** (backoff_count - 1)), 300) if backoff_count > 0 else 0
-        if backoff_count > 0 and last_restart_time:
-            elapsed_time = (current_time - last_restart_time).total_seconds()
-            if elapsed_time < delay:
-                logger.trace(
-                    f"Delaying restart of {mi.name} for {delay - elapsed_time:.2f} seconds."
-                )
-                return
+        decision = RESTART_BUDGET.decide(backoff_count, last_restart_time, current_time)
+        if decision.action == RestartActionEnum.WAIT:
+            logger.trace(
+                f"Delaying restart of {mi.name} for "
+                f"{decision.delay_remaining_seconds:.2f} seconds."
+            )
+            return
 
         logger.info(
             f"Restarting model instance {mi.name} "
-            f"(attempt {backoff_count + 1}) after {delay} seconds delay."
+            f"(attempt {decision.attempt}) after "
+            f"{RESTART_BUDGET.delay_for(backoff_count)} seconds delay."
         )
 
         with contextlib.suppress(NotFoundException):
-            self._restart_backoff_counts[mi.id] = backoff_count + 1
+            self._restart_backoff_counts[mi.id] = decision.attempt
             self._update_model_instance(
                 mi.id,
                 restart_count=restart_count + 1,
@@ -2180,11 +2115,7 @@ class ServeManager:
         Args:
             mi: The model instance to check.
         """
-        if process := self._provisioning_processes.get(mi.id):
-            if process.is_alive():
-                process.join(timeout=0)
-                return process.is_alive()
-        return False
+        return self._provisioning.is_running(mi.id)
 
     def _get_health_check_path(
         self, backend: str, owner_principal_id: Optional[int] = None

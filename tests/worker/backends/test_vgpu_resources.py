@@ -39,8 +39,12 @@ def _backend(
     gpu_devices=None,
 ):
     backend = CustomServer.__new__(CustomServer)
+    # Skipped by __new__: the resource base reads the instance's workload
+    # rows to compare them against the embedded subordinate list.
+    backend._group_workloads = lambda: []
     backend._model = types.SimpleNamespace(gpu_type_selector=gpu_type_selector)
     backend._model_instance = types.SimpleNamespace(
+        id=1,
         worker_id=1,
         gpu_indexes=gpu_indexes if gpu_indexes is not None else [0],
         gpu_type=gpu_type,
