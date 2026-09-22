@@ -235,8 +235,14 @@ class Workload(WorkloadBase, BaseModelMixin, table=True):
             "owner_kind",
             "owner_id",
             "worker_id",
-            "group_index",
-            name="uix_workloads_owner_worker_group_index",
+            "name",
+            # Two containers of one owner differ on a worker exactly when
+            # their names do -- the runtime requires that of them anyway.
+            # Keyed on the name rather than the group position because an
+            # owner's containers are not always positions in one group: a
+            # cache service runs a different program per component, and two
+            # of them land on the same worker with no rank between them.
+            name="uix_workloads_owner_worker_name",
         ),
         # The worker's reconcile pass and orphan cleanup, the hottest read.
         Index("ix_workloads_worker_id", "worker_id"),

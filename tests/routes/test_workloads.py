@@ -89,21 +89,54 @@ def test_reserved_claims_hold_resources_on_workers_with_no_container():
     assert [claim.worker_id for claim in workload.reserved_claims] == [2, 3]
 
 
-def test_the_unique_constraint_covers_the_group_position():
-    """Leader and follower of one instance can land on the same worker, so
-    (owner, worker) alone would reject a legitimate pair."""
-    constraint = next(
+def _unique_constraint():
+    return next(
         c
         for c in Workload.__table__.constraints
-        if c.name == "uix_workloads_owner_worker_group_index"
+        if c.name and c.name.startswith("uix_workloads_owner_worker")
     )
 
-    assert [c.name for c in constraint.columns] == [
-        "owner_kind",
-        "owner_id",
-        "worker_id",
-        "group_index",
-    ]
+
+def test_the_unique_constraint_tells_an_owners_containers_apart():
+    """Stated as the invariant rather than a column list: what has to hold is
+    that two containers of one owner are never the same row, and which columns
+    say so has already changed once -- an owner's containers are not always
+    positions in one group, since a cache service runs a different program per
+    component and two of them land on the same worker with no rank between
+    them."""
+    from gpustack.schemas.models import (
+        DistributedServerCoordinateModeEnum,
+        DistributedServers,
+        ModelInstance,
+        ModelInstanceSubordinateWorker,
+    )
+    from gpustack.server.model_instance_workloads import compile_model_instance
+
+    columns = [c.name for c in _unique_constraint().columns]
+    # A follower scheduled onto the leader's own worker is legitimate, and is
+    # the pair that (owner, worker) alone would reject.
+    rows = compile_model_instance(
+        ModelInstance(
+            id=1,
+            name="mi",
+            worker_id=1,
+            distributed_servers=DistributedServers(
+                mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER,
+                subordinate_workers=[ModelInstanceSubordinateWorker(worker_id=1)],
+            ),
+        )
+    )
+
+    keys = [tuple(getattr(row, column) for column in columns) for row in rows]
+    assert len(set(keys)) == len(keys)
+
+
+def test_the_unique_constraint_still_pins_the_owner_and_worker():
+    """Whatever else it keys on, dropping either of these would let one
+    controller pass create a duplicate of another's row."""
+    columns = {c.name for c in _unique_constraint().columns}
+
+    assert {"owner_kind", "owner_id", "worker_id"} <= columns
 
 
 def test_the_indexes_cover_the_hot_reads():

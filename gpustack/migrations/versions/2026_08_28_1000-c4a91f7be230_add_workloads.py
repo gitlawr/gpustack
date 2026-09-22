@@ -76,15 +76,15 @@ def upgrade() -> None:
         sa.Column('last_check_at', sa.DateTime(), nullable=True),
         sa.Column('progress', sa.Float(), nullable=True),
         sa.PrimaryKeyConstraint('id'),
-        # One workload per owner per worker per group position. Without it a
+        # One workload per owner per worker per container name. Without it a
         # controller fan-out running twice concurrently creates duplicates,
         # which only shows up under load.
         sa.UniqueConstraint(
             'owner_kind',
             'owner_id',
             'worker_id',
-            'group_index',
-            name='uix_workloads_owner_worker_group_index',
+            'name',
+            name='uix_workloads_owner_worker_name',
         ),
     )
     # The worker's reconcile pass and orphan cleanup, the hottest read.
