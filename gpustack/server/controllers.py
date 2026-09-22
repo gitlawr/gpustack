@@ -82,8 +82,6 @@ from gpustack.schemas.config import (
 from gpustack.schemas.cache_services import (
     cache_service_spec_digest,
     CacheService,
-    CacheServiceInstance,
-    CacheServiceInstanceCreate,
     CacheServiceStateEnum,
 )
 from gpustack.schemas.cache_providers import (
@@ -96,8 +94,16 @@ from gpustack.server.cache_provider_catalog import (
 )
 from gpustack.schemas.workloads import (
     Workload,
+    WorkloadCreate,
     WorkloadOwnerKindEnum,
+    WorkloadRestartPolicyEnum,
     WorkloadStateEnum,
+)
+from gpustack.schemas.cache_service_workloads import (
+    cache_service_workload_labels,
+    cache_service_workload_name,
+    workload_component,
+    workload_depends_on_address,
 )
 from gpustack.schemas.benchmark import Benchmark
 from gpustack.server.benchmark_workloads import compile_benchmark
@@ -1011,8 +1017,9 @@ def _component_replica_count(
 
 class CacheServiceController:
     """
-    Reconciles managed cache services onto their desired CacheServiceInstance
-    set and aggregates instance states back onto the service row.
+    Reconciles managed cache services onto their desired set of workload
+    rows -- one container per (component, worker) -- and aggregates their
+    states back onto the service row.
 
     The provider declaration's topology dictates the desired set: replicas
     services run exactly one instance on the user-picked worker; per_node
@@ -1092,7 +1099,7 @@ class CacheServiceController:
             await self._reconcile_cluster_services(cluster_id)
 
     async def _watch_instances(self):
-        async for event in CacheServiceInstance.subscribe(
+        async for event in Workload.subscribe(
             source="cache_service_controller_instances", replay_existing=False
         ):
             if event.type not in (
@@ -1101,14 +1108,18 @@ class CacheServiceController:
                 EventType.DELETED,
             ):
                 continue
-            instance: CacheServiceInstance = event.data
-            if instance is None or instance.cache_service_id is None:
+            instance: Workload = event.data
+            # Every kind of workload arrives here; only a cache server's is
+            # this controller's to reconcile.
+            if (
+                instance is None
+                or instance.owner_id is None
+                or instance.owner_kind != WorkloadOwnerKindEnum.CACHE_SERVICE
+            ):
                 continue
             try:
                 async with async_session() as session:
-                    service = await CacheService.one_by_id(
-                        session, instance.cache_service_id
-                    )
+                    service = await CacheService.one_by_id(session, instance.owner_id)
                     if service is None or service.deleted_at is not None:
                         continue
                     if event.type == EventType.DELETED:
@@ -1143,13 +1154,13 @@ class CacheServiceController:
                         # waiting engines, leaving RUNNING (or moving
                         # ports) invalidates attached ones.
                         if event.type == EventType.CREATED or (
-                            {"state", "port"} & changed
+                            {"state", "ports"} & changed
                         ):
                             await self._refresh_attached_snapshots(session, service)
             except Exception as e:
                 logger.error(
                     f"Failed to reconcile cache service "
-                    f"{instance.cache_service_id} on instance event: {e}"
+                    f"{instance.owner_id} on instance event: {e}"
                 )
 
     _PRE_START_STATES = frozenset(
@@ -1333,9 +1344,7 @@ class CacheServiceController:
         RUNNING with its port known; the dependency's RUNNING event
         re-runs this reconcile, so the gate converges without polling."""
         provider = await get_cache_provider(session, service.provider_name)
-        instances = await CacheServiceInstance.all_by_fields(
-            session, {"cache_service_id": service.id}
-        )
+        instances = await self._service_workloads(session, service.id)
         desired_by_component, error_message, reconcile = (
             await self._desired_component_workers(session, service, instances, provider)
         )
@@ -1358,7 +1367,7 @@ class CacheServiceController:
             session, provider, instances, config_fields
         )
 
-        surviving: List[CacheServiceInstance] = []
+        surviving: List[Workload] = []
         # How many rows of each (component, worker) pair the desired
         # layout still has room for; a replica beyond that count is
         # surplus (the count dropped, or the pool moved elsewhere).
@@ -1368,15 +1377,11 @@ class CacheServiceController:
             for worker_id, replicas in layout.items()
         }
         for instance in instances:
-            component = instance.component or ""
+            component = workload_component(instance)
             spec = provider.get_component(component) if provider else None
             stale_address = False
             if spec is not None and spec.depends_on:
-                expected = {
-                    name: address
-                    for name, address in addresses.items()
-                    if name == spec.depends_on
-                }
+                expected = addresses.get(spec.depends_on)
                 # No address to hand down reads two ways: the dependency has
                 # not come up yet — leave the dependent alone — or it was
                 # turned off, in which case an instance still carrying its
@@ -1386,8 +1391,8 @@ class CacheServiceController:
                     and provider.component_enabled(spec.depends_on, config_fields)
                 )
                 stale_address = (
-                    (instance.component_addresses or {}) != expected
-                    if expected or dependency_off
+                    workload_depends_on_address(instance) != expected
+                    if expected is not None or dependency_off
                     else False
                 )
             key = (component, instance.worker_id)
@@ -1403,7 +1408,7 @@ class CacheServiceController:
                     )
                 )
                 logger.info(
-                    f"Deleted instance {instance.id} of cache service "
+                    f"Deleted workload {instance.id} of cache service "
                     f"{service.name}: {reason}"
                 )
             else:
@@ -1412,7 +1417,7 @@ class CacheServiceController:
 
         for component, layout in desired_by_component.items():
             spec = provider.get_component(component) if provider else None
-            instance_addresses: Optional[Dict[str, str]] = None
+            depends_on_address: Optional[str] = None
             # A dependency turned off by its declared field is not something
             # to wait for: it will never run, so the dependent stands on
             # its own (stores need their master; LMCache's
@@ -1426,7 +1431,7 @@ class CacheServiceController:
                 if spec.depends_on not in addresses:
                     # Converges on the dependency's RUNNING event.
                     continue
-                instance_addresses = {spec.depends_on: addresses[spec.depends_on]}
+                depends_on_address = addresses[spec.depends_on]
             # Whatever room the surviving rows left over is what to create.
             missing = [
                 worker_id
@@ -1434,30 +1439,38 @@ class CacheServiceController:
                 for _ in range(room.get((component, worker_id), 0))
             ]
             for worker_id in missing:
-                # Same display-name convention as model instances: the
-                # parent's name (as of instance creation; a later service
-                # rename does not rename instances), the component role
-                # when there is one, and a short random suffix.
-                name_suffix = ''.join(
-                    random.choices(string.ascii_lowercase + string.digits, k=5)
-                )
-                name_role = f"-{component}" if component else ""
-                await CacheServiceInstance.create(
+                await Workload.create(
                     session,
-                    CacheServiceInstanceCreate(
-                        name=f"{service.name}{name_role}-{name_suffix}",
-                        cache_service_id=service.id,
-                        worker_id=worker_id,
+                    WorkloadCreate(
+                        # The container name, derived from the identity rather
+                        # than generated: one container per component per
+                        # worker, and computable before the row exists.
+                        name=cache_service_workload_name(
+                            service.id, component, worker_id
+                        ),
+                        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+                        owner_id=service.id,
+                        owner_principal_id=service.owner_principal_id,
                         cluster_id=service.cluster_id,
-                        component=component,
-                        component_addresses=instance_addresses,
-                        state=CacheServiceStateEnum.PENDING,
+                        worker_id=worker_id,
+                        # A cache server has no successful end, so any stop is
+                        # a fault to recover from.
+                        restart_policy=WorkloadRestartPolicyEnum.ALWAYS,
+                        labels=cache_service_workload_labels(
+                            service.id,
+                            component,
+                            worker_id,
+                            spec.depends_on if spec else None,
+                            depends_on_address,
+                        ),
+                        state=WorkloadStateEnum.PENDING,
                         spec_digest=cache_service_spec_digest(service),
                     ),
                 )
                 logger.info(
-                    f"Created instance of cache service {service.name}"
-                    f"{name_role} on worker {worker_id}"
+                    f"Created workload of cache service {service.name}"
+                    f"{f' component {component}' if component else ''} "
+                    f"on worker {worker_id}"
                 )
 
         if error_message is not None:
@@ -1471,11 +1484,28 @@ class CacheServiceController:
             return
         await self._sync_service_aggregate(session, service, provider)
 
+    @staticmethod
+    async def _service_workloads(
+        session: AsyncSession, service_id: int
+    ) -> List[Workload]:
+        """The containers of one cache service.
+
+        ``owner_kind`` is not optional: without it this would also pick up the
+        workloads of model instances and benchmarks, which share the table.
+        """
+        return await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+                "owner_id": service_id,
+            },
+        )
+
     async def _component_addresses(
         self,
         session: AsyncSession,
         provider,
-        instances: List[CacheServiceInstance],
+        instances: List[Workload],
         config_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """The address of every depended-on component that is up: the one
@@ -1496,13 +1526,18 @@ class CacheServiceController:
             # address is stamped on every dependent, and a different pick
             # between two passes reads as the dependency having moved — which
             # deletes and recreates them all while the pool is still up.
+            # The port a component is addressed by is the one its
+            # declaration names for that, read out of the row's port map --
+            # the row records every port it allocated, by the names the
+            # component gave them.
+            address_port = provider.address_port_name(name)
             running = sorted(
                 (
                     candidate
                     for candidate in instances
-                    if (candidate.component or "") == name
-                    and candidate.state == CacheServiceStateEnum.RUNNING
-                    and candidate.port
+                    if workload_component(candidate) == name
+                    and candidate.state == WorkloadStateEnum.RUNNING
+                    and (candidate.ports or {}).get(address_port)
                 ),
                 key=lambda candidate: (candidate.worker_id or 0, candidate.id or 0),
             )
@@ -1519,14 +1554,14 @@ class CacheServiceController:
             worker = await Worker.one_by_id(session, instance.worker_id)
             if worker is None or not worker.ip:
                 continue
-            addresses[name] = f"{worker.ip}:{instance.port}"
+            addresses[name] = f"{worker.ip}:{(instance.ports or {})[address_port]}"
         return addresses
 
     async def _desired_component_workers(
         self,
         session: AsyncSession,
         service: CacheService,
-        instances: List[CacheServiceInstance],
+        instances: List[Workload],
         provider: Optional[CacheProvider] = None,
     ) -> Tuple[Dict[str, Dict[int, int]], Optional[str], bool]:
         """How many instances each provider component should have on each
@@ -1610,7 +1645,7 @@ class CacheServiceController:
 
             current: Dict[int, int] = {}
             for instance in instances:
-                if (instance.component or "") != component:
+                if workload_component(instance) != component:
                     continue
                 if instance.worker_id in matching_ids:
                     current[instance.worker_id] = current.get(instance.worker_id, 0) + 1
@@ -1644,9 +1679,7 @@ class CacheServiceController:
         ``provider`` is the declaration the caller already resolved; reading
         the catalog is a query, and a reconcile pass would otherwise repeat it
         for the same service."""
-        instances = await CacheServiceInstance.all_by_fields(
-            session, {"cache_service_id": service.id}
-        )
+        instances = await self._service_workloads(session, service.id)
 
         if provider is None:
             provider = await get_cache_provider(session, service.provider_name)
@@ -1670,20 +1703,18 @@ class CacheServiceController:
             instances = [
                 instance
                 for instance in instances
-                if (instance.component or "") in enabled
+                if workload_component(instance) in enabled
             ]
 
         total = len(instances)
         running = sum(
-            1
-            for instance in instances
-            if instance.state == CacheServiceStateEnum.RUNNING
+            1 for instance in instances if instance.state == WorkloadStateEnum.RUNNING
         )
         starting = any(
-            instance.state == CacheServiceStateEnum.STARTING for instance in instances
+            instance.state == WorkloadStateEnum.STARTING for instance in instances
         )
         pending = any(
-            instance.state == CacheServiceStateEnum.PENDING for instance in instances
+            instance.state == WorkloadStateEnum.PENDING for instance in instances
         )
         if components:
             # Multi-component service: available means every component
@@ -1693,9 +1724,9 @@ class CacheServiceController:
             # on a dependency) reads as pending, not as a fault.
             tallies = {name: [0, 0] for name in components}
             for instance in instances:
-                tally = tallies[instance.component or ""]
+                tally = tallies[workload_component(instance)]
                 tally[1] += 1
-                if instance.state == CacheServiceStateEnum.RUNNING:
+                if instance.state == WorkloadStateEnum.RUNNING:
                     tally[0] += 1
             breakdown = " · ".join(
                 f"{name} {tally[0]}/{tally[1]}" for name, tally in tallies.items()

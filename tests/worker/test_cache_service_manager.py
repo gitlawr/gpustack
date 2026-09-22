@@ -15,12 +15,19 @@ from gpustack.schemas.cache_providers import (
     CacheProviderL2Field,
     CacheProviderVersionConfig,
 )
+from gpustack.schemas.cache_service_workloads import (
+    cache_service_workload_labels,
+    cache_service_workload_name,
+)
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.schemas.cache_services import (
     CacheService,
     CacheServiceConfig,
-    CacheServiceInstance,
     CacheServiceL2Storage,
-    CacheServiceStateEnum,
 )
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.cache_provider_manager import CacheProviderManager
@@ -33,7 +40,7 @@ from gpustack_runtime.deployer import WorkloadStatusStateEnum
 
 def _build_manager(worker_id: int = 1):
     clientset = MagicMock()
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[])
     clientset.cache_services.get.return_value = _new_cache_service()
     cfg = SimpleNamespace(
         service_port_range="40000-41000",
@@ -68,7 +75,7 @@ def _new_cache_service(**overrides) -> CacheService:
         provider_version=None,
         cluster_id=1,
         worker_id=1,
-        state=CacheServiceStateEnum.PENDING,
+        state=WorkloadStateEnum.PENDING,
         config=CacheServiceConfig(
             fields={"ram_size": 8, "chunk_size": 256}, env={"FOO": "bar"}
         ),
@@ -77,20 +84,38 @@ def _new_cache_service(**overrides) -> CacheService:
     return CacheService(**fields)
 
 
-def _new_instance(**overrides) -> CacheServiceInstance:
+def _new_instance(component="", **overrides) -> Workload:
+    """A cache service's container as a workload row.
+
+    Labelled through the real helper: which component a row runs is read back
+    off these labels, so a stand-in would be testing the test.
+    """
+    worker_id = overrides.pop("worker_id", 1)
+    service_id = overrides.pop("cache_service_id", overrides.pop("owner_id", 5))
+    depends_on = overrides.pop("depends_on", None)
+    depends_on_address = overrides.pop("depends_on_address", None)
+    # Written as the map the launch templates read; the row carries the one
+    # dependency it has, by name and address.
+    stamped = overrides.pop("component_addresses", None) or {}
+    if stamped:
+        ((depends_on, depends_on_address),) = stamped.items()
     fields = dict(
         id=11,
-        name="mooncake-svc-a1b2c",
-        cache_service_id=5,
-        worker_id=1,
+        name=cache_service_workload_name(service_id, component, worker_id),
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=service_id,
+        worker_id=worker_id,
         cluster_id=1,
-        state=CacheServiceStateEnum.PENDING,
+        labels=cache_service_workload_labels(
+            service_id, component, worker_id, depends_on, depends_on_address
+        ),
+        state=WorkloadStateEnum.PENDING,
     )
     fields.update(overrides)
-    return CacheServiceInstance(**fields)
+    return Workload(**fields)
 
 
-INSTANCE_WORKLOAD_NAME = "cache-svc-5-i11"
+INSTANCE_WORKLOAD_NAME = cache_service_workload_name(5, "", 1)
 
 
 def _new_provider(**overrides) -> CacheProvider:
@@ -210,7 +235,7 @@ def test_event_for_other_worker_is_ignored():
 
 def test_pending_event_triggers_start():
     manager, _ = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.PENDING)
+    instance = _new_instance(state=WorkloadStateEnum.PENDING)
 
     with patch.object(manager, "_start_cache_service_instance") as start:
         manager._handle_cache_service_instance_event(
@@ -223,7 +248,7 @@ def test_pending_event_triggers_start():
 
 def test_non_pending_event_does_not_start():
     manager, _ = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.RUNNING)
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING)
 
     with patch.object(manager, "_start_cache_service_instance") as start:
         manager._handle_cache_service_instance_event(
@@ -235,7 +260,7 @@ def test_non_pending_event_does_not_start():
 
 def test_deleted_event_triggers_stop():
     manager, _ = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.RUNNING)
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING)
 
     with patch.object(manager, "_stop_cache_service_instance") as stop:
         manager._handle_cache_service_instance_event(
@@ -369,11 +394,12 @@ def test_start_instance_creates_workload_and_patches_starting():
     # dropped; service env merged on top.
     assert envs == {"RAM_SIZE": "8", "FOO": "bar"}
 
+    # The address port lives in the port map under the well-known name as
+    # well as its component's, rather than in a scalar column of its own.
     update.assert_called_once_with(
         instance.id,
-        state=CacheServiceStateEnum.STARTING,
+        state=WorkloadStateEnum.STARTING,
         ports={"port": 40001, "metrics": 40002},
-        port=40001,
         state_message="",
     )
     assert manager._assigned_ports[instance.id] == (40001, 40002)
@@ -460,7 +486,7 @@ def test_start_instance_tolerates_missing_stale_workload():
         manager._start_cache_service_instance(instance)
 
     create.assert_called_once()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.STARTING
+    assert update.call_args[1]["state"] == WorkloadStateEnum.STARTING
 
 
 def test_start_instance_drops_flags_with_empty_rendered_values():
@@ -788,7 +814,7 @@ def test_start_instance_fails_fast_on_unsupported_accelerator():
         create, update = _run_start(manager, clientset, cache_service, provider)
 
     create.assert_not_called()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     # Named down to the generation, which is what the images are keyed by.
     # This device reports no SoC, so it takes the generation the inference
     # path defaults such a node to rather than going unresolved.
@@ -889,7 +915,7 @@ def test_start_instance_custom_version_uses_service_image():
     ]
     envs = {e.name: e.value for e in container.envs}
     assert envs == {"CHUNK_SIZE": "256", "RAM_SIZE": "8"}
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.STARTING
+    assert update.call_args[1]["state"] == WorkloadStateEnum.STARTING
 
 
 def test_start_instance_custom_version_applies_registry_override():
@@ -922,7 +948,7 @@ def test_start_instance_custom_version_missing_image_sets_error():
     )
 
     create.assert_not_called()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "config.image is required" in update.call_args[1]["state_message"]
 
 
@@ -940,7 +966,7 @@ def test_start_instance_custom_version_without_provider_support_sets_error():
     create, update = _run_start(manager, clientset, cache_service, _new_provider())
 
     create.assert_not_called()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "does not allow the custom version" in update.call_args[1]["state_message"]
 
 
@@ -960,7 +986,7 @@ def test_start_instance_custom_version_without_default_version_sets_error():
     create, update = _run_start(manager, clientset, cache_service, provider)
 
     create.assert_not_called()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "default version" in update.call_args[1]["state_message"]
 
 
@@ -996,7 +1022,7 @@ def test_start_instance_custom_version_without_declared_versions():
         "--ram",
         "8",
     ]
-    assert update.call_args[1]["state"] != CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] != WorkloadStateEnum.ERROR
 
 
 def test_start_instance_renders_fs_l2_adapter():
@@ -1022,7 +1048,7 @@ def test_start_instance_renders_fs_l2_adapter():
         "--l2-adapter",
         '{"type":"fs","base_path":"/data/l2","use_odirect":true}',
     ]
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.STARTING
+    assert update.call_args[1]["state"] == WorkloadStateEnum.STARTING
 
 
 def test_start_instance_resp_l2_credentials_go_to_env():
@@ -1108,7 +1134,7 @@ def test_start_instance_xdfs_l2_backend_omits_adapter_flag():
 
     command = create.call_args[0][0].containers[0].execution.command
     assert "--l2-adapter" not in command
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.STARTING
+    assert update.call_args[1]["state"] == WorkloadStateEnum.STARTING
 
     cache_service.config.l2_storages[0].adapter_flag_enabled = True
     cache_service.config.l2_storages[0].params = {"tenant_id": "nixl"}
@@ -1176,7 +1202,7 @@ def test_start_instance_allows_repeated_l2_backend_without_env_fields():
         "--l2-adapter",
         '{"type":"fs","base_path":"/data/hdd"}',
     ]
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.STARTING
+    assert update.call_args[1]["state"] == WorkloadStateEnum.STARTING
 
 
 def test_start_instance_l2_env_collision_sets_error():
@@ -1202,7 +1228,7 @@ def test_start_instance_l2_env_collision_sets_error():
     create, update = _run_start(manager, clientset, cache_service, _l2_provider())
 
     create.assert_not_called()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "LMCACHE_RESP_PASSWORD" in update.call_args[1]["state_message"]
 
 
@@ -1251,7 +1277,7 @@ def test_start_instance_unknown_l2_backend_sets_error():
     create, update = _run_start(manager, clientset, cache_service, _l2_provider())
 
     create.assert_not_called()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "'s3'" in update.call_args[1]["state_message"]
 
 
@@ -1278,7 +1304,7 @@ def test_start_instance_l2_without_provider_support_sets_error():
     create, update = _run_start(manager, clientset, cache_service, provider)
 
     create.assert_not_called()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "does not support L2 storage" in update.call_args[1]["state_message"]
 
 
@@ -1298,7 +1324,7 @@ def test_start_instance_parent_service_missing_sets_error():
     create.assert_not_called()
     update.assert_called_once()
     assert update.call_args[0][0] == instance.id
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "not found" in update.call_args[1]["state_message"]
 
 
@@ -1319,7 +1345,7 @@ def test_start_instance_unknown_provider_sets_error():
     create.assert_not_called()
     update.assert_called_once_with(
         instance.id,
-        state=CacheServiceStateEnum.ERROR,
+        state=WorkloadStateEnum.ERROR,
         state_message="Unknown cache provider: nonexistent",
     )
 
@@ -1330,7 +1356,7 @@ def test_health_probe_abstains_when_the_catalog_cannot_be_read():
     called unreachable for want of a catalog this worker could not fetch — a
     connectivity problem reported as a dead cache server."""
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.RUNNING)
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING)
     manager._provider_catalog.lookup.return_value = (None, False)
 
     assert manager._probe_ready(instance, "mooncake") is None
@@ -1388,7 +1414,7 @@ def test_start_instance_unknown_version_sets_error():
 
     create.assert_not_called()
     update.assert_called_once()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "v9" in update.call_args[1]["state_message"]
 
 
@@ -1425,7 +1451,7 @@ def test_start_instance_failure_sets_error_and_releases_port():
 
     update.assert_called_once_with(
         instance.id,
-        state=CacheServiceStateEnum.ERROR,
+        state=WorkloadStateEnum.ERROR,
         state_message="boom",
     )
     assert instance.id not in manager._assigned_ports
@@ -1463,10 +1489,10 @@ def test_start_instance_reports_a_dropped_state_writeback(caplog):
 
 def test_update_instance_reports_failed_writeback_without_raising():
     manager, clientset = _build_manager(worker_id=1)
-    clientset.cache_service_instances.get.side_effect = RuntimeError("boom")
+    clientset.workloads.get.side_effect = RuntimeError("boom")
 
     assert (
-        manager._update_cache_service_instance(11, state=CacheServiceStateEnum.RUNNING)
+        manager._update_cache_service_instance(11, state=WorkloadStateEnum.RUNNING)
         is False
     )
 
@@ -1477,14 +1503,12 @@ def test_allocate_ports_excludes_ports_of_sibling_instances():
     sibling = _new_instance(
         id=13,
         cache_service_id=7,
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         # Every port a sibling holds is held just as firmly, whatever the
         # component called it.
         ports={"port": 40001, "metrics": 40011, "p2p": 40021},
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[sibling]
-    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=[sibling])
 
     # get_free_port mutates the shared unavailable-ports set, so snapshot
     # the set contents at each call.
@@ -1504,7 +1528,7 @@ def test_allocate_ports_excludes_ports_of_sibling_instances():
     # Every port of the sibling is excluded; the metrics-port pick also
     # excludes the service port picked just before it. Siblings are listed
     # for this worker only.
-    assert clientset.cache_service_instances.list.call_args[1]["params"] == {
+    assert clientset.workloads.list.call_args[1]["params"] == {
         "worker_id": 1,
         "page": -1,
     }
@@ -1520,7 +1544,7 @@ def test_allocate_ports_serves_the_names_a_component_declares():
     the picks after it, and all recorded for reuse."""
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance(id=12, cache_service_id=6)
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[])
     picks = iter([40002, 40003, 40004])
     seen = []
 
@@ -1548,7 +1572,7 @@ def test_allocate_ports_reuses_a_recorded_declared_port():
         cache_service_id=6,
         ports={"port": 40001, "metrics": 40002, "p2p": 40003},
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[])
 
     with patch(
         "gpustack.worker.cache_service_manager.network.is_port_available",
@@ -1567,7 +1591,7 @@ def test_allocate_ports_keeps_the_held_ones_when_a_port_is_added():
     instance = _new_instance(
         id=12, cache_service_id=6, ports={"port": 40001, "metrics": 40002}
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[])
 
     with (
         patch(
@@ -1591,7 +1615,7 @@ def test_allocate_ports_replaces_only_the_one_it_cannot_keep():
     instance = _new_instance(
         id=12, cache_service_id=6, ports={"port": 40001, "metrics": 40002}
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[])
 
     with (
         patch(
@@ -1615,12 +1639,8 @@ def test_allocate_ports_replaces_only_the_one_it_cannot_keep():
 
 def test_sync_workload_failed_restarts_with_incremented_count():
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(
-        state=CacheServiceStateEnum.STARTING, ports={"port": 40001}
-    )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    instance = _new_instance(state=WorkloadStateEnum.STARTING, ports={"port": 40001})
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1635,7 +1655,7 @@ def test_sync_workload_failed_restarts_with_incremented_count():
     delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME)
     update.assert_called_once_with(
         instance.id,
-        state=CacheServiceStateEnum.PENDING,
+        state=WorkloadStateEnum.PENDING,
         restart_count=1,
         last_restart_time=ANY,
         state_message=(
@@ -1647,10 +1667,8 @@ def test_sync_workload_failed_restarts_with_incremented_count():
 
 def test_sync_workload_failed_with_restart_on_error_disabled_parks_in_error():
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.RUNNING, port=40001)
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING, port=40001)
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
     # restart_on_error lives on the parent service and applies to all of
     # its instances.
     clientset.cache_services.get.return_value = _new_cache_service(
@@ -1672,7 +1690,7 @@ def test_sync_workload_failed_with_restart_on_error_disabled_parks_in_error():
     delete.assert_not_called()
     update.assert_called_once_with(
         instance.id,
-        state=CacheServiceStateEnum.ERROR,
+        state=WorkloadStateEnum.ERROR,
         state_message=(
             "Cache server exited. Automatic restart is disabled "
             "for this service; restart it manually."
@@ -1683,10 +1701,8 @@ def test_sync_workload_failed_with_restart_on_error_disabled_parks_in_error():
 
 def test_sync_workload_missing_restarts_and_tolerates_absent_workload():
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.RUNNING, port=40001)
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING, port=40001)
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1702,7 +1718,7 @@ def test_sync_workload_missing_restarts_and_tolerates_absent_workload():
         manager.sync_cache_service_instances_state()
 
     update.assert_called_once()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.PENDING
+    assert update.call_args[1]["state"] == WorkloadStateEnum.PENDING
     assert update.call_args[1]["restart_count"] == 1
 
 
@@ -1711,14 +1727,12 @@ def test_sync_crash_within_backoff_window_is_deferred():
     # restart_count=1 -> backoff delay of 60 seconds; the last restart was
     # only 5 seconds ago, so this round must not touch the instance.
     instance = _new_instance(
-        state=CacheServiceStateEnum.STARTING,
+        state=WorkloadStateEnum.STARTING,
         ports={"port": 40001},
         restart_count=1,
         last_restart_time=datetime.now(timezone.utc) - timedelta(seconds=5),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1739,14 +1753,12 @@ def test_sync_crash_after_backoff_window_restarts():
     # restart_count=1 -> backoff delay of 60 seconds; 120 seconds have
     # passed, so the restart proceeds with the incremented attempt.
     instance = _new_instance(
-        state=CacheServiceStateEnum.STARTING,
+        state=WorkloadStateEnum.STARTING,
         ports={"port": 40001},
         restart_count=1,
         last_restart_time=datetime.now(timezone.utc) - timedelta(seconds=120),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1759,21 +1771,19 @@ def test_sync_crash_after_backoff_window_restarts():
         manager.sync_cache_service_instances_state()
 
     update.assert_called_once()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.PENDING
+    assert update.call_args[1]["state"] == WorkloadStateEnum.PENDING
     assert update.call_args[1]["restart_count"] == 2
 
 
 def test_sync_crash_after_max_restarts_parks_in_error():
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance(
-        state=CacheServiceStateEnum.STARTING,
+        state=WorkloadStateEnum.STARTING,
         ports={"port": 40001},
         restart_count=MAX_CONSECUTIVE_RESTARTS,
         last_restart_time=datetime.now(timezone.utc) - timedelta(hours=1),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1787,22 +1797,20 @@ def test_sync_crash_after_max_restarts_parks_in_error():
 
     delete.assert_not_called()
     update.assert_called_once()
-    assert update.call_args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert update.call_args[1]["state"] == WorkloadStateEnum.ERROR
     assert "logs" in update.call_args[1]["state_message"]
 
 
 def test_sync_ready_probe_resets_restart_count_after_stable_window():
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance(
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         ports={"port": 40001},
         healthy=True,
         restart_count=3,
         last_restart_time=datetime.now(timezone.utc) - timedelta(minutes=11),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1827,15 +1835,13 @@ def test_sync_ready_probe_keeps_restart_count_within_stable_window():
     an instance that just came back must not have its count cleared yet."""
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance(
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         ports={"port": 40001},
         healthy=True,
         restart_count=3,
         last_restart_time=datetime.now(timezone.utc) - timedelta(minutes=2),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1857,12 +1863,8 @@ def test_sync_ready_probe_keeps_restart_count_within_stable_window():
 
 def test_sync_ready_tcp_probe_marks_running_healthy():
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(
-        state=CacheServiceStateEnum.STARTING, ports={"port": 40001}
-    )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    instance = _new_instance(state=WorkloadStateEnum.STARTING, ports={"port": 40001})
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1884,7 +1886,7 @@ def test_sync_ready_tcp_probe_marks_running_healthy():
     connect.assert_called_once_with(("127.0.0.1", 40001), timeout=ANY)
     update.assert_called_once_with(
         instance.id,
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         healthy=True,
         last_check_at=ANY,
         state_message="",
@@ -1893,12 +1895,8 @@ def test_sync_ready_tcp_probe_marks_running_healthy():
 
 def test_sync_probe_failure_after_running_marks_unreachable():
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(
-        state=CacheServiceStateEnum.RUNNING, port=40001, healthy=True
-    )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING, port=40001, healthy=True)
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1920,7 +1918,7 @@ def test_sync_probe_failure_after_running_marks_unreachable():
 
     update.assert_called_once_with(
         instance.id,
-        state=CacheServiceStateEnum.UNREACHABLE,
+        state=WorkloadStateEnum.UNREACHABLE,
         healthy=False,
         last_check_at=ANY,
     )
@@ -1928,12 +1926,8 @@ def test_sync_probe_failure_after_running_marks_unreachable():
 
 def test_sync_probe_failure_while_starting_is_left_alone():
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(
-        state=CacheServiceStateEnum.STARTING, ports={"port": 40001}
-    )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    instance = _new_instance(state=WorkloadStateEnum.STARTING, ports={"port": 40001})
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
 
     with (
         patch(
@@ -1959,10 +1953,10 @@ def test_sync_probe_failure_while_starting_is_left_alone():
 def test_sync_skips_instances_of_other_workers_and_states():
     manager, clientset = _build_manager(worker_id=1)
     other_worker = _new_instance(
-        id=18, state=CacheServiceStateEnum.RUNNING, worker_id=2, port=40001
+        id=18, state=WorkloadStateEnum.RUNNING, worker_id=2, port=40001
     )
-    parked = _new_instance(id=19, state=CacheServiceStateEnum.ERROR)
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
+    parked = _new_instance(id=19, state=WorkloadStateEnum.ERROR)
+    clientset.workloads.list.return_value = SimpleNamespace(
         items=[other_worker, parked]
     )
 
@@ -1984,10 +1978,10 @@ def test_sync_starts_instance_stuck_in_pending():
     next to a container nothing points at."""
     manager, clientset = _build_manager(worker_id=1)
     stale = _new_instance(
-        state=CacheServiceStateEnum.PENDING,
+        state=WorkloadStateEnum.PENDING,
         updated_at=datetime.now(timezone.utc) - timedelta(seconds=90),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[stale])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[stale])
 
     with patch.object(manager, "_start_cache_service_instance") as start:
         manager.sync_cache_service_instances_state()
@@ -1999,10 +1993,10 @@ def test_sync_starts_instance_stuck_in_pending():
 def test_sync_leaves_freshly_pending_instance_to_the_event_path():
     manager, clientset = _build_manager(worker_id=1)
     fresh = _new_instance(
-        state=CacheServiceStateEnum.PENDING,
+        state=WorkloadStateEnum.PENDING,
         updated_at=datetime.now(timezone.utc),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[fresh])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[fresh])
 
     with patch.object(manager, "_start_cache_service_instance") as start:
         manager.sync_cache_service_instances_state()
@@ -2016,10 +2010,10 @@ def test_sync_retries_a_stuck_pending_instance_on_the_grace_cadence():
     sync pass."""
     manager, clientset = _build_manager(worker_id=1)
     stale = _new_instance(
-        state=CacheServiceStateEnum.PENDING,
+        state=WorkloadStateEnum.PENDING,
         updated_at=datetime.now(timezone.utc) - timedelta(seconds=90),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[stale])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[stale])
 
     # The stand-in clears the in-flight claim like the real start's finally
     # does, so the second pass is held back by the retry cadence alone.
@@ -2039,10 +2033,10 @@ def test_sync_does_not_duplicate_a_start_in_flight():
     for minutes; the sync pass must not launch a second one."""
     manager, clientset = _build_manager(worker_id=1)
     stale = _new_instance(
-        state=CacheServiceStateEnum.PENDING,
+        state=WorkloadStateEnum.PENDING,
         updated_at=datetime.now(timezone.utc) - timedelta(seconds=90),
     )
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[stale])
+    clientset.workloads.list.return_value = SimpleNamespace(items=[stale])
     manager._starting.add(stale.id)
 
     with patch.object(manager, "_start_cache_service_instance") as start:
@@ -2056,12 +2050,10 @@ def test_sync_fetches_shared_parent_service_once_per_pass():
     sync pass instead of one API call each."""
     manager, clientset = _build_manager(worker_id=1)
     instances = [
-        _new_instance(id=11, state=CacheServiceStateEnum.RUNNING, port=40001),
-        _new_instance(id=12, state=CacheServiceStateEnum.RUNNING, port=40003),
+        _new_instance(id=11, state=WorkloadStateEnum.RUNNING, port=40001),
+        _new_instance(id=12, state=WorkloadStateEnum.RUNNING, port=40003),
     ]
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=instances
-    )
+    clientset.workloads.list.return_value = SimpleNamespace(items=instances)
 
     with (
         patch(
@@ -2083,10 +2075,8 @@ def test_sync_fetches_shared_parent_service_once_per_pass():
 
 def test_sync_skips_instance_when_parent_service_missing():
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.RUNNING, port=40001)
-    clientset.cache_service_instances.list.return_value = SimpleNamespace(
-        items=[instance]
-    )
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING, port=40001)
+    clientset.workloads.list.return_value = SimpleNamespace(items=[instance])
     clientset.cache_services.get.side_effect = NotFoundException(
         message="Cache service not found"
     )
@@ -2108,7 +2098,7 @@ def test_sync_skips_instance_when_parent_service_missing():
 
 def test_stop_instance_deletes_workload_and_frees_port():
     manager, _ = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.RUNNING)
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING)
     manager._assigned_ports[instance.id] = (40001, 40002)
 
     with patch("gpustack.worker.cache_service_manager.delete_workload") as delete:
@@ -2120,7 +2110,7 @@ def test_stop_instance_deletes_workload_and_frees_port():
 
 def test_stop_instance_tolerates_missing_workload():
     manager, _ = _build_manager(worker_id=1)
-    instance = _new_instance(state=CacheServiceStateEnum.RUNNING)
+    instance = _new_instance(state=WorkloadStateEnum.RUNNING)
 
     with patch(
         "gpustack.worker.cache_service_manager.delete_workload",

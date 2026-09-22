@@ -29,14 +29,18 @@ from gpustack.schemas.cache_providers import (
     localized_default,
     resolved_field_values,
 )
+from gpustack.schemas.cache_providers import DEFAULT_PORT_NAME
+from gpustack.schemas.cache_service_workloads import (
+    instance_public_from_workload,
+    workload_component,
+)
+from gpustack.schemas.workloads import Workload, WorkloadOwnerKindEnum
 from gpustack.schemas.cache_services import (
     CacheServiceAttachedMetrics,
     CacheServiceMetricsPublic,
     CacheService,
     CacheServiceBase,
     CacheServiceCreate,
-    CacheServiceInstance,
-    CacheServiceInstancePublic,
     CacheServiceInstancesPublic,
     CacheServiceL2Storage,
     CacheServiceModelSummary,
@@ -397,9 +401,13 @@ async def _fetch_cache_service(session, ctx, id: int) -> CacheService:
 
 async def _fetch_service_instance(
     session, cache_service: CacheService, instance_id: int
-) -> CacheServiceInstance:
-    instance = await CacheServiceInstance.one_by_id(session, instance_id)
-    if instance is None or instance.cache_service_id != cache_service.id:
+) -> Workload:
+    instance = await Workload.one_by_id(session, instance_id)
+    if (
+        instance is None
+        or instance.owner_kind != WorkloadOwnerKindEnum.CACHE_SERVICE
+        or instance.owner_id != cache_service.id
+    ):
         raise NotFoundException(message="Cache service instance not found")
     return instance
 
@@ -439,12 +447,27 @@ async def get_cache_service_instances_of_service(
         ctx, cache_service, not_found_message="Cache service not found"
     )
 
-    instances = await CacheServiceInstance.all_by_fields(
-        session, {"cache_service_id": cache_service.id}
+    instances = await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+            "owner_id": cache_service.id,
+        },
     )
     instances = sorted(instances, key=lambda instance: instance.worker_id)
+    # Which of a row's ports it is addressed by is the provider's to say, and
+    # differs per component, so the catalog is read once for the whole list.
+    provider = await get_cache_provider(session, cache_service.provider_name)
     items = [
-        CacheServiceInstancePublic.model_validate(instance) for instance in instances
+        instance_public_from_workload(
+            instance,
+            (
+                provider.address_port_name(workload_component(instance))
+                if provider
+                else DEFAULT_PORT_NAME
+            ),
+        )
+        for instance in instances
     ]
     return CacheServiceInstancesPublic(
         items=items,
@@ -459,7 +482,7 @@ async def get_cache_service_instances_of_service(
 
 async def _proxy_instance_logs(
     request: Request,
-    instance: CacheServiceInstance,
+    instance: Workload,
     worker: Worker,
     log_options,
 ):
@@ -469,7 +492,7 @@ async def _proxy_instance_logs(
     params = {
         "tail": log_options.tail,
         "follow": log_options.follow,
-        "cache_service_id": instance.cache_service_id,
+        "cache_service_id": instance.owner_id,
     }
 
     if log_options.follow:
@@ -511,7 +534,7 @@ async def _proxy_instance_logs(
     )
 
 
-async def _fetch_instance_log_worker(session, instance: CacheServiceInstance) -> Worker:
+async def _fetch_instance_log_worker(session, instance: Workload) -> Worker:
     worker = await Worker.one_by_id(session, instance.worker_id)
     if not worker:
         raise NotFoundException(message="Cache service instance's worker not found")
@@ -533,8 +556,12 @@ async def get_cache_service_logs(
     async with async_session() as session:
         cache_service = await _fetch_cache_service(session, ctx, id)
 
-        instances = await CacheServiceInstance.all_by_fields(
-            session, {"cache_service_id": cache_service.id}
+        instances = await Workload.all_by_fields(
+            session,
+            {
+                "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+                "owner_id": cache_service.id,
+            },
         )
         if not instances:
             raise BadRequestException(message="Cache service has no instances yet")

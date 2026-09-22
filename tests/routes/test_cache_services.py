@@ -35,6 +35,12 @@ from gpustack.schemas.cache_providers import (
     CacheProviderL2Field,
     CacheProviderVersionConfig,
 )
+from gpustack.schemas.cache_providers import DEFAULT_PORT_NAME
+from gpustack.schemas.cache_service_workloads import (
+    cache_service_workload_labels,
+    cache_service_workload_name,
+)
+from gpustack.schemas.workloads import WorkloadOwnerKindEnum, WorkloadStateEnum
 from gpustack.schemas.cache_services import (
     CacheServiceConfig,
     CacheServiceCreate,
@@ -1381,13 +1387,29 @@ async def test_update_accepts_valid_l2_storage(monkeypatch):
 # ---- instance delete ----
 
 
-def _service_instance(**overrides):
+def _service_instance(component="", **overrides):
+    """A cache service's container as a workload row."""
+    worker_id = overrides.pop("worker_id", 5)
+    service_id = overrides.pop("cache_service_id", overrides.pop("owner_id", 9))
+    port = overrides.pop("port", None)
     fields = dict(
         id=21,
-        cache_service_id=9,
-        worker_id=5,
+        name=cache_service_workload_name(service_id, component, worker_id),
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=service_id,
+        worker_id=worker_id,
         cluster_id=1,
-        state=CacheServiceStateEnum.RUNNING,
+        labels=cache_service_workload_labels(service_id, component, worker_id),
+        ports={DEFAULT_PORT_NAME: port} if port else None,
+        state=WorkloadStateEnum.RUNNING,
+        state_message=None,
+        healthy=None,
+        last_check_at=None,
+        restart_count=0,
+        last_restart_time=None,
+        spec_digest=None,
+        created_at=None,
+        updated_at=None,
         update=AsyncMock(),
         delete=AsyncMock(),
     )
@@ -1397,7 +1419,7 @@ def _service_instance(**overrides):
 
 def _patch_service_instances(monkeypatch, instances):
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "all_by_fields",
         AsyncMock(return_value=instances),
     )
@@ -1412,7 +1434,7 @@ async def test_delete_instance_leaves_siblings_untouched(monkeypatch):
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "one_by_id",
         AsyncMock(return_value=target),
     )
@@ -1459,7 +1481,7 @@ async def test_delete_instance_of_other_service_is_not_found(monkeypatch):
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "one_by_id",
         AsyncMock(return_value=foreign),
     )
@@ -1579,7 +1601,7 @@ async def test_instance_logs_proxy_to_instance_worker(monkeypatch):
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "one_by_id",
         AsyncMock(return_value=instance),
     )
@@ -1619,7 +1641,7 @@ async def test_instance_logs_of_other_service_is_not_found(monkeypatch):
         cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
     )
     monkeypatch.setattr(
-        cache_services_route.CacheServiceInstance,
+        cache_services_route.Workload,
         "one_by_id",
         AsyncMock(return_value=foreign),
     )
@@ -1647,28 +1669,22 @@ async def test_service_instances_listed_ordered_by_worker(monkeypatch):
 
     now = datetime(2026, 7, 1)
     rows = [
-        dict(
+        _service_instance(
             id=22,
-            name="svc-f6g7h",
-            cache_service_id=9,
             worker_id=6,
-            cluster_id=1,
-            state=CacheServiceStateEnum.RUNNING,
+            state=WorkloadStateEnum.RUNNING,
             created_at=now,
             updated_at=now,
         ),
-        dict(
+        _service_instance(
             id=21,
-            name="svc-a1b2c",
-            cache_service_id=9,
             worker_id=5,
-            cluster_id=1,
-            state=CacheServiceStateEnum.PENDING,
+            state=WorkloadStateEnum.PENDING,
             created_at=now,
             updated_at=now,
         ),
     ]
-    _patch_service_instances(monkeypatch, [SimpleNamespace(**row) for row in rows])
+    _patch_service_instances(monkeypatch, rows)
 
     response = await cache_services_route.get_cache_service_instances_of_service(
         session=MagicMock(), ctx=_user_ctx(), id=9

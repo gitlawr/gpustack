@@ -9,11 +9,20 @@ from gpustack.schemas.cache_providers import (
     CacheProvider,
     CacheProviderHealthCheck,
 )
+from gpustack.schemas.cache_providers import DEFAULT_PORT_NAME
+from gpustack.schemas.cache_service_workloads import (
+    cache_service_workload_labels,
+    cache_service_workload_name,
+)
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.schemas.cache_services import (
     CacheService,
     CacheServiceConfig,
     CacheServiceEndpoint,
-    CacheServiceInstance,
     CacheServiceStateEnum,
 )
 from gpustack.schemas.models import ExtendedKVCacheConfig, KVCacheModeEnum
@@ -76,20 +85,28 @@ def managed_cache_service(**overrides):
 
 
 def cache_service_instance(**overrides):
+    """A cache service's container as a workload row.
+
+    LMCache's cache servers are its "server" component; engines attach to
+    that one, and the port they attach on is the one its declaration names.
+    """
+    worker_id = overrides.pop("worker_id", 2)
+    service_id = overrides.pop("cache_service_id", overrides.pop("owner_id", 5))
+    component = overrides.pop("component", "server")
+    port = overrides.pop("port", 9000)
     fields = dict(
         id=11,
-        name="lmcache-svc-a1b2c",
-        cache_service_id=5,
-        worker_id=2,
+        name=cache_service_workload_name(service_id, component, worker_id),
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=service_id,
+        worker_id=worker_id,
         cluster_id=1,
-        port=9000,
-        # LMCache's cache servers are its "server" component; engines
-        # attach to that one.
-        component="server",
-        state=CacheServiceStateEnum.RUNNING,
+        ports={DEFAULT_PORT_NAME: port} if port else None,
+        labels=cache_service_workload_labels(service_id, component, worker_id),
+        state=WorkloadStateEnum.RUNNING,
     )
     fields.update(overrides)
-    return CacheServiceInstance(**fields)
+    return Workload(**fields)
 
 
 @contextmanager
@@ -112,7 +129,7 @@ def patch_lookups(service, worker=..., instances=...):
             AsyncMock(return_value=worker),
         ),
         patch(
-            "gpustack.server.cache_services.CacheServiceInstance.all_by_fields",
+            "gpustack.server.cache_services.Workload.all_by_fields",
             AsyncMock(return_value=instances),
         ),
     ):
@@ -238,7 +255,7 @@ async def test_resolve_prefers_instance_on_model_worker():
             AsyncMock(side_effect=lambda session, id: workers.get(id)),
         ),
         patch(
-            "gpustack.server.cache_services.CacheServiceInstance.all_by_fields",
+            "gpustack.server.cache_services.Workload.all_by_fields",
             AsyncMock(return_value=instances),
         ),
     ):

@@ -14,9 +14,14 @@ from gpustack.config.config import Config
 from gpustack.exporter.bus_metrics import BusMetricsCollector
 from gpustack.logging import setup_logging
 from gpustack.schemas.cache_providers import DEFAULT_METRICS_PORT_NAME
+from gpustack.schemas.cache_service_workloads import workload_component
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.schemas.cache_services import (
     CacheService,
-    CacheServiceInstance,
     CacheServiceStateEnum,
 )
 from gpustack.schemas.config import ModelInstanceProxyModeEnum
@@ -446,11 +451,17 @@ async def _cache_service_targets(
     cluster_names = {cluster.id: cluster.name for cluster in clusters}
 
     instances_by_service: dict = {}
-    instances = await CacheServiceInstance.all_by_fields(
-        session, fields={"state": CacheServiceStateEnum.RUNNING}
+    # owner_kind is not optional here: without it this would also pick up the
+    # workloads of model instances and benchmarks, which share the table.
+    instances = await Workload.all_by_fields(
+        session,
+        fields={
+            "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+            "state": WorkloadStateEnum.RUNNING,
+        },
     )
     for instance in instances:
-        instances_by_service.setdefault(instance.cache_service_id, []).append(instance)
+        instances_by_service.setdefault(instance.owner_id, []).append(instance)
 
     # One read per poll: this endpoint is Prometheus HTTP service discovery,
     # scraped on a schedule, and the catalog is the same for every service in
@@ -488,9 +499,9 @@ async def _cache_service_targets(
             _managed_cache_service_groups(
                 service,
                 [
-                    (instance, scraped[instance.component or ""])
+                    (instance, scraped[workload_component(instance)])
                     for instance in instances_by_service.get(service.id, [])
-                    if (instance.component or "") in scraped
+                    if workload_component(instance) in scraped
                 ],
                 workers_by_id,
                 is_proxy,
@@ -569,7 +580,7 @@ def _extra_metrics_target_groups(
 
 def _managed_cache_service_groups(
     service: CacheService,
-    instances: List[Tuple[CacheServiceInstance, str]],
+    instances: List[Tuple[Workload, str]],
     workers_by_id: dict,
     is_proxy: bool,
     provider_path: str,

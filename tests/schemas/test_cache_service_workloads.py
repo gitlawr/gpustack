@@ -13,6 +13,7 @@ import pytest
 from gpustack.schemas.cache_service_workloads import (
     COMPONENT_LABEL,
     DEPENDS_ON_ADDRESS_LABEL,
+    DEPENDS_ON_LABEL,
     cache_service_workload_labels,
     cache_service_workload_name,
     component_addresses,
@@ -95,7 +96,7 @@ def test_a_component_that_depends_on_nothing_stamps_no_address():
 
 
 def test_the_dependency_address_is_readable_off_the_row():
-    labels = cache_service_workload_labels(7, "store", 3, "10.0.0.1:8000")
+    labels = cache_service_workload_labels(7, "store", 3, "master", "10.0.0.1:8000")
 
     assert workload_depends_on_address(_row(**labels)) == "10.0.0.1:8000"
 
@@ -115,9 +116,11 @@ def test_the_stamped_address_is_keyed_by_the_component_it_belongs_to():
     """The templates read {{component.<name>.address}}, so the name has to
     come back -- from the provider's declaration, since storing it beside the
     address would let the two disagree."""
-    row = _row(**cache_service_workload_labels(7, "store", 3, "10.0.0.1:8000"))
+    row = _row(
+        **cache_service_workload_labels(7, "store", 3, "master", "10.0.0.1:8000")
+    )
 
-    assert component_addresses(row, "master") == {"master": "10.0.0.1:8000"}
+    assert component_addresses(row) == {"master": "10.0.0.1:8000"}
 
 
 @pytest.mark.parametrize(
@@ -131,9 +134,19 @@ def test_the_stamped_address_is_keyed_by_the_component_it_belongs_to():
 def test_an_unresolved_dependency_contributes_no_address(depends_on, address):
     """An unstamped dependency resolves empty rather than leaving its
     placeholder in the command, so the flag carrying it drops with it."""
-    labels = cache_service_workload_labels(7, "store", 3, address)
+    labels = cache_service_workload_labels(7, "store", 3, depends_on, address)
 
-    assert component_addresses(_row(**labels), depends_on) == {}
+    assert component_addresses(_row(**labels)) == {}
+
+
+def test_the_dependency_name_travels_with_its_address():
+    """A reader holding only the row -- the instance list, a watch event --
+    has to be able to name what the address points at, and the two are
+    written together so they cannot drift apart."""
+    labels = cache_service_workload_labels(7, "store", 3, "master", "10.0.0.1:8000")
+
+    assert labels[DEPENDS_ON_LABEL] == "master"
+    assert labels[DEPENDS_ON_ADDRESS_LABEL] == "10.0.0.1:8000"
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +184,8 @@ def test_the_shipped_dependency_survives_the_round_trip():
     server = lmcache["components"]["server"]
     depends_on = server["depends_on"]
 
-    row = _row(**cache_service_workload_labels(7, "server", 3, "10.0.0.1:8100"))
+    row = _row(
+        **cache_service_workload_labels(7, "server", 3, depends_on, "10.0.0.1:8100")
+    )
 
-    assert component_addresses(row, depends_on) == {"coordinator": "10.0.0.1:8100"}
+    assert component_addresses(row) == {"coordinator": "10.0.0.1:8100"}

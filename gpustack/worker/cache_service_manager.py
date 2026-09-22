@@ -45,11 +45,19 @@ from gpustack.schemas.cache_providers import (
     render_l2_adapter,
     resolved_field_values,
 )
+from gpustack.schemas.cache_service_workloads import (
+    component_addresses,
+    deployment_metadata_from_workload,
+    workload_component,
+)
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+    WorkloadUpdate,
+)
 from gpustack.schemas.cache_services import (
-    CacheServiceInstance,
-    CacheServiceInstanceUpdate,
     CacheServicePublic,
-    CacheServiceStateEnum,
 )
 from gpustack.server.bus import Event, EventType
 from gpustack.worker.cache_provider_manager import CacheProviderManager
@@ -177,7 +185,7 @@ class CacheServiceManager:
         logger.info("Watching cache service instances event.")
         while True:
             try:
-                await self._clientset.cache_service_instances.awatch(
+                await self._clientset.workloads.awatch(
                     callback=self._handle_cache_service_instance_event
                 )
             except asyncio.CancelledError:
@@ -193,13 +201,19 @@ class CacheServiceManager:
         Args:
             event: The cache service instance event to handle.
         """
-        instance = CacheServiceInstance.model_validate(event.data)
-        if instance.worker_id != self._worker_id:
+        instance = Workload.model_validate(event.data)
+        # Every kind of workload arrives on this stream. Without the owner
+        # check a model instance's row deleted on this worker would be torn
+        # down as though it were a cache server.
+        if (
+            instance.owner_kind != WorkloadOwnerKindEnum.CACHE_SERVICE
+            or instance.worker_id != self._worker_id
+        ):
             return
 
         logger.trace(
             f"Received event: {str(event.type)}, instance id: {instance.id}, "
-            f"cache service id: {instance.cache_service_id}, "
+            f"cache service id: {instance.owner_id}, "
             f"state: {str(instance.state)}"
         )
 
@@ -207,10 +221,10 @@ class CacheServiceManager:
             self._stop_cache_service_instance(instance)
             return
 
-        if instance.state == CacheServiceStateEnum.PENDING:
+        if instance.state == WorkloadStateEnum.PENDING:
             self._schedule_start(instance)
 
-    def _schedule_start(self, instance: CacheServiceInstance):
+    def _schedule_start(self, instance: Workload):
         """
         Run the blocking workload creation off the watch event loop.
         Without a running loop (direct invocation), run inline. A start
@@ -247,7 +261,7 @@ class CacheServiceManager:
             self._starting.discard(instance_id)
             self._last_start_attempt.pop(instance_id, None)
 
-    def _start_cache_service_instance(self, instance: CacheServiceInstance):
+    def _start_cache_service_instance(self, instance: Workload):
         """
         Start the managed cache server container for a cache service
         instance.
@@ -257,16 +271,13 @@ class CacheServiceManager:
         """
         try:
             try:
-                cache_service = self._clientset.cache_services.get(
-                    id=instance.cache_service_id
-                )
+                cache_service = self._clientset.cache_services.get(id=instance.owner_id)
             except NotFoundException:
                 self._update_cache_service_instance(
                     instance.id,
-                    state=CacheServiceStateEnum.ERROR,
+                    state=WorkloadStateEnum.ERROR,
                     state_message=(
-                        f"Parent cache service {instance.cache_service_id} "
-                        "not found."
+                        f"Parent cache service {instance.owner_id} " "not found."
                     ),
                 )
                 return
@@ -287,7 +298,7 @@ class CacheServiceManager:
                 )
                 self._update_cache_service_instance(
                     instance.id,
-                    state=CacheServiceStateEnum.ERROR,
+                    state=WorkloadStateEnum.ERROR,
                     state_message=reason,
                 )
                 return
@@ -312,7 +323,7 @@ class CacheServiceManager:
             # Starting is idempotent: a stale workload left over from a
             # previous run of this instance (crash, manual restart) is removed
             # first, so restart and first start share this code path.
-            deployment_metadata = instance.get_deployment_metadata()
+            deployment_metadata = deployment_metadata_from_workload(instance)
             try:
                 delete_workload(deployment_metadata.name)
             except Exception as e:
@@ -323,11 +334,11 @@ class CacheServiceManager:
                 )
             self._release_ports(instance.id)
 
-            component_spec = provider.get_component(instance.component or "")
+            component_spec = provider.get_component(workload_component(instance) or "")
             config_fields = (
                 cache_service.config.fields if cache_service.config else None
             )
-            component = instance.component or ""
+            component = workload_component(instance) or ""
             ports = self._allocate_ports(
                 instance, provider.enabled_port_names(component, config_fields)
             )
@@ -360,7 +371,7 @@ class CacheServiceManager:
             # declared component gets a key either way: an unstamped one
             # resolves empty rather than leaving its placeholder in the
             # command, so the flag holding it drops instead.
-            stamped = instance.component_addresses or {}
+            stamped = component_addresses(instance) or {}
             for name in provider.components:
                 params[f"component.{name}.address"] = stamped.get(name)
 
@@ -426,9 +437,16 @@ class CacheServiceManager:
 
             if self._update_cache_service_instance(
                 instance.id,
-                state=CacheServiceStateEnum.STARTING,
-                ports=ports or None,
-                port=port,
+                state=WorkloadStateEnum.STARTING,
+                # The address port is recorded under the well-known name as
+                # well as the one its component gave it, so a reader without
+                # the provider's catalog -- the instances API, a watch event --
+                # can still say what the container answers on.
+                ports=(
+                    {**(ports or {}), DEFAULT_PORT_NAME: port}
+                    if port
+                    else (ports or None)
+                ),
                 state_message="",
             ):
                 logger.info(
@@ -447,12 +465,12 @@ class CacheServiceManager:
             self._release_ports(instance.id)
             self._update_cache_service_instance(
                 instance.id,
-                state=CacheServiceStateEnum.ERROR,
+                state=WorkloadStateEnum.ERROR,
                 state_message=str(e),
             )
             logger.error(
                 f"Failed to start cache service instance {instance.id} "
-                f"(service id={instance.cache_service_id}): {e}"
+                f"(service id={instance.owner_id}): {e}"
             )
         finally:
             self._release_start(instance.id)
@@ -799,9 +817,7 @@ class CacheServiceManager:
             )
         return remaining + l2_args + hand_written, l2_env
 
-    def _allocate_ports(
-        self, instance: CacheServiceInstance, names: List[str]
-    ) -> Dict[str, int]:
+    def _allocate_ports(self, instance: Workload, names: List[str]) -> Dict[str, int]:
         """
         Allocate one port on this worker per name the instance's component
         declares.
@@ -817,7 +833,10 @@ class CacheServiceManager:
                 port for ports in self._assigned_ports.values() for port in ports
             }
             try:
-                instances_page = self._clientset.cache_service_instances.list(
+                instances_page = self._clientset.workloads.list(
+                    # Every workload on this worker, not just this service's:
+                    # a model instance holds its ports just as firmly, and
+                    # handing one out twice is what this check exists for.
                     # page=-1 disables pagination: a truncated page would
                     # blind the conflict check to the ports it dropped.
                     params={"worker_id": self._worker_id, "page": -1}
@@ -880,10 +899,16 @@ class CacheServiceManager:
         - Health probe fails after RUNNING -> UNREACHABLE.
         - STARTING with a failing probe is left alone (still booting).
         """
-        instances_page = self._clientset.cache_service_instances.list(
+        instances_page = self._clientset.workloads.list(
+            # owner_kind is not optional: this pass starts and restarts what
+            # it lists, and a model instance's row is not a cache server.
             # page=-1 disables pagination: instances beyond a page would
             # never be synced or restarted.
-            params={"worker_id": self._worker_id, "page": -1}
+            params={
+                "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE.value,
+                "worker_id": self._worker_id,
+                "page": -1,
+            }
         )
         # Prune start bookkeeping for rows that no longer exist (a missed
         # DELETED event would otherwise accumulate entries forever).
@@ -900,35 +925,35 @@ class CacheServiceManager:
         for instance in instances_page.items:
             if instance.worker_id != self._worker_id:
                 continue
-            if instance.state == CacheServiceStateEnum.PENDING:
+            if instance.state == WorkloadStateEnum.PENDING:
                 self._start_stale_pending_instance(instance)
                 continue
             if instance.state not in (
-                CacheServiceStateEnum.STARTING,
-                CacheServiceStateEnum.RUNNING,
-                CacheServiceStateEnum.UNREACHABLE,
+                WorkloadStateEnum.STARTING,
+                WorkloadStateEnum.RUNNING,
+                WorkloadStateEnum.UNREACHABLE,
             ):
                 continue
             try:
                 cache_service = self._get_parent_service(
-                    parent_services, instance.cache_service_id
+                    parent_services, instance.owner_id
                 )
                 if cache_service is None:
                     # The parent is gone; the instance row is about to be
                     # cascade-deleted, so there is nothing to sync against.
                     logger.debug(
                         f"Skipped syncing cache service instance {instance.id}: "
-                        f"parent service {instance.cache_service_id} not found"
+                        f"parent service {instance.owner_id} not found"
                     )
                     continue
                 self._sync_single_cache_service_instance_state(instance, cache_service)
             except Exception as e:
                 logger.error(
                     f"Failed to sync cache service instance {instance.id} "
-                    f"(service id={instance.cache_service_id}) state: {e}"
+                    f"(service id={instance.owner_id}) state: {e}"
                 )
 
-    def _start_stale_pending_instance(self, instance: CacheServiceInstance):
+    def _start_stale_pending_instance(self, instance: Workload):
         """
         Start a PENDING instance whose start never took effect.
 
@@ -962,7 +987,7 @@ class CacheServiceManager:
 
         logger.info(
             f"Starting cache service instance {instance.id} "
-            f"(service id={instance.cache_service_id}): still pending "
+            f"(service id={instance.owner_id}): still pending "
             f"after {PENDING_START_GRACE_SECONDS}s"
         )
         self._schedule_start(instance)
@@ -983,11 +1008,11 @@ class CacheServiceManager:
 
     def _sync_single_cache_service_instance_state(
         self,
-        instance: CacheServiceInstance,
+        instance: Workload,
         cache_service: CacheServicePublic,
     ):
         """Synchronize a single cache service instance's state."""
-        deployment_metadata = instance.get_deployment_metadata()
+        deployment_metadata = deployment_metadata_from_workload(instance)
         workload = get_workload(deployment_metadata.name)
 
         if not workload or workload.state in [
@@ -1013,11 +1038,11 @@ class CacheServiceManager:
         if ready:
             updates = {}
             if (
-                instance.state != CacheServiceStateEnum.RUNNING
+                instance.state != WorkloadStateEnum.RUNNING
                 or instance.healthy is not True
             ):
                 updates.update(
-                    state=CacheServiceStateEnum.RUNNING,
+                    state=WorkloadStateEnum.RUNNING,
                     healthy=True,
                     last_check_at=now,
                     state_message="",
@@ -1036,10 +1061,10 @@ class CacheServiceManager:
                 self._update_cache_service_instance(instance.id, **updates)
             return
 
-        if instance.state == CacheServiceStateEnum.RUNNING:
+        if instance.state == WorkloadStateEnum.RUNNING:
             self._update_cache_service_instance(
                 instance.id,
-                state=CacheServiceStateEnum.UNREACHABLE,
+                state=WorkloadStateEnum.UNREACHABLE,
                 healthy=False,
                 last_check_at=now,
             )
@@ -1048,7 +1073,7 @@ class CacheServiceManager:
 
     def _restart_crashed_cache_service_instance(
         self,
-        instance: CacheServiceInstance,
+        instance: Workload,
         cache_service: CacheServicePublic,
         workload_name: str,
     ):
@@ -1061,10 +1086,10 @@ class CacheServiceManager:
         restart.
         """
         if cache_service.restart_on_error is False:
-            if instance.state != CacheServiceStateEnum.ERROR:
+            if instance.state != WorkloadStateEnum.ERROR:
                 self._update_cache_service_instance(
                     instance.id,
-                    state=CacheServiceStateEnum.ERROR,
+                    state=WorkloadStateEnum.ERROR,
                     state_message=(
                         "Cache server exited. Automatic restart is disabled "
                         "for this service; restart it manually."
@@ -1077,7 +1102,7 @@ class CacheServiceManager:
         if restart_count >= MAX_CONSECUTIVE_RESTARTS:
             self._update_cache_service_instance(
                 instance.id,
-                state=CacheServiceStateEnum.ERROR,
+                state=WorkloadStateEnum.ERROR,
                 state_message=(
                     f"Cache server keeps crashing "
                     f"({MAX_CONSECUTIVE_RESTARTS} restarts attempted). "
@@ -1116,7 +1141,7 @@ class CacheServiceManager:
         )
         self._update_cache_service_instance(
             instance.id,
-            state=CacheServiceStateEnum.PENDING,
+            state=WorkloadStateEnum.PENDING,
             restart_count=attempt,
             last_restart_time=now,
             state_message=(
@@ -1126,9 +1151,7 @@ class CacheServiceManager:
             healthy=False,
         )
 
-    def _probe_ready(
-        self, instance: CacheServiceInstance, provider_name: str
-    ) -> Optional[bool]:
+    def _probe_ready(self, instance: Workload, provider_name: str) -> Optional[bool]:
         """
         Probe the cache server per the provider's health check declaration.
         Managed cache servers run with host networking on this worker, so
@@ -1147,13 +1170,13 @@ class CacheServiceManager:
         # default (e.g. a master's HTTP metrics endpoint vs a store's
         # plain TCP port).
         health_check = (
-            provider.health_check_for(instance.component)
+            provider.health_check_for(workload_component(instance))
             if provider
             else CacheProviderHealthCheck()
         )
         host = "127.0.0.1"
         target = (
-            provider.probe_port_name(instance.component)
+            provider.probe_port_name(workload_component(instance))
             if provider
             else DEFAULT_PORT_NAME
         )
@@ -1182,14 +1205,14 @@ class CacheServiceManager:
         except Exception:
             return False
 
-    def _stop_cache_service_instance(self, instance: CacheServiceInstance):
+    def _stop_cache_service_instance(self, instance: Workload):
         """
         Stop the instance's workload and free its tracked ports.
 
         Args:
             instance: The cache service instance to stop.
         """
-        deployment_metadata = instance.get_deployment_metadata()
+        deployment_metadata = deployment_metadata_from_workload(instance)
         try:
             delete_workload(deployment_metadata.name)
         except Exception as e:
@@ -1202,7 +1225,7 @@ class CacheServiceManager:
         self._forget_start(instance.id)
         logger.info(
             f"Stopped cache service instance {instance.id} "
-            f"(service id={instance.cache_service_id})"
+            f"(service id={instance.owner_id})"
         )
 
     def _update_cache_service_instance(self, id: int, **kwargs) -> bool:
@@ -1220,13 +1243,13 @@ class CacheServiceManager:
             pass re-drives what the lost update would have set.
         """
         try:
-            instance_public = self._clientset.cache_service_instances.get(id=id)
+            instance_public = self._clientset.workloads.get(id=id)
 
-            instance = CacheServiceInstanceUpdate(**instance_public.model_dump())
+            instance = WorkloadUpdate(**instance_public.model_dump())
             for key, value in kwargs.items():
                 set_attr(instance, key, value)
 
-            self._clientset.cache_service_instances.update(id=id, model_update=instance)
+            self._clientset.workloads.update(id=id, model_update=instance)
             return True
         except NotFoundException:
             logger.warning(

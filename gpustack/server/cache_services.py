@@ -8,12 +8,16 @@ from gpustack.schemas.cache_providers import (
     render_optional_template,
     resolved_field_values,
 )
+from gpustack.schemas.cache_service_workloads import workload_component
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.schemas.cache_services import (
     CacheConfigSnapshot,
     CacheService,
     CacheServiceEndpoint,
-    CacheServiceInstance,
-    CacheServiceStateEnum,
 )
 from gpustack.schemas.models import Model, get_backend
 from gpustack.schemas.workers import Worker
@@ -48,20 +52,26 @@ async def _resolve_managed_endpoint(
     instead. Cluster-attachable providers serve any worker from any
     instance. Returns (None, reason) when no instance is usable.
     """
-    instances = await CacheServiceInstance.all_by_fields(
-        session, {"cache_service_id": service.id}
+    instances = await Workload.all_by_fields(
+        session,
+        {
+            "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+            "owner_id": service.id,
+        },
     )
     # Engines attach to one declared component's address (the
     # master, not its stores); single-component providers attach to
     # their sole ("") component.
     attach_component = provider.attach_component()
+    # Which of a row's ports it is addressed by is the component's to name.
+    address_port = provider.address_port_name(attach_component)
     running = sorted(
         (
             instance
             for instance in instances
-            if (instance.component or "") == attach_component
-            and instance.state == CacheServiceStateEnum.RUNNING
-            and instance.port
+            if workload_component(instance) == attach_component
+            and instance.state == WorkloadStateEnum.RUNNING
+            and (instance.ports or {}).get(address_port)
         ),
         key=lambda instance: instance.id,
     )
@@ -106,7 +116,7 @@ async def _resolve_managed_endpoint(
     return (
         CacheServiceEndpoint(
             host=service_worker.ip,
-            port=target.port,
+            port=(target.ports or {})[address_port],
             params={"locality": "node_local" if node_local else "remote"},
         ),
         None,

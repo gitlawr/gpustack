@@ -1,29 +1,35 @@
+"""The instances of a managed cache service.
+
+A cache server is a workload row; this presents those rows in the shape the
+API has always had. Read-only: the worker writes its state back through
+/workloads, which is where the row lives.
+"""
+
 from typing import Optional
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from sqlmodel import select
 
-from gpustack.api.exceptions import (
-    ForbiddenException,
-    InternalServerErrorException,
-    NotFoundException,
-)
+from gpustack.api.exceptions import NotFoundException
 from gpustack.api.tenant import (
     bypass_tenant_filter,
     cluster_scoped_system,
     scoped_cluster_row_visible,
     tenant_list_conditions,
 )
+from gpustack.schemas.cache_service_workloads import instance_public_from_workload
 from gpustack.schemas.cache_services import (
     CacheService,
-    CacheServiceInstance,
     CacheServiceInstancePublic,
-    CacheServiceInstanceUpdate,
     CacheServiceInstancesPublic,
     CacheServiceStateEnum,
 )
-from gpustack.schemas.principals import PrincipalType
+from gpustack.schemas.common import PaginatedList, Pagination
+from gpustack.schemas.workloads import (
+    Workload,
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.server.db import async_session
 from gpustack.server.deps import ListParamsDep, SessionDep, TenantContextDep
 
@@ -39,73 +45,73 @@ async def get_cache_service_instances(
     worker_id: Optional[int] = None,
     state: Optional[CacheServiceStateEnum] = None,
 ):
-    fields = {}
+    # owner_kind is not optional: the table also holds the workloads of model
+    # instances and benchmarks.
+    fields = {"owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE}
     if id:
         fields["id"] = id
 
     if cache_service_id:
-        fields["cache_service_id"] = cache_service_id
+        fields["owner_id"] = cache_service_id
 
     if worker_id:
         fields["worker_id"] = worker_id
 
     if state:
-        fields["state"] = state
+        # The two spellings coincide: a cache server never succeeds, which is
+        # the one state a workload has and a cache service does not.
+        fields["state"] = WorkloadStateEnum(state.value)
 
     if params.watch:
         # Cluster-bound service accounts (worker / cluster bootstrap) only
-        # stream instances of their own cluster (via the denormalized
-        # cluster_id). Instances carry no owner_principal_id — tenant
-        # visibility derives from the parent service, so Org-scoped
-        # callers are filtered against the services they own at stream
-        # start.
+        # stream instances of their own cluster, via the denormalized
+        # cluster_id.
         if cluster_scoped_system(ctx):
 
             def filter_func(data):
                 return scoped_cluster_row_visible(ctx, data)
 
         elif ctx.current_principal_id is not None and not bypass_tenant_filter(ctx):
-            async with async_session() as session:
-                services = await CacheService.all_by_fields(
-                    session,
-                    fields={"owner_principal_id": ctx.current_principal_id},
-                    extra_conditions=[CacheService.deleted_at.is_(None)],
-                )
-            visible_service_ids = {service.id for service in services}
+            principal_id = ctx.current_principal_id
 
+            # A row carries its owner, which the instance table did not: its
+            # visibility had to be derived from the parent service.
             def filter_func(data):
-                return getattr(data, "cache_service_id", None) in visible_service_ids
+                return getattr(data, "owner_principal_id", None) == principal_id
 
         else:
             filter_func = None
 
+        async def as_instance(event):
+            # The stream carries rows; this API has always carried instances.
+            if event.data is not None:
+                event.data = instance_public_from_workload(event.data)
+
         return StreamingResponse(
-            CacheServiceInstance.streaming(
+            Workload.streaming(
                 fields=fields,
                 filter_func=filter_func,
+                event_transform=as_instance,
             ),
             media_type="text/event-stream",
         )
 
     async with async_session() as session:
-        extra_conditions = tenant_list_conditions(ctx, CacheServiceInstance)
+        extra_conditions = tenant_list_conditions(ctx, Workload)
         if ctx.current_principal_id is not None and not bypass_tenant_filter(ctx):
-            # Tenant scoping derives from the parent service: instances
-            # have no owner_principal_id of their own.
             extra_conditions.append(
-                CacheServiceInstance.cache_service_id.in_(
-                    select(CacheService.id).where(
-                        CacheService.owner_principal_id == ctx.current_principal_id,
-                        CacheService.deleted_at.is_(None),
-                    )
-                )
+                Workload.owner_principal_id == ctx.current_principal_id
             )
-        return await CacheServiceInstance.paginated_by_query(
+        page = await Workload.paginated_by_query(
             session=session,
             fields=fields,
             extra_conditions=extra_conditions,
             page=params.page,
             per_page=params.perPage,
+        )
+        return PaginatedList[CacheServiceInstancePublic](
+            items=[instance_public_from_workload(instance) for instance in page.items],
+            pagination=Pagination(**page.pagination.model_dump()),
         )
 
 
@@ -115,12 +121,9 @@ async def get_cache_service_instance(
     ctx: TenantContextDep,
     id: int,
 ):
-    """One instance by ID. Workers read an instance back through this
-    endpoint whenever their watch-backed cache is not authoritative (e.g.
-    during a stream reconnect), so their state write-backs must not depend
-    on the cache being warm."""
-    instance = await CacheServiceInstance.one_by_id(session, id)
-    if instance is None:
+    """One instance by ID."""
+    instance = await Workload.one_by_id(session, id)
+    if instance is None or instance.owner_kind != WorkloadOwnerKindEnum.CACHE_SERVICE:
         raise NotFoundException(message="Cache service instance not found")
 
     # Visibility mirrors the list endpoint: cluster-bound service accounts
@@ -130,7 +133,7 @@ async def get_cache_service_instance(
         if not scoped_cluster_row_visible(ctx, instance):
             raise NotFoundException(message="Cache service instance not found")
     elif ctx.current_principal_id is not None and not bypass_tenant_filter(ctx):
-        service = await CacheService.one_by_id(session, instance.cache_service_id)
+        service = await CacheService.one_by_id(session, instance.owner_id)
         if (
             service is None
             or service.deleted_at is not None
@@ -138,38 +141,4 @@ async def get_cache_service_instance(
         ):
             raise NotFoundException(message="Cache service instance not found")
 
-    return instance
-
-
-@router.put("/{id}", response_model=CacheServiceInstancePublic)
-async def update_cache_service_instance(
-    session: SessionDep,
-    ctx: TenantContextDep,
-    id: int,
-    instance_in: CacheServiceInstanceUpdate,
-):
-    """Worker write-back of instance runtime state (ports, state, health,
-    restart bookkeeping). Users act on instances through the parent
-    service's endpoints instead."""
-    if ctx.user is None or ctx.user.kind != PrincipalType.SYSTEM:
-        raise ForbiddenException(
-            message="Only system principals may update cache service instances"
-        )
-
-    instance = await CacheServiceInstance.one_by_id(session, id)
-    if instance is None:
-        raise NotFoundException(message="Cache service instance not found")
-
-    # Cluster-bound service accounts write their own cluster's rows only,
-    # mirroring the read endpoints' scoping.
-    if cluster_scoped_system(ctx) and not scoped_cluster_row_visible(ctx, instance):
-        raise NotFoundException(message="Cache service instance not found")
-
-    try:
-        await instance.update(session, instance_in)
-    except Exception as e:
-        raise InternalServerErrorException(
-            message=f"Failed to update cache service instance: {e}"
-        )
-
-    return instance
+    return instance_public_from_workload(instance)

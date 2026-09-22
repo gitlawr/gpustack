@@ -13,13 +13,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gpustack.api.exceptions import ForbiddenException, NotFoundException
+from gpustack.api.exceptions import NotFoundException
 from gpustack.api.tenant import TenantContext
 from gpustack.routes import cache_service_instances as instances_route
+from gpustack.schemas.common import PaginatedList, Pagination
+from gpustack.schemas.cache_service_workloads import (
+    cache_service_workload_labels,
+    cache_service_workload_name,
+)
+from gpustack.schemas.workloads import (
+    WorkloadOwnerKindEnum,
+    WorkloadStateEnum,
+)
 from gpustack.schemas.cache_services import (
     CacheServiceInstancePublic,
     CacheServiceInstanceUpdate,
-    CacheServiceStateEnum,
 )
 from gpustack.schemas.principals import PrincipalType
 
@@ -61,14 +69,41 @@ def _patch_session(monkeypatch):
     monkeypatch.setattr(instances_route, "async_session", fake_session)
 
 
-def _instance_row(**overrides):
+_NOW = datetime(2026, 7, 1)
+
+
+def _page(items):
+    """What the query returns, for a route that now maps it to the public
+    instance shape rather than handing it back untouched."""
+    return PaginatedList[object](
+        items=items,
+        pagination=Pagination(page=1, perPage=100, total=len(items), totalPage=1),
+    )
+
+
+def _instance_row(component="", **overrides):
+    """A cache service's container as a workload row."""
+    worker_id = overrides.pop("worker_id", 5)
+    service_id = overrides.pop("cache_service_id", overrides.pop("owner_id", 9))
     fields = dict(
         id=21,
-        name="svc-a1b2c",
-        cache_service_id=9,
-        worker_id=5,
+        name=cache_service_workload_name(service_id, component, worker_id),
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=service_id,
+        owner_principal_id=None,
+        worker_id=worker_id,
         cluster_id=3,
-        state=CacheServiceStateEnum.RUNNING,
+        labels=cache_service_workload_labels(service_id, component, worker_id),
+        ports=None,
+        state=WorkloadStateEnum.RUNNING,
+        state_message=None,
+        healthy=None,
+        last_check_at=None,
+        restart_count=0,
+        last_restart_time=None,
+        spec_digest=None,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
     fields.update(overrides)
     return SimpleNamespace(**fields)
@@ -80,32 +115,30 @@ def _instance_row(**overrides):
 @pytest.mark.asyncio
 async def test_list_scopes_org_users_to_their_services(monkeypatch):
     _patch_session(monkeypatch)
-    paginated = AsyncMock(return_value="page")
-    monkeypatch.setattr(
-        instances_route.CacheServiceInstance, "paginated_by_query", paginated
-    )
+    paginated = AsyncMock(return_value=_page([_instance_row()]))
+    monkeypatch.setattr(instances_route.Workload, "paginated_by_query", paginated)
 
     result = await instances_route.get_cache_service_instances(
         ctx=_user_ctx(), params=_params(), cache_service_id=9
     )
 
-    assert result == "page"
+    assert [item.id for item in result.items] == [21]
     call_kwargs = paginated.await_args.kwargs
-    assert call_kwargs["fields"] == {"cache_service_id": 9}
-    # One derived condition: cache_service_id IN (caller's services).
+    assert call_kwargs["fields"] == {
+        "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+        "owner_id": 9,
+    }
+    # The row carries its owner, so scoping is a comparison rather than the
+    # subquery against the parent services the instance table needed.
     conditions = call_kwargs["extra_conditions"]
-    assert len(conditions) == 1
-    assert "cache_service_id IN" in str(conditions[0])
-    assert "owner_principal_id" in str(conditions[0])
+    assert any("owner_principal_id" in str(condition) for condition in conditions)
 
 
 @pytest.mark.asyncio
 async def test_list_scopes_cluster_system_to_its_cluster(monkeypatch):
     _patch_session(monkeypatch)
-    paginated = AsyncMock(return_value="page")
-    monkeypatch.setattr(
-        instances_route.CacheServiceInstance, "paginated_by_query", paginated
-    )
+    paginated = AsyncMock(return_value=_page([_instance_row()]))
+    monkeypatch.setattr(instances_route.Workload, "paginated_by_query", paginated)
 
     await instances_route.get_cache_service_instances(
         ctx=_system_ctx(scoped_cluster_id=3), params=_params()
@@ -120,17 +153,18 @@ async def test_list_scopes_cluster_system_to_its_cluster(monkeypatch):
 async def test_list_unscoped_for_platform_system(monkeypatch):
     """The legacy platform-level system principal keeps the full bypass."""
     _patch_session(monkeypatch)
-    paginated = AsyncMock(return_value="page")
-    monkeypatch.setattr(
-        instances_route.CacheServiceInstance, "paginated_by_query", paginated
-    )
+    paginated = AsyncMock(return_value=_page([_instance_row()]))
+    monkeypatch.setattr(instances_route.Workload, "paginated_by_query", paginated)
 
     await instances_route.get_cache_service_instances(
         ctx=_system_ctx(), params=_params(), worker_id=5
     )
 
     call_kwargs = paginated.await_args.kwargs
-    assert call_kwargs["fields"] == {"worker_id": 5}
+    assert call_kwargs["fields"] == {
+        "owner_kind": WorkloadOwnerKindEnum.CACHE_SERVICE,
+        "worker_id": 5,
+    }
     assert call_kwargs["extra_conditions"] == []
 
 
@@ -150,9 +184,7 @@ def _patch_streaming(monkeypatch):
 
         return _empty()
 
-    monkeypatch.setattr(
-        instances_route.CacheServiceInstance, "streaming", fake_streaming
-    )
+    monkeypatch.setattr(instances_route.Workload, "streaming", fake_streaming)
     return captured
 
 
@@ -184,8 +216,10 @@ async def test_watch_filters_org_users_to_their_services(monkeypatch):
     )
 
     filter_func = captured["filter_func"]
-    assert filter_func(_instance_row(cache_service_id=9))
-    assert not filter_func(_instance_row(cache_service_id=8))
+    # The row carries its owner; the instance table did not, so visibility
+    # had to be derived from the parent service.
+    assert filter_func(_instance_row(owner_principal_id=ORG_PRINCIPAL))
+    assert not filter_func(_instance_row(owner_principal_id=ORG_PRINCIPAL + 1))
 
 
 @pytest.mark.asyncio
@@ -208,7 +242,7 @@ async def test_get_by_id_serves_system_callers(monkeypatch):
     endpoint whenever its watch cache is cold."""
     instance = _instance_row()
     monkeypatch.setattr(
-        instances_route.CacheServiceInstance,
+        instances_route.Workload,
         "one_by_id",
         AsyncMock(return_value=instance),
     )
@@ -217,13 +251,14 @@ async def test_get_by_id_serves_system_callers(monkeypatch):
         session=MagicMock(), ctx=_system_ctx(scoped_cluster_id=3), id=21
     )
 
-    assert result is instance
+    assert result.id == instance.id
+    assert result.cache_service_id == instance.owner_id
 
 
 @pytest.mark.asyncio
 async def test_get_by_id_hides_other_clusters_from_cluster_system(monkeypatch):
     monkeypatch.setattr(
-        instances_route.CacheServiceInstance,
+        instances_route.Workload,
         "one_by_id",
         AsyncMock(return_value=_instance_row(cluster_id=4)),
     )
@@ -237,7 +272,7 @@ async def test_get_by_id_hides_other_clusters_from_cluster_system(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_by_id_scopes_org_users_to_their_services(monkeypatch):
     monkeypatch.setattr(
-        instances_route.CacheServiceInstance,
+        instances_route.Workload,
         "one_by_id",
         AsyncMock(return_value=_instance_row()),
     )
@@ -260,7 +295,7 @@ async def test_get_by_id_scopes_org_users_to_their_services(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_by_id_missing_instance_is_not_found(monkeypatch):
     monkeypatch.setattr(
-        instances_route.CacheServiceInstance,
+        instances_route.Workload,
         "one_by_id",
         AsyncMock(return_value=None),
     )
@@ -282,7 +317,7 @@ def test_public_serialization_includes_name():
         cache_service_id=9,
         worker_id=5,
         cluster_id=3,
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         created_at=datetime(2026, 7, 21),
         updated_at=datetime(2026, 7, 21),
     )
@@ -299,63 +334,7 @@ def _update_in(**overrides) -> CacheServiceInstanceUpdate:
         cache_service_id=9,
         worker_id=5,
         cluster_id=3,
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
     )
     fields.update(overrides)
     return CacheServiceInstanceUpdate(**fields)
-
-
-@pytest.mark.asyncio
-async def test_update_allows_system_writeback(monkeypatch):
-    instance = _instance_row(update=AsyncMock())
-    monkeypatch.setattr(
-        instances_route.CacheServiceInstance,
-        "one_by_id",
-        AsyncMock(return_value=instance),
-    )
-
-    result = await instances_route.update_cache_service_instance(
-        session=MagicMock(),
-        ctx=_system_ctx(),
-        id=21,
-        instance_in=_update_in(port=40001, healthy=True),
-    )
-
-    instance.update.assert_awaited_once()
-    assert result is instance
-
-
-@pytest.mark.asyncio
-async def test_update_rejects_non_system_callers(monkeypatch):
-    instance = _instance_row(update=AsyncMock())
-    monkeypatch.setattr(
-        instances_route.CacheServiceInstance,
-        "one_by_id",
-        AsyncMock(return_value=instance),
-    )
-
-    with pytest.raises(ForbiddenException):
-        await instances_route.update_cache_service_instance(
-            session=MagicMock(),
-            ctx=_user_ctx(),
-            id=21,
-            instance_in=_update_in(),
-        )
-    instance.update.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_update_missing_instance_is_not_found(monkeypatch):
-    monkeypatch.setattr(
-        instances_route.CacheServiceInstance,
-        "one_by_id",
-        AsyncMock(return_value=None),
-    )
-
-    with pytest.raises(NotFoundException):
-        await instances_route.update_cache_service_instance(
-            session=MagicMock(),
-            ctx=_system_ctx(),
-            id=21,
-            instance_in=_update_in(),
-        )

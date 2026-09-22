@@ -12,6 +12,8 @@ from gpustack.schemas.cache_providers import (
     CacheProviderL2Backend,
     CacheProviderL2Field,
 )
+from gpustack.schemas.cache_service_workloads import cache_service_workload_labels
+from gpustack.schemas.workloads import WorkloadOwnerKindEnum, WorkloadStateEnum
 from gpustack.schemas.cache_services import (
     CacheServiceConfig,
     CacheServiceL2Storage,
@@ -361,15 +363,22 @@ def _cache_service(**overrides):
     return SimpleNamespace(**fields)
 
 
-def _instance(**overrides):
+def _instance(component="server", **overrides):
+    """A cache service's container as a workload row.
+
+    LMCache's cache servers are its "server" component, the one that declares
+    it serves the metrics. Labelled through the real helper, since which
+    component a row runs is read back off these labels.
+    """
+    worker_id = overrides.pop("worker_id", 2)
+    service_id = overrides.pop("owner_id", overrides.pop("cache_service_id", 3))
     fields = dict(
         id=31,
-        cache_service_id=3,
-        worker_id=2,
-        # LMCache's cache servers are its "server" component, the one
-        # that declares it serves the metrics.
-        component="server",
-        state=CacheServiceStateEnum.RUNNING,
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=service_id,
+        worker_id=worker_id,
+        labels=cache_service_workload_labels(service_id, component, worker_id),
+        state=WorkloadStateEnum.RUNNING,
         ports={"port": 40010, "metrics": 40011},
     )
     fields.update(overrides)
@@ -389,7 +398,7 @@ def _patch_target_sources(
         "gpustack.exporter.exporter.CacheService.all_by_fields", services_mock
     )
     monkeypatch.setattr(
-        "gpustack.exporter.exporter.CacheServiceInstance.all_by_fields",
+        "gpustack.exporter.exporter.Workload.all_by_fields",
         AsyncMock(return_value=instances or []),
     )
     monkeypatch.setattr(

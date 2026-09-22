@@ -16,6 +16,14 @@ import pytest
 
 from gpustack.server.cache_provider_catalog import asset_providers
 from gpustack.schemas.cache_providers import CacheProvider
+from gpustack.schemas.cache_providers import DEFAULT_PORT_NAME
+from gpustack.schemas.cache_service_workloads import (
+    cache_service_workload_labels,
+    cache_service_workload_name,
+    component_addresses,
+    workload_component,
+)
+from gpustack.schemas.workloads import WorkloadOwnerKindEnum, WorkloadStateEnum
 from gpustack.schemas.cache_services import (
     CacheServiceConfig,
     CacheServiceStateEnum,
@@ -78,6 +86,7 @@ def _service(**overrides):
         cluster_id=1,
         worker_id=5,
         worker_selector=None,
+        owner_principal_id=1,
         state=CacheServiceStateEnum.PENDING,
         state_message=None,
         healthy=None,
@@ -88,16 +97,34 @@ def _service(**overrides):
     return SimpleNamespace(**fields)
 
 
-def _instance(**overrides):
+def _instance(component="", depends_on=None, depends_on_address=None, **overrides):
+    """A cache service's container as a workload row.
+
+    Labelled through the real helper rather than by hand: which component a
+    row runs is read back off these labels, so a stand-in would test the test.
+    """
+    worker_id = overrides.pop("worker_id", 5)
+    service_id = overrides.pop("owner_id", 9)
+    # A row records every port it allocated, by the names its component gave
+    # them; the one it is addressed by is the component's declared default.
+    port = overrides.pop("port", None)
+    # Written as the map the launch templates read; the row carries the one
+    # dependency it has, by name and address.
+    stamped = overrides.pop("component_addresses", None) or {}
+    if stamped:
+        ((depends_on, depends_on_address),) = stamped.items()
     fields = dict(
         id=21,
-        name="svc-abcde",
-        cache_service_id=9,
-        worker_id=5,
+        name=cache_service_workload_name(service_id, component, worker_id),
+        owner_kind=WorkloadOwnerKindEnum.CACHE_SERVICE,
+        owner_id=service_id,
+        worker_id=worker_id,
         cluster_id=1,
-        component="",
-        component_addresses=None,
-        state=CacheServiceStateEnum.PENDING,
+        labels=cache_service_workload_labels(
+            service_id, component, worker_id, depends_on, depends_on_address
+        ),
+        ports={DEFAULT_PORT_NAME: port} if port else None,
+        state=WorkloadStateEnum.PENDING,
         spec_digest=None,
         delete=AsyncMock(),
     )
@@ -137,13 +164,11 @@ def _patch_reconcile(
         AsyncMock(return_value=worker),
     )
     monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(side_effect=list(instance_lists or [[], []])),
     )
     create = AsyncMock()
-    monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.create", create
-    )
+    monkeypatch.setattr("gpustack.server.controllers.Workload.create", create)
     return create
 
 
@@ -163,14 +188,13 @@ async def test_replicas_pins_one_instance_on_picked_worker(monkeypatch):
 
     create.assert_awaited_once()
     created = create.await_args.args[1]
-    assert created.cache_service_id == 9
+    assert created.owner_id == 9
     assert created.worker_id == 5
     assert created.cluster_id == 1
-    assert created.state == CacheServiceStateEnum.PENDING
-    # Display name: parent service's name plus a short random suffix,
-    # following the model-instance convention.
-    assert created.name.startswith("svc-")
-    assert len(created.name) == len("svc-") + 5
+    assert created.state == WorkloadStateEnum.PENDING
+    # The container's name, derived from the identity rather than generated:
+    # the orphan sweep has to be able to compute it without the row.
+    assert created.name == cache_service_workload_name(9, "", created.worker_id)
     # The one PENDING instance keeps the aggregate at PENDING (no write:
     # the service already is PENDING).
     service.update.assert_not_called()
@@ -192,9 +216,9 @@ async def test_per_node_creates_instance_per_active_worker(monkeypatch):
     assert create.await_count == 3
     assert [call.args[1].worker_id for call in create.await_args_list] == [5, 6, 7]
     assert all(call.args[1].cluster_id == 1 for call in create.await_args_list)
-    # Each instance gets its own service-name-prefixed display name.
+    # One container per worker, each named for the worker it runs on.
     names = [call.args[1].name for call in create.await_args_list]
-    assert all(name.startswith("svc-") for name in names)
+    assert names == [cache_service_workload_name(9, "", w) for w in (5, 6, 7)]
     assert len(set(names)) == 3
 
 
@@ -267,14 +291,14 @@ async def test_replicas_run_what_fits_when_the_cluster_is_smaller(monkeypatch):
         id=21,
         worker_id=5,
         component="master",
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         port=50051,
     )
     store = _instance(
         id=22,
         worker_id=5,
         component="store",
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         component_addresses={"master": "10.0.0.5:50051"},
     )
     create = _patch_reconcile(
@@ -289,7 +313,7 @@ async def test_replicas_run_what_fits_when_the_cluster_is_smaller(monkeypatch):
     await controller._reconcile_service(MagicMock(), service)
 
     created = [call.args[1] for call in create.await_args_list]
-    stores = [row for row in created if row.component == "store"]
+    stores = [row for row in created if workload_component(row) == "store"]
     # the one worker already holds a store; the other two replicas have
     # nowhere of their own to go
     assert stores == []
@@ -372,7 +396,7 @@ async def test_dependents_address_a_pool_through_its_declared_template(monkeypat
             id=21 + offset,
             worker_id=5 + offset,
             component="master",
-            state=CacheServiceStateEnum.RUNNING,
+            state=WorkloadStateEnum.RUNNING,
             port=50051,
         )
         for offset in range(3)
@@ -391,11 +415,11 @@ async def test_dependents_address_a_pool_through_its_declared_template(monkeypat
     stores = [
         row
         for row in (call.args[1] for call in create.await_args_list)
-        if row.component == "store"
+        if workload_component(row) == "store"
     ]
     assert stores
     assert all(
-        row.component_addresses == {"master": "etcd://10.0.0.3:2379"} for row in stores
+        component_addresses(row) == {"master": "etcd://10.0.0.3:2379"} for row in stores
     )
 
 
@@ -438,9 +462,9 @@ async def test_a_disabled_dependency_does_not_hold_a_dependent_back(monkeypatch)
     await controller._reconcile_service(MagicMock(), service)
 
     created = [call.args[1] for call in create.await_args_list]
-    assert [row.component for row in created] == ["store"]
+    assert [workload_component(row) for row in created] == ["store"]
     # Nothing to stamp: the dependency does not exist to be addressed.
-    assert created[0].component_addresses is None
+    assert component_addresses(created[0]) == {}
 
 
 @pytest.mark.asyncio
@@ -451,7 +475,7 @@ async def test_replicas_spread_before_stacking(monkeypatch):
         id=21,
         worker_id=5,
         component="master",
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         port=50051,
     )
     create = _patch_reconcile(
@@ -468,7 +492,7 @@ async def test_replicas_spread_before_stacking(monkeypatch):
     placements = sorted(
         row.worker_id
         for row in (call.args[1] for call in create.await_args_list)
-        if row.component == "store"
+        if workload_component(row) == "store"
     )
     # two workers take one store each; the third replica waits for a
     # worker of its own rather than doubling up on one of them
@@ -482,7 +506,7 @@ async def test_lowered_replica_count_deletes_the_surplus(monkeypatch):
         id=21,
         worker_id=5,
         component="master",
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         port=50051,
     )
     addresses = {"master": "10.0.0.5:50051"}
@@ -491,7 +515,7 @@ async def test_lowered_replica_count_deletes_the_surplus(monkeypatch):
             id=22 + offset,
             worker_id=5,
             component="store",
-            state=CacheServiceStateEnum.RUNNING,
+            state=WorkloadStateEnum.RUNNING,
             component_addresses=addresses,
         )
         for offset in range(3)
@@ -520,7 +544,7 @@ async def test_dependent_component_gets_stamped_dependency_address(monkeypatch):
         id=21,
         worker_id=5,
         component="master",
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         port=50051,
     )
     create = _patch_reconcile(
@@ -535,10 +559,10 @@ async def test_dependent_component_gets_stamped_dependency_address(monkeypatch):
     await controller._reconcile_service(MagicMock(), service)
 
     created = [call.args[1] for call in create.await_args_list]
-    stores = [row for row in created if row.component == "store"]
+    stores = [row for row in created if workload_component(row) == "store"]
     assert {row.worker_id for row in stores} == {5, 6}
     assert all(
-        row.component_addresses == {"master": "10.0.0.5:50051"} for row in stores
+        component_addresses(row) == {"master": "10.0.0.5:50051"} for row in stores
     )
 
 
@@ -553,7 +577,7 @@ async def test_dependent_instance_recreates_when_dependency_address_moves(
         id=21,
         worker_id=5,
         component="master",
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         port=50051,
     )
     stale_store = _instance(
@@ -561,7 +585,7 @@ async def test_dependent_instance_recreates_when_dependency_address_moves(
         worker_id=5,
         component="store",
         component_addresses={"master": "10.0.0.9:40000"},
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         port=8080,
     )
     _patch_reconcile(
@@ -582,8 +606,8 @@ async def test_dependent_instance_recreates_when_dependency_address_moves(
 @pytest.mark.asyncio
 async def test_per_node_deletes_instance_of_departed_worker(monkeypatch):
     service = _service(worker_id=None)
-    kept = _instance(id=21, worker_id=5, state=CacheServiceStateEnum.RUNNING)
-    orphan = _instance(id=22, worker_id=6, state=CacheServiceStateEnum.RUNNING)
+    kept = _instance(id=21, worker_id=5, state=WorkloadStateEnum.RUNNING)
+    orphan = _instance(id=22, worker_id=6, state=WorkloadStateEnum.RUNNING)
     create = _patch_reconcile(
         monkeypatch,
         _provider("per_node"),
@@ -600,7 +624,7 @@ async def test_per_node_deletes_instance_of_departed_worker(monkeypatch):
     # All remaining instances RUNNING -> the aggregate follows.
     service.update.assert_awaited_once()
     assert service.update.await_args.args[1] == {
-        "state": CacheServiceStateEnum.RUNNING,
+        "state": WorkloadStateEnum.RUNNING,
         "state_message": None,
         "healthy": True,
     }
@@ -672,7 +696,7 @@ async def test_per_node_selector_change_moves_instances(monkeypatch):
     now-unmatched worker's instance is deleted and the newly matched
     worker gets one."""
     service = _service(worker_id=None, worker_selector={"gpu": "h100"})
-    outdated = _instance(id=21, worker_id=5, state=CacheServiceStateEnum.RUNNING)
+    outdated = _instance(id=21, worker_id=5, state=WorkloadStateEnum.RUNNING)
     create = _patch_reconcile(
         monkeypatch,
         _provider("per_node"),
@@ -696,7 +720,7 @@ async def test_per_node_selector_matching_no_worker_parks_service_in_error(
     monkeypatch,
 ):
     service = _service(worker_id=None, worker_selector={"gpu": "b200"})
-    orphan = _instance(worker_id=5, state=CacheServiceStateEnum.RUNNING)
+    orphan = _instance(worker_id=5, state=WorkloadStateEnum.RUNNING)
     create = _patch_reconcile(
         monkeypatch,
         _provider("per_node"),
@@ -714,7 +738,7 @@ async def test_per_node_selector_matching_no_worker_parks_service_in_error(
     create.assert_not_called()
     service.update.assert_awaited_once()
     updated = service.update.await_args.args[1]
-    assert updated["state"] == CacheServiceStateEnum.ERROR
+    assert updated["state"] == WorkloadStateEnum.ERROR
     assert "No workers match the worker selector" in updated["state_message"]
     assert updated["healthy"] is False
 
@@ -736,7 +760,7 @@ async def test_replicas_missing_pinned_worker_parks_service_in_error(monkeypatch
     orphan.delete.assert_not_awaited()
     service.update.assert_awaited_once()
     assert service.update.await_args.args[1] == {
-        "state": CacheServiceStateEnum.ERROR,
+        "state": WorkloadStateEnum.ERROR,
         "state_message": "Assigned worker no longer exists.",
         "healthy": False,
     }
@@ -756,7 +780,7 @@ async def test_replicas_rejects_worker_from_other_cluster(monkeypatch):
     await controller._reconcile_service(MagicMock(), service)
 
     service.update.assert_awaited_once()
-    assert service.update.await_args.args[1]["state"] == CacheServiceStateEnum.ERROR
+    assert service.update.await_args.args[1]["state"] == WorkloadStateEnum.ERROR
 
 
 # ---- aggregate transitions ----
@@ -764,7 +788,7 @@ async def test_replicas_rejects_worker_from_other_cluster(monkeypatch):
 
 def _patch_aggregate_instances(monkeypatch, instances):
     monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(return_value=instances),
     )
     # These cover folding a single component's states; pin the provider so
@@ -780,41 +804,41 @@ def _patch_aggregate_instances(monkeypatch, instances):
     "states, expected",
     [
         (
-            [CacheServiceStateEnum.RUNNING, CacheServiceStateEnum.RUNNING],
+            [WorkloadStateEnum.RUNNING, WorkloadStateEnum.RUNNING],
             {
-                "state": CacheServiceStateEnum.RUNNING,
+                "state": WorkloadStateEnum.RUNNING,
                 "state_message": None,
                 "healthy": True,
             },
         ),
         (
-            [CacheServiceStateEnum.RUNNING, CacheServiceStateEnum.ERROR],
+            [WorkloadStateEnum.RUNNING, WorkloadStateEnum.ERROR],
             {
-                "state": CacheServiceStateEnum.RUNNING,
+                "state": WorkloadStateEnum.RUNNING,
                 "state_message": "1/2 instances running",
                 "healthy": False,
             },
         ),
         (
-            [CacheServiceStateEnum.PENDING, CacheServiceStateEnum.STARTING],
+            [WorkloadStateEnum.PENDING, WorkloadStateEnum.STARTING],
             {
-                "state": CacheServiceStateEnum.STARTING,
+                "state": WorkloadStateEnum.STARTING,
                 "state_message": None,
                 "healthy": None,
             },
         ),
         (
-            [CacheServiceStateEnum.PENDING, CacheServiceStateEnum.PENDING],
+            [WorkloadStateEnum.PENDING, WorkloadStateEnum.PENDING],
             {
-                "state": CacheServiceStateEnum.PENDING,
+                "state": WorkloadStateEnum.PENDING,
                 "state_message": None,
                 "healthy": None,
             },
         ),
         (
-            [CacheServiceStateEnum.ERROR, CacheServiceStateEnum.UNREACHABLE],
+            [WorkloadStateEnum.ERROR, WorkloadStateEnum.UNREACHABLE],
             {
-                "state": CacheServiceStateEnum.ERROR,
+                "state": WorkloadStateEnum.ERROR,
                 "state_message": "0/2 instances running",
                 "healthy": False,
             },
@@ -822,7 +846,7 @@ def _patch_aggregate_instances(monkeypatch, instances):
         (
             [],
             {
-                "state": CacheServiceStateEnum.ERROR,
+                "state": WorkloadStateEnum.ERROR,
                 "state_message": "no instances running",
                 "healthy": False,
             },
@@ -830,7 +854,7 @@ def _patch_aggregate_instances(monkeypatch, instances):
     ],
 )
 async def test_aggregate_transitions(monkeypatch, states, expected):
-    service = _service(state=CacheServiceStateEnum.UNREACHABLE)
+    service = _service(state=WorkloadStateEnum.UNREACHABLE)
     _patch_aggregate_instances(
         monkeypatch,
         [_instance(id=21 + i, worker_id=5 + i, state=s) for i, s in enumerate(states)],
@@ -866,14 +890,14 @@ async def test_the_dependency_address_does_not_depend_on_row_order(monkeypatch):
     )
     masters = [
         _instance(
-            id=61, worker_id=7, state=CacheServiceStateEnum.RUNNING, component="master"
+            id=61, worker_id=7, state=WorkloadStateEnum.RUNNING, component="master"
         ),
         _instance(
-            id=62, worker_id=5, state=CacheServiceStateEnum.RUNNING, component="master"
+            id=62, worker_id=5, state=WorkloadStateEnum.RUNNING, component="master"
         ),
     ]
     for master in masters:
-        master.port = 41000
+        master.ports = {DEFAULT_PORT_NAME: 41000}
 
     controller = CacheServiceController(MagicMock())
     monkeypatch.setattr(
@@ -915,18 +939,20 @@ async def test_a_dependent_waits_out_a_dependency_that_is_not_up_yet(monkeypatch
     master = _instance(
         id=50,
         worker_id=5,
-        state=CacheServiceStateEnum.STARTING,
+        state=WorkloadStateEnum.STARTING,
         component="master",
     )
     store = _instance(
         id=51,
         worker_id=5,
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         component="store",
     )
     # Stamped when the master was up before: what must not be read as stale
     # while the master is on its way back.
-    store.component_addresses = {"master": "10.0.0.9:9000"}
+    store.labels = cache_service_workload_labels(
+        9, "store", store.worker_id, "master", "10.0.0.9:9000"
+    )
     service = _service(worker_id=None, config=CacheServiceConfig(fields={}))
     _patch_reconcile(
         monkeypatch,
@@ -971,10 +997,10 @@ async def test_a_dependent_drops_the_address_of_a_dependency_turned_off(monkeypa
     stale = _instance(
         id=41,
         worker_id=5,
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         component="store",
+        component_addresses={"master": "10.0.0.9:9000"},
     )
-    stale.component_addresses = {"master": "10.0.0.9:9000"}
     service = _service(
         worker_id=None, config=CacheServiceConfig(fields={"enable_extra": False})
     )
@@ -1017,24 +1043,24 @@ async def test_aggregate_ignores_a_disabled_component_still_holding_rows(monkeyp
         gpu_access=False,
     )
     service = _service(
-        state=CacheServiceStateEnum.UNREACHABLE,
+        state=WorkloadStateEnum.UNREACHABLE,
         config=CacheServiceConfig(fields={"enable_extra": False}),
     )
     monkeypatch.setattr(
-        "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+        "gpustack.server.controllers.Workload.all_by_fields",
         AsyncMock(
             return_value=[
                 _instance(
                     id=31,
                     worker_id=5,
-                    state=CacheServiceStateEnum.RUNNING,
+                    state=WorkloadStateEnum.RUNNING,
                     component="store",
                 ),
                 # The master is off; its leftover row failed on the way out.
                 _instance(
                     id=32,
                     worker_id=5,
-                    state=CacheServiceStateEnum.ERROR,
+                    state=WorkloadStateEnum.ERROR,
                     component="master",
                 ),
             ]
@@ -1048,7 +1074,7 @@ async def test_aggregate_ignores_a_disabled_component_still_holding_rows(monkeyp
     await controller._sync_service_aggregate(MagicMock(), service)
 
     written = service.update.await_args.args[1]
-    assert written["state"] == CacheServiceStateEnum.RUNNING
+    assert written["state"] == WorkloadStateEnum.RUNNING
     assert written["healthy"] is True
     assert "master" not in (written.get("state_message") or "")
 
@@ -1056,10 +1082,10 @@ async def test_aggregate_ignores_a_disabled_component_still_holding_rows(monkeyp
 @pytest.mark.asyncio
 async def test_aggregate_writes_only_on_change(monkeypatch):
     service = _service(
-        state=CacheServiceStateEnum.RUNNING, state_message=None, healthy=True
+        state=WorkloadStateEnum.RUNNING, state_message=None, healthy=True
     )
     _patch_aggregate_instances(
-        monkeypatch, [_instance(state=CacheServiceStateEnum.RUNNING)]
+        monkeypatch, [_instance(state=WorkloadStateEnum.RUNNING)]
     )
 
     controller = CacheServiceController(MagicMock())
@@ -1101,7 +1127,7 @@ async def _run_instance_event(monkeypatch, service, event_type):
         yield Event(type=event_type, data=_instance())
 
     with patch(
-        "gpustack.server.controllers.CacheServiceInstance.subscribe",
+        "gpustack.server.controllers.Workload.subscribe",
         side_effect=lambda **kwargs: fake_subscribe(**kwargs),
     ):
         await controller._watch_instances()
@@ -1405,10 +1431,10 @@ async def test_aggregate_flags_spec_drift():
     from gpustack.schemas.cache_services import cache_service_spec_digest
 
     service = _service(update=AsyncMock())
-    stale = _instance(state=CacheServiceStateEnum.RUNNING, spec_digest="0" * 16)
+    stale = _instance(state=WorkloadStateEnum.RUNNING, spec_digest="0" * 16)
     with (
         patch(
-            "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+            "gpustack.server.controllers.Workload.all_by_fields",
             AsyncMock(return_value=[stale]),
         ),
         patch(
@@ -1420,21 +1446,21 @@ async def test_aggregate_flags_spec_drift():
         await controller._sync_service_aggregate(MagicMock(), service)
 
     args = service.update.await_args.args[1]
-    assert args["state"] == CacheServiceStateEnum.RUNNING
+    assert args["state"] == WorkloadStateEnum.RUNNING
     assert "configuration changed" in args["state_message"]
 
     # a fresh instance (current digest) and a pre-digest row are clean
     service2 = _service(update=AsyncMock())
     current = _instance(
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         spec_digest=cache_service_spec_digest(service2),
     )
     legacy = _instance(
-        id=22, worker_id=6, state=CacheServiceStateEnum.RUNNING, spec_digest=None
+        id=22, worker_id=6, state=WorkloadStateEnum.RUNNING, spec_digest=None
     )
     with (
         patch(
-            "gpustack.server.controllers.CacheServiceInstance.all_by_fields",
+            "gpustack.server.controllers.Workload.all_by_fields",
             AsyncMock(return_value=[current, legacy]),
         ),
         patch(
@@ -1498,14 +1524,14 @@ async def test_a_pool_smaller_than_asked_for_says_so(monkeypatch):
         id=21,
         worker_id=5,
         component="master",
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         port=50051,
     )
     store = _instance(
         id=22,
         worker_id=5,
         component="store",
-        state=CacheServiceStateEnum.RUNNING,
+        state=WorkloadStateEnum.RUNNING,
         component_addresses={"master": "10.0.0.5:50051"},
     )
     _patch_reconcile(
@@ -1524,7 +1550,7 @@ async def test_a_pool_smaller_than_asked_for_says_so(monkeypatch):
     monkeypatch.setattr(controller, "_set_service_state", set_state)
     await controller._reconcile_service(MagicMock(), service)
 
-    assert updates["state"] == CacheServiceStateEnum.RUNNING
+    assert updates["state"] == WorkloadStateEnum.RUNNING
     assert "store 1/3" in updates["state_message"]
 
 
@@ -1538,7 +1564,7 @@ async def test_a_failed_dependency_is_reported_not_kept_pending(monkeypatch):
         id=21,
         worker_id=5,
         component="master",
-        state=CacheServiceStateEnum.ERROR,
+        state=WorkloadStateEnum.ERROR,
     )
     _patch_reconcile(
         monkeypatch,
@@ -1556,4 +1582,4 @@ async def test_a_failed_dependency_is_reported_not_kept_pending(monkeypatch):
     monkeypatch.setattr(controller, "_set_service_state", set_state)
     await controller._reconcile_service(MagicMock(), service)
 
-    assert updates["state"] == CacheServiceStateEnum.ERROR
+    assert updates["state"] == WorkloadStateEnum.ERROR
