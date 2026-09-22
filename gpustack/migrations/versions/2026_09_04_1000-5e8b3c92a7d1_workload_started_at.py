@@ -9,7 +9,7 @@ the deadline cannot be enforced from the row at all, which is what the
 benchmark migration surfaced.
 
 Revision ID: 5e8b3c92a7d1
-Revises: 9d2c6ab410f5
+Revises: c4a91f7be230
 Create Date: 2026-09-04 10:00:00.000000
 
 """
@@ -22,7 +22,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '5e8b3c92a7d1'
-down_revision: Union[str, None] = '9d2c6ab410f5'
+down_revision: Union[str, None] = 'c4a91f7be230'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
