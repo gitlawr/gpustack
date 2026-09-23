@@ -209,6 +209,13 @@ def placements_from_workloads(workloads: list) -> list:
     Types are converted rather than passed through: a row stores the resource
     claim as JSON and the ports as a name -> port map, and callers here expect
     the instance's spellings of both.
+
+    That extends to empty collections. A row compiles one to NULL, which is
+    the column's default and how an unset collection is spelled in the
+    database; an instance spells it as an empty list. The callers take the
+    instance's -- several of them iterate or count these without a guard, so
+    handing them None once the rows are authoritative would raise where the
+    list merely yielded nothing.
     """
     placements = []
     for row in sorted(workloads or [], key=lambda w: w.group_index or 0):
@@ -222,12 +229,12 @@ def placements_from_workloads(workloads: list) -> list:
                 worker_ip=row.worker_ip,
                 worker_ifname=row.worker_ifname,
                 gpu_type=row.gpu_type,
-                gpu_indexes=row.gpu_indexes,
-                gpu_addresses=row.gpu_addresses,
+                gpu_indexes=row.gpu_indexes or [],
+                gpu_addresses=row.gpu_addresses or [],
                 computed_resource_claim=(
                     ComputedResourceClaim.model_validate(claim) if claim else None
                 ),
-                ports=ports,
+                ports=ports or [],
                 pid=row.pid,
                 arguments=row.arguments,
                 # Only for a follower. A leader's row reaches pending from five

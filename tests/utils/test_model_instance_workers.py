@@ -319,3 +319,40 @@ def test_rows_claiming_a_subordinate_the_instance_does_not_have_are_reported(cap
         subordinate_placements(bare, rows)
 
     assert "Workload placements differs on" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Empty collections, in the spelling the callers take
+# ---------------------------------------------------------------------------
+
+
+def test_an_unscheduled_instance_reads_the_same_both_ways():
+    """The first reading of every instance is of one with no binding yet, so
+    a difference here is reported for each one and the tally never clears."""
+    from gpustack.schemas.models import ModelInstance
+    from gpustack.server.model_instance_workloads import compile_model_instance
+
+    instance = ModelInstance(id=1, name="mi")
+
+    assert _binding_of(instance_placements(instance)) == _binding_of(
+        placements_from_workloads(compile_model_instance(instance))
+    )
+
+
+@pytest.mark.parametrize("field", ["gpu_indexes", "gpu_addresses", "ports"])
+def test_a_collection_the_row_stores_as_null_reads_back_as_empty(field):
+    """A row compiles an empty collection to NULL, the column's default.
+    Several callers iterate or count these without a guard -- the binpack
+    scorer over a subordinate's gpu_indexes, the backends sizing their
+    ranks -- so None would raise where the list merely yields nothing."""
+    from gpustack.schemas.models import ModelInstance
+    from gpustack.server.model_instance_workloads import compile_model_instance
+
+    rows = compile_model_instance(ModelInstance(id=1, name="mi"))
+    assert getattr(rows[0], field) is None
+
+    placement = placements_from_workloads(rows)[0]
+    assert getattr(placement, field) == []
+    # What the callers actually do with it.
+    assert len(getattr(placement, field)) == 0
+    assert list(getattr(placement, field)) == []
