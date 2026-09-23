@@ -486,13 +486,17 @@ async def _proxy_instance_logs(
     worker: Worker,
     log_options,
 ):
-    """Proxy the instance's container logs from its worker. The worker
-    resolves the workload name from the (service, instance) id pair."""
+    """Proxy the instance's container logs from its worker.
+
+    The container's name travels with the request: it is the row's own name,
+    which carries the component, and a worker holding only the ids cannot
+    reconstruct that.
+    """
     timeout = aiohttp.ClientTimeout(total=envs.PROXY_TIMEOUT, sock_connect=5)
     params = {
         "tail": log_options.tail,
         "follow": log_options.follow,
-        "cache_service_id": instance.owner_id,
+        "workload_name": instance.name,
     }
 
     if log_options.follow:

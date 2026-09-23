@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 
 from gpustack.api.exceptions import NotFoundException
-from gpustack.utils import file
+from gpustack_runtime.deployer import logs_workload
 from gpustack.schemas.models import (
     ModelInstanceLogRestartEntry,
     ServeLogOptionsResponse,
@@ -564,80 +564,36 @@ async def get_serve_logs(
     )
 
 
-def _cache_service_log_generation(
-    log_dir: Path, instance_id: int, previous: bool
-) -> Optional[int]:
-    """Which start's logs to read: the current one, or the one before it.
-
-    Generations are numbered like a model instance's ({id}.{n}.log for the
-    provisioning log, {id}.container.{n}.log for the container's own output)
-    and the worker keeps the last two. None when nothing has been written for
-    this instance here.
-    """
-    generations = set()
-    for path in log_dir.glob(f"{instance_id}.*.log"):
-        try:
-            generations.add(int(path.stem.rsplit(".", 1)[-1]))
-        except ValueError:
-            continue
-    if not generations:
-        return None
-    ordered = sorted(generations)
-    if previous:
-        return ordered[-2] if len(ordered) >= 2 else None
-    return ordered[-1]
-
-
 @router.get("/cacheServiceInstanceLogs/{instance_id}")
 async def get_cache_service_instance_logs(
-    request: Request,
     instance_id: int,
     log_options: LogOptionsDep,
+    workload_name: str = Query(),
 ):
-    """Stream a managed cache service instance's logs for one start: the
-    provisioning log the worker's subprocess wrote — provider resolution and
-    image pull, everything that happens before a container exists — followed
-    by the container's own output, which the worker persists as it arrives.
+    """Stream a managed cache service instance's container logs.
 
-    ``previous`` selects the start before the current one, which is where a
-    crash-looping cache server's cause is. Reading persisted files rather than
-    the runtime is what makes that possible: a restart deletes the workload,
-    taking the previous container's output with it.
+    Read live from the container runtime rather than from persisted files, so
+    ``previous`` has no effect here.
+
+    The container's name comes from the server rather than being derived: it
+    is the workload row's own name, which carries the component, and the
+    (service, instance) id pair a worker is given cannot reconstruct that.
     """
-    log_dir = Path(request.app.state.config.log_dir) / "cache-services"
-    generation = _cache_service_log_generation(
-        log_dir, instance_id, log_options.previous
-    )
 
-    async def iter_logs():
-        if generation is None:
+    def iter_logs():
+        try:
+            logs = logs_workload(
+                name=workload_name,
+                tail=log_options.tail,
+                follow=log_options.follow,
+            )
+        except Exception as e:
+            yield f"Failed to fetch cache service logs: {e}\n"
             return
-
-        # The provisioning log covers one start and is short, so it streams
-        # whole; ``tail`` applies to the container logs, which is where a
-        # caller asking for the last N lines means it.
-        async for line in log_generator(
-            str(log_dir / f"{instance_id}.{generation}.log"),
-            LogOptions(tail=-1, follow=False),
-        ):
-            yield line
-
-        container_log = log_dir / f"{instance_id}.container.{generation}.log"
-        follow = log_options.follow and not log_options.previous
-        if follow and not container_log.exists():
-            # Still pulling the image: the file appears when the container
-            # produces its first line.
-            try:
-                await file.check_with_retries(
-                    lambda: _require_file(container_log), timeout=300
-                )
-            except Exception:
-                return
-        async for line in log_generator(
-            str(container_log),
-            LogOptions(tail=log_options.tail, follow=follow),
-        ):
-            yield line
+        if isinstance(logs, (bytes, str)):
+            yield logs
+            return
+        yield from logs
 
     return StreamingResponse(iter_logs(), media_type="application/octet-stream")
 

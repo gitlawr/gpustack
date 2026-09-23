@@ -1585,7 +1585,7 @@ async def test_logs_proxies_single_instance_to_its_worker(monkeypatch):
     assert call_kwargs["params"] == {
         "tail": 100,
         "follow": False,
-        "cache_service_id": 9,
+        "workload_name": instance.name,
     }
     assert response.status_code == 200
     assert response.body == b"cache server log line\n"
@@ -1627,7 +1627,7 @@ async def test_instance_logs_proxy_to_instance_worker(monkeypatch):
     assert call_kwargs["params"] == {
         "tail": 50,
         "follow": False,
-        "cache_service_id": 9,
+        "workload_name": instance.name,
     }
     assert response.status_code == 200
 
