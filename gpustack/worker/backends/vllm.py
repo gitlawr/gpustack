@@ -457,32 +457,14 @@ class VLLMServer(InferenceServer):
         if extended_kv_cache.chunk_size and extended_kv_cache.chunk_size > 0:
             env["LMCACHE_CHUNK_SIZE"] = str(extended_kv_cache.chunk_size)
 
-        ram_bytes = self._resolve_local_kv_cache_bytes()
+        # LMCache builds one engine per rank and gives each its own allocator
+        # of this size, so the variable is a per-rank budget in GiB.
+        ram_bytes = self._get_local_kv_cache_bytes_per_rank()
         if ram_bytes:
             gib = byte_to_gib(ram_bytes)
             env["LMCACHE_MAX_LOCAL_CPU_SIZE"] = str(
                 int(gib) if gib.is_integer() else gib
             )
-
-    def _resolve_local_kv_cache_bytes(self) -> Optional[int]:
-        """Host RAM the local KV cache may occupy on this worker, in bytes.
-
-        The explicitly configured size wins; otherwise the ratio applies to
-        the instance's VRAM claim on this worker. ``None`` when the deployment
-        sets neither. Mirrors what the scheduler reserved for the instance
-        here (``get_computed_ram_claim``), which is a per-worker figure.
-        """
-        extended_kv_cache = self._model.extended_kv_cache
-        if not extended_kv_cache:
-            return None
-
-        if extended_kv_cache.ram_size and extended_kv_cache.ram_size > 0:
-            return extended_kv_cache.ram_size * 1024**3
-
-        if extended_kv_cache.ram_ratio and extended_kv_cache.ram_ratio > 0:
-            return int(self._get_total_vram_claim() * extended_kv_cache.ram_ratio)
-
-        return None
 
     def _resolve_multinode_shape(
         self,
@@ -613,32 +595,6 @@ class VLLMServer(InferenceServer):
                 json.dumps(sp_dict),
             ]
         return []
-
-    def _get_total_vram_claim(self) -> int:
-        """
-        Calculate total VRAM claim for the model instance on current worker.
-        """
-        vram = 0
-        computed_resource_claim = self._model_instance.computed_resource_claim
-        if self._worker.id != self._model_instance.worker_id:
-            dservers = self._model_instance.distributed_servers
-            subworkers = (
-                dservers.subordinate_workers
-                if dservers and dservers.subordinate_workers
-                else []
-            )
-            for subworker in subworkers:
-                if subworker.worker_id == self._worker.id:
-                    computed_resource_claim = subworker.computed_resource_claim
-                    break
-
-        if not computed_resource_claim:
-            return vram
-
-        for vram_claim in (computed_resource_claim.vram or {}).values():
-            vram += vram_claim
-
-        return vram
 
     def _build_command_args(
         self,
@@ -954,9 +910,7 @@ class VLLMServer(InferenceServer):
         by ``world_size``, which counts TP x PP x PCP and leaves data
         parallelism out: under ``--data-parallel-size N`` every DP engine
         would reserve a full share and the host would hold N times the cache
-        the scheduler reserved for it. Dividing the worker's own budget by the
-        cards it was given keeps the sizing independent of the engine's
-        parallelism, and equal to what ``get_computed_ram_claim`` set aside.
+        the scheduler reserved for it.
         """
         reason = ascend_local_kv_cache_unsupported_reason(
             arch_family, self._model.backend_version
@@ -966,10 +920,9 @@ class VLLMServer(InferenceServer):
             return []
 
         extra_config = {}
-        ram_bytes = self._resolve_local_kv_cache_bytes()
+        ram_bytes = self._get_local_kv_cache_bytes_per_rank()
         if ram_bytes:
-            ranks = len(self._get_selected_gpu_devices()) or 1
-            extra_config["cpu_bytes_to_use_per_rank"] = ram_bytes // ranks
+            extra_config["cpu_bytes_to_use_per_rank"] = ram_bytes
 
         extended = self._model.extended_kv_cache
         if extended.chunk_size and extended.chunk_size > 0:

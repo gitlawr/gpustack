@@ -298,7 +298,7 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
             self._vram_claim = await estimate_model_vram(
                 self._model, self._config.huggingface_token, workers
             )
-        self._ram_claim = get_model_ram_claim(self._model)
+        self._ram_claim = get_model_ram_claim(self._model, self._gpu_count)
 
         logger.info(
             f"Calculated SGLang resource claim for model {self._model.readable_source}, "
@@ -508,6 +508,9 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
                 request=request_usage,
                 gpu_type=gpu_type,
             )
+            ram_claim = get_computed_ram_claim(self._model, vram_claim)
+            if ram_not_enough(ram_claim or 0, allocatable):
+                continue
             candidates.append(
                 ModelInstanceScheduleCandidate(
                     worker=worker,
@@ -515,7 +518,7 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
                     gpu_indexes=[gpu_index],
                     computed_resource_claim=ComputedResourceClaim(
                         vram=vram_claim,
-                        ram=get_computed_ram_claim(self._model, vram_claim),
+                        ram=ram_claim,
                         vram_utilization=self._mem_fraction_static_by_gpu_type.get(
                             gpu_type
                         ),
@@ -568,6 +571,8 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
         """Find single worker multi GPU candidates for a specific worker."""
         if not worker.status.gpu_devices or len(worker.status.gpu_devices) < 2:
             return []
+
+        allocatable = self.get_worker_allocatable_resource(worker, gpu_type)
 
         # SGLang performs VRAM balancing checks. We group all GPUs based on available VRAM capacity
         gpu_group = group_worker_gpu_by_memory(
@@ -643,6 +648,9 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
                     break
 
             if found_candidate:
+                ram_claim = get_computed_ram_claim(self._model, vram_claim)
+                if ram_not_enough(ram_claim or 0, allocatable):
+                    continue
                 # Same reason as the single-GPU scan above: `get_resource_claim`
                 # quotes this in a group's refusal, and a multi-GPU member
                 # without it falls back to the weights estimate — smaller than
@@ -655,7 +663,7 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
                         gpu_indexes=gpu_indexes,
                         computed_resource_claim=ComputedResourceClaim(
                             vram=vram_claim,
-                            ram=get_computed_ram_claim(self._model, vram_claim),
+                            ram=ram_claim,
                             vram_utilization=self._mem_fraction_static_by_gpu_type.get(
                                 gpu_type
                             ),
@@ -736,7 +744,9 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
             gpu_group = group_worker_gpu_by_memory(
                 workers_of_type,
                 model_instances=self._model_instances,
-                ram_claim=self._ram_claim,
+                # Each worker may run only part of the instance. Require one
+                # GPU's cache here; check the full local claim after selection.
+                ram_claim=get_model_ram_claim(self._model),
                 gpu_type=gpu_type,
             )
 
@@ -811,16 +821,21 @@ class SGLangResourceFitSelector(ScheduleCandidatesSelector):
             for worker in worker_group:
                 allocatable = self.get_worker_allocatable_resource(worker, gpu_type)
 
-                if ram_not_enough(self._ram_claim, allocatable):
-                    # The RAM resource(for extended KV cache) is required per worker.
-                    # Skip the worker if it does not satisfy the RAM requirement.
-                    continue
-
                 if not self._is_diffusion and any(
                     allocatable.vram.get(gpu.index, 0) / gpu.memory.total
                     < self._mem_fraction_static_by_gpu_type.get(gpu_type)
                     for gpu in worker.status.gpu_devices
                 ):
+                    continue
+                vram_claim = {
+                    gpu.index: int(
+                        gpu.memory.total
+                        * self._mem_fraction_static_by_gpu_type.get(gpu_type)
+                    )
+                    for gpu in worker.status.gpu_devices
+                }
+                ram_claim = get_computed_ram_claim(self._model, vram_claim)
+                if ram_not_enough(ram_claim or 0, allocatable):
                     continue
                 selected_workers.append(worker)
                 gpu_sum += gpu_count

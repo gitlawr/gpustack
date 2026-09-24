@@ -522,40 +522,55 @@ def _vllm_backend_with_kv_cache(
     cache_config=None,
     device_info=("cuda", None, None),
     backend_version=None,
-    vram_claim=0,
+    ram_claim=0,
     gpu_count=1,
 ):
+    """A backend whose local cache was booked ``ram_claim`` bytes of host
+    memory on this worker, the figure the scheduler wrote onto the instance."""
     backend = VLLMServer.__new__(VLLMServer)
     backend._model = types.SimpleNamespace(
         extended_kv_cache=extended_kv_cache, backend_version=backend_version
     )
-    backend._model_instance = types.SimpleNamespace(cache_config=cache_config)
+    backend._worker = types.SimpleNamespace(id=1)
+    backend._model_instance = types.SimpleNamespace(
+        cache_config=cache_config,
+        worker_id=1,
+        computed_resource_claim=types.SimpleNamespace(ram=ram_claim),
+        distributed_servers=None,
+    )
     backend._get_device_info = lambda: device_info
-    backend._get_total_vram_claim = lambda: vram_claim
     backend._get_selected_gpu_devices = lambda: [
         types.SimpleNamespace(index=i) for i in range(gpu_count)
     ]
     return backend
 
 
-def _vllm_backend_claiming(worker_id, instance_worker_id, vram, subordinates=()):
-    """A backend reading its VRAM claim off the instance record, from the
-    perspective of one of the workers the instance is placed on."""
+def _vllm_backend_claiming(
+    worker_id, instance_worker_id, ram, gpu_count=1, subordinates=()
+):
+    """A backend reading its host-memory claim off the instance record, from
+    the perspective of one of the workers the instance is placed on."""
     backend = VLLMServer.__new__(VLLMServer)
     backend._worker = types.SimpleNamespace(id=worker_id)
+    backend._model = types.SimpleNamespace(
+        extended_kv_cache=ExtendedKVCacheConfig(enabled=True, ram_ratio=2.0)
+    )
     backend._model_instance = types.SimpleNamespace(
         worker_id=instance_worker_id,
-        computed_resource_claim=types.SimpleNamespace(vram=vram),
+        computed_resource_claim=types.SimpleNamespace(ram=ram),
         distributed_servers=types.SimpleNamespace(
             subordinate_workers=[
                 types.SimpleNamespace(
                     worker_id=sub_worker_id,
-                    computed_resource_claim=types.SimpleNamespace(vram=sub_vram),
+                    computed_resource_claim=types.SimpleNamespace(ram=sub_ram),
                 )
-                for sub_worker_id, sub_vram in subordinates
+                for sub_worker_id, sub_ram in subordinates
             ]
         ),
     )
+    backend._get_selected_gpu_devices = lambda: [
+        types.SimpleNamespace(index=i) for i in range(gpu_count)
+    ]
     return backend
 
 
@@ -645,7 +660,8 @@ def test_vllm_legacy_local_kv_cache_behavior_unchanged():
     # A config without an explicit mode is local: LMCache env sizing and the
     # LMCache connector args apply as before.
     backend = _vllm_backend_with_kv_cache(
-        ExtendedKVCacheConfig(enabled=True, ram_size=4, chunk_size=256)
+        ExtendedKVCacheConfig(enabled=True, ram_size=4, chunk_size=256),
+        ram_claim=4 * 1024**3,
     )
 
     env = {}
@@ -661,10 +677,10 @@ def test_vllm_legacy_local_kv_cache_behavior_unchanged():
     ]
 
 
-def test_vllm_local_kv_cache_ram_ratio_sizes_from_vram_claim():
+def test_vllm_local_kv_cache_carries_the_booked_size():
     backend = _vllm_backend_with_kv_cache(
         ExtendedKVCacheConfig(enabled=True, ram_ratio=1.5),
-        vram_claim=8 * 1024**3,
+        ram_claim=12 * 1024**3,
     )
 
     env = {}
@@ -672,14 +688,41 @@ def test_vllm_local_kv_cache_ram_ratio_sizes_from_vram_claim():
     assert env == {"LMCACHE_MAX_LOCAL_CPU_SIZE": "12"}
 
 
+def test_vllm_local_kv_cache_splits_the_booked_size_across_ranks():
+    """LMCache allocates the variable once per rank, so a worker's budget is
+    what its cards share -- not what each of them takes."""
+    backend = _vllm_backend_with_kv_cache(
+        ExtendedKVCacheConfig(enabled=True, ram_ratio=1.5),
+        ram_claim=12 * 1024**3,
+        gpu_count=4,
+    )
+
+    env = {}
+    backend._set_lmcache_env(env)
+    assert env == {"LMCACHE_MAX_LOCAL_CPU_SIZE": "3"}
+
+
+def test_vllm_local_kv_cache_without_a_booking_leaves_the_capacity_default():
+    """Nothing reserved means nothing to hand the engine; LMCache falls back
+    to its own default rather than to a figure no placement agreed to."""
+    backend = _vllm_backend_with_kv_cache(
+        ExtendedKVCacheConfig(enabled=True, ram_ratio=None, ram_size=None),
+    )
+
+    env = {}
+    backend._set_lmcache_env(env)
+    assert env == {}
+
+
 def test_vllm_ascend_local_kv_cache_wires_npu_offload_connector():
     """Ascend has no LMCache build, so local mode carries its sizing in
-    vllm-ascend's own connector instead of the LMCache variables. The
-    configured size is the worker's, so 4 GiB over 2 cards is 2 GiB a rank."""
+    vllm-ascend's own connector instead of the LMCache variables. The booked
+    size is the worker's, so 4 GiB over 2 cards is 2 GiB a rank."""
     backend = _vllm_backend_with_kv_cache(
         ExtendedKVCacheConfig(enabled=True, ram_size=4, chunk_size=256),
         device_info=("cann", None, "Ascend910B3"),
         backend_version="0.23.0",
+        ram_claim=4 * 1024**3,
         gpu_count=2,
     )
 
@@ -694,14 +737,14 @@ def test_vllm_ascend_local_kv_cache_wires_npu_offload_connector():
     ]
 
 
-def test_vllm_ascend_local_kv_cache_ram_ratio_sizes_from_vram_claim():
-    """The ratio scales this worker's claim, and the per-rank share carries
-    it independently of the engine's parallelism."""
+def test_vllm_ascend_local_kv_cache_carries_the_booked_size():
+    """The per-rank share carries the booking independently of how the engine
+    spells its parallelism."""
     backend = _vllm_backend_with_kv_cache(
         ExtendedKVCacheConfig(enabled=True, ram_ratio=2.0),
         device_info=("cann", None, "Ascend910B3"),
         backend_version="0.23.0",
-        vram_claim=6 * 1024**3,
+        ram_claim=12 * 1024**3,
         gpu_count=4,
     )
 
@@ -728,25 +771,37 @@ def test_vllm_ascend_local_kv_cache_without_a_size_leaves_the_capacity_default()
     ]
 
 
-@pytest.mark.parametrize("worker_id", [1, 2])
-def test_vllm_total_vram_claim_is_the_claim_of_the_worker_reading_it(worker_id):
+@pytest.mark.parametrize(
+    "worker_id, expected",
+    [(1, 4 * 1024**3), (2, 1024**3)],
+    ids=["main", "subordinate"],
+)
+def test_vllm_local_kv_cache_reads_the_booking_of_the_worker_it_runs_on(
+    worker_id, expected
+):
+    """A distributed instance is booked per worker. A subordinate reading the
+    instance's own claim would size its cache off the main worker's."""
     backend = _vllm_backend_claiming(
         worker_id=worker_id,
         instance_worker_id=1,
-        vram={0: 4 * 1024**3, 1: 4 * 1024**3},
-        subordinates=[(2, {0: 2 * 1024**3})],
+        ram=8 * 1024**3,
+        gpu_count=2,
+        subordinates=[(2, 2 * 1024**3)],
     )
 
-    expected = 8 * 1024**3 if worker_id == 1 else 2 * 1024**3
-    assert backend._get_total_vram_claim() == expected
+    assert backend._get_local_kv_cache_bytes_per_rank() == expected
 
 
-def test_vllm_total_vram_claim_tolerates_a_claim_without_vram():
-    """computed_resource_claim.vram is optional; a deployment sized by
-    ram_size must not trip over an instance that has none."""
-    backend = _vllm_backend_claiming(worker_id=1, instance_worker_id=1, vram=None)
+def test_vllm_local_kv_cache_claims_nothing_on_a_worker_the_instance_left():
+    """No claim for this worker is no cache to size, not the main worker's."""
+    backend = _vllm_backend_claiming(
+        worker_id=3,
+        instance_worker_id=1,
+        ram=8 * 1024**3,
+        subordinates=[(2, 2 * 1024**3)],
+    )
 
-    assert backend._get_total_vram_claim() == 0
+    assert backend._get_local_kv_cache_bytes_per_rank() is None
 
 
 @pytest.mark.parametrize(

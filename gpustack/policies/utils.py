@@ -12,6 +12,7 @@ from gpustack.policies.base import (
 from gpustack.scheduler.calculator import calculate_local_model_weight_size
 from gpustack.schemas.model_files import ModelFileStateEnum
 from gpustack.schemas.models import (
+    ExtendedKVCacheConfig,
     ModelInstance,
     Model,
     CategoryEnum,
@@ -887,12 +888,19 @@ def ram_not_enough(ram_claim: int, allocatable: Allocatable) -> bool:
     return allocatable.ram < ram_claim
 
 
-def get_model_ram_claim(model: Model) -> int:
+def get_model_ram_claim(model: Model, gpu_count: int = 1) -> int:
     """
-    Get the RAM requirement for the model in bytes.
+    Get the RAM requirement for one instance of the model in bytes.
 
     Only a LOCAL extended KV cache reserves host RAM here -- see
     :func:`get_computed_ram_claim` for why "shared" must not.
+
+    Args:
+        gpu_count: GPUs to include in a preliminary RAM estimate, since the
+            declared cache size is per GPU. Use the instance's GPU count for
+            single-worker placement, or one GPU as a lower bound when the
+            local GPU count is unknown. Check the final per-worker claim with
+            get_computed_ram_claim once its GPUs have been selected.
     """
     extended_kv_cache = model.extended_kv_cache
     if (
@@ -904,46 +912,80 @@ def get_model_ram_claim(model: Model) -> int:
         # The in-process cache lives in the engine's own address space, so
         # the deployment claims it. Shared mode claims nothing: the cache
         # is the cache server's, sized by the service's own capacity.
-        return extended_kv_cache.ram_size * 1024**3
+        return extended_kv_cache.ram_size * 1024**3 * max(gpu_count, 1)
     return 0
 
 
 def get_computed_ram_claim(
-    model: Model, vram_claim: Dict[int, int], static_ram: Optional[int] = None
+    model: Model,
+    vram_claim: Dict[int, int],
+    static_ram: Optional[int] = None,
 ) -> Optional[int]:
     """
     Get the computed RAM claim for the model based on the provided model and vram_claim.
     The priority is as follows:
-    1. If static_ram is provided, use it.
-    2. If RAM size for a LOCAL extended KV cache is available, use it.
-    3. If RAM ratio for a LOCAL extended KV cache is set and vram_claim is available,
+    1. If RAM size for a LOCAL extended KV cache is available, calculate RAM as
+       ram_size * the GPUs this worker runs.
+    2. If RAM ratio for a LOCAL extended KV cache is set and vram_claim is available,
        calculate RAM as ram_ratio * total_vram_claim.
-    4. If neither is available, return None.
+    3. If static_ram is provided, use it.
+    4. If none is available, return None.
 
     Only the in-process mode claims here. A deployment attached to a cache
     service holds no CPU cache of its own — the worker skips the sizing
     entirely and the cache lives in the cache server's container, under the
     service's own capacity — so claiming for it would reserve host RAM
     nothing uses, once per attached deployment.
+
+    What this returns is not merely a reservation to schedule against: it is
+    the capacity the worker hands the engine. Every backend takes an absolute
+    figure there (``--hicache-size``, ``LMCACHE_MAX_LOCAL_CPU_SIZE``,
+    ``cpu_bytes_to_use_per_rank``), so the cache that gets allocated is the
+    cache that got booked. Passing an engine's own ratio flag through instead
+    would leave the engine multiplying a basis of its choosing — SGLang's
+    ``--hicache-ratio`` multiplies the KV pool it ends up with, which excludes
+    the weights and is a fraction of what was reserved here.
+
+    Both knobs are per GPU, the granularity every backend allocates at, so
+    they stay comparable to each other: one says every card gets a cache of
+    ram_size, the other that every card gets ram_ratio times the VRAM reserved
+    for it. A deployment that changes its parallelism keeps the cache each
+    card had, and a worker running half an instance books half the memory.
+
+    Args:
+        vram_claim: This worker's VRAM claim per GPU index, in bytes.
+        static_ram: A RAM figure the caller already settled, such as a router's
+            declared memory. Answers only what the cache configuration cannot.
     """
+    ext = model.extended_kv_cache
+    if ext and ext.is_local():
+        claim = _local_kv_cache_ram_claim(ext, vram_claim)
+        if claim is not None:
+            return claim
+
     if static_ram:
         return static_ram
 
-    ext = model.extended_kv_cache
-    if not ext or not ext.is_local():
-        return None
+    return None
 
-    claim = None
-    # static ram size
-    if ext.ram_size and ext.ram_size > 0:
-        claim = ext.ram_size * 1024**3
 
-    # ram ratio to vram
-    elif ext.ram_ratio and ext.ram_ratio > 0 and vram_claim:
+def _local_kv_cache_ram_claim(
+    ext: ExtendedKVCacheConfig,
+    vram_claim: Dict[int, int],
+) -> Optional[int]:
+    """Host memory one worker holds for a local extended KV cache, in bytes.
+    ``None`` when the deployment sets neither knob, or when no GPU is claimed
+    here yet for either knob to apply to."""
+    # static ram size, per GPU
+    if ext.ram_size and ext.ram_size > 0 and vram_claim:
+        return ext.ram_size * 1024**3 * len(vram_claim)
+
+    # ram ratio to this worker's share of the vram
+    if ext.ram_ratio and ext.ram_ratio > 0 and vram_claim:
         total_vram_claim = sum(vram_claim.values())
-        claim = int(total_vram_claim * ext.ram_ratio)
+        return int(total_vram_claim * ext.ram_ratio)
 
-    return claim
+    return None
 
 
 def sort_workers_by_gpu_count(workers: List[Worker]):

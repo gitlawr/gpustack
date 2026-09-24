@@ -75,8 +75,11 @@ def test_a_local_cache_still_books_what_it_always_did(ext, vram, expected):
 
 def test_a_local_size_still_pre_checks():
     """`get_model_ram_claim` is the worker-level pre-check; a local cache with
-    a declared size is the one case it can answer before a GPU is picked."""
+    a declared size is the one case it can answer before a GPU is picked. The
+    size is per GPU, so a single-worker pre-check prices the instance's whole
+    card count. A distributed placement checks each worker's share."""
     assert get_model_ram_claim(_model(_local(ram_size=16))) == 16 * GIB
+    assert get_model_ram_claim(_model(_local(ram_size=16)), gpu_count=4) == 64 * GIB
 
 
 def test_a_local_ratio_has_no_pre_check():

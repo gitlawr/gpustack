@@ -303,7 +303,7 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
         self._vram_claim = await estimate_model_vram(
             self._model, self._config.huggingface_token, workers
         )
-        self._ram_claim = get_model_ram_claim(self._model)
+        self._ram_claim = get_model_ram_claim(self._model, self._gpu_count)
         logger.info(
             f"Calculated resource claim for model {self._model.readable_source}, "
             f"VRAM claim: {self._vram_claim}, RAM claim: {self._ram_claim}"
@@ -471,6 +471,9 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
             )
 
             vram_claim = {gpu_index: vram_claim_bytes}
+            ram_claim = get_computed_ram_claim(self._model, vram_claim)
+            if ram_not_enough(ram_claim or 0, allocatable):
+                continue
             candidates.append(
                 ModelInstanceScheduleCandidate(
                     worker=worker,
@@ -478,7 +481,7 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                     gpu_type=gpu.type,
                     computed_resource_claim=ComputedResourceClaim(
                         vram=vram_claim,
-                        ram=get_computed_ram_claim(self._model, vram_claim),
+                        ram=ram_claim,
                     ),
                 )
             )
@@ -601,6 +604,9 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                 break
 
         if found_candidate:
+            ram_claim = get_computed_ram_claim(self._model, vram_claim)
+            if ram_not_enough(ram_claim or 0, allocatable):
+                return []
             # The reservation this member would hold across all of its cards,
             # recorded for the same reason the single-GPU scan records its own:
             # `get_resource_claim` quotes it in a group's refusal, and without
@@ -615,7 +621,7 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                     gpu_indexes=gpu_indexes,
                     computed_resource_claim=ComputedResourceClaim(
                         vram=vram_claim,
-                        ram=get_computed_ram_claim(self._model, vram_claim),
+                        ram=ram_claim,
                     ),
                 )
             ]
@@ -713,11 +719,6 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
             for worker in worker_group:
                 allocatable = self.get_worker_allocatable_resource(worker, gpu_type)
 
-                if ram_not_enough(self._ram_claim, allocatable):
-                    # The RAM resource(for extended KV cache) is required per worker.
-                    # Skip the worker if it does not satisfy the RAM requirement.
-                    continue
-
                 if any(
                     gpu.memory is None
                     or gpu.memory.total is None
@@ -728,6 +729,13 @@ class VLLMResourceFitSelector(ScheduleCandidatesSelector):
                     for gpu in worker.status.gpu_devices
                 ):
                     # Skip the worker if any GPU does not satisfy the gpu_memory_utilization requirement.
+                    continue
+                vram_claim = {
+                    gpu.index: int(gpu.memory.total * self._gpu_memory_utilization)
+                    for gpu in worker.status.gpu_devices
+                }
+                ram_claim = get_computed_ram_claim(self._model, vram_claim)
+                if ram_not_enough(ram_claim or 0, allocatable):
                     continue
                 selected_workers.append(worker)
                 gpu_sum += gpu_count

@@ -238,7 +238,7 @@ class VGPUResourceFitSelector(ScheduleCandidatesSelector):
         self._vram_claim = await estimate_model_vram(
             self._model, self._config.huggingface_token, workers
         )
-        self._ram_claim = get_model_ram_claim(self._model)
+        self._ram_claim = get_model_ram_claim(self._model, self._gpu_count)
 
         if self._vram_claim <= self._member_vram_capacity():
             return [

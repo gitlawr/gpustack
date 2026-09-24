@@ -244,10 +244,10 @@ class ExtendedKVCacheConfig(BaseModel):
     """ ID of the CacheService to attach to. Required when mode is "shared". """
 
     ram_ratio: Optional[float] = 1.2
-    """ RAM-to-VRAM ratio for KV cache. For example, 2.0 means the RAM is twice the size of the VRAM. """
+    """ RAM-to-VRAM ratio for KV cache, applied per GPU to the VRAM reserved for it. For example, 2.0 means the RAM is twice the size of the VRAM. """
 
     ram_size: Optional[int] = None
-    """ Maximum size of the KV cache to be stored in local CPU memory (unit: GiB). Overrides ram_ratio if both are set. """
+    """ Maximum size of the KV cache to be stored in local CPU memory, per GPU (unit: GiB). Overrides ram_ratio if both are set. """
 
     chunk_size: Optional[int] = None
     """ Size for each KV cache chunk (unit: number of tokens). """

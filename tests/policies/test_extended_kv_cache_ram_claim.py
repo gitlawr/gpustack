@@ -43,6 +43,16 @@ def test_local_claims_the_ratio_of_its_vram():
     assert claim == int(12 * GIB)
 
 
+def test_both_knobs_are_per_gpu():
+    """The granularity every backend allocates at, and what keeps the two
+    comparable: a card gets ram_size, or the ratio of the VRAM reserved for
+    it. A worker running two cards of an instance books for two."""
+    two_cards = {0: 10 * GIB, 1: 10 * GIB}
+
+    assert get_computed_ram_claim(_model(_local(ram_size=20)), two_cards) == 40 * GIB
+    assert get_computed_ram_claim(_model(_local(ram_ratio=2.0)), two_cards) == 40 * GIB
+
+
 @pytest.mark.parametrize(
     "extended_kv_cache",
     [_shared(ram_size=20), _shared(ram_ratio=1.2), _shared()],
