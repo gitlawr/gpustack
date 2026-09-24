@@ -326,33 +326,105 @@ def test_rows_claiming_a_subordinate_the_instance_does_not_have_are_reported(cap
 # ---------------------------------------------------------------------------
 
 
+def _compiled_pair(instance):
+    from gpustack.server.model_instance_workloads import compile_model_instance
+
+    return (
+        _binding_of(instance_placements(instance)),
+        _binding_of(placements_from_workloads(compile_model_instance(instance))),
+    )
+
+
 def test_an_unscheduled_instance_reads_the_same_both_ways():
     """The first reading of every instance is of one with no binding yet, so
     a difference here is reported for each one and the tally never clears."""
     from gpustack.schemas.models import ModelInstance
-    from gpustack.server.model_instance_workloads import compile_model_instance
 
-    instance = ModelInstance(id=1, name="mi")
+    from_instance, from_rows = _compiled_pair(ModelInstance(id=1, name="mi"))
 
-    assert _binding_of(instance_placements(instance)) == _binding_of(
-        placements_from_workloads(compile_model_instance(instance))
+    assert from_instance == from_rows
+
+
+def test_a_scheduled_instance_reads_the_same_both_ways():
+    """The other spelling, and the reason normalising the rows alone was not
+    enough: an instance carries [] for a collection it has never been given
+    and None once a later write leaves it alone, so the two differ in
+    opposite directions before and after scheduling."""
+    from gpustack.schemas.models import ComputedResourceClaim, ModelInstance
+
+    from_instance, from_rows = _compiled_pair(
+        ModelInstance(
+            id=1,
+            name="mi",
+            worker_id=1,
+            gpu_indexes=[0],
+            gpu_addresses=None,
+            ports=[40018],
+            pid=1921,
+            computed_resource_claim=ComputedResourceClaim(vram={0: 1}),
+        )
     )
+
+    assert from_instance == from_rows
 
 
 @pytest.mark.parametrize("field", ["gpu_indexes", "gpu_addresses", "ports"])
-def test_a_collection_the_row_stores_as_null_reads_back_as_empty(field):
-    """A row compiles an empty collection to NULL, the column's default.
-    Several callers iterate or count these without a guard -- the binpack
-    scorer over a subordinate's gpu_indexes, the backends sizing their
-    ranks -- so None would raise where the list merely yields nothing."""
+@pytest.mark.parametrize("empty", [None, []])
+def test_a_collection_reads_back_as_a_list_however_it_was_spelled(field, empty):
+    """Several callers iterate or count these without a guard -- the binpack
+    scorer over a subordinate's gpu_indexes, the backends sizing their ranks
+    -- so None would raise where the list merely yields nothing. Held on both
+    readings, since either may become the authoritative one."""
     from gpustack.schemas.models import ModelInstance
     from gpustack.server.model_instance_workloads import compile_model_instance
 
-    rows = compile_model_instance(ModelInstance(id=1, name="mi"))
-    assert getattr(rows[0], field) is None
+    instance = ModelInstance(id=1, name="mi", **{field: empty})
+    rows = compile_model_instance(instance)
 
-    placement = placements_from_workloads(rows)[0]
-    assert getattr(placement, field) == []
-    # What the callers actually do with it.
-    assert len(getattr(placement, field)) == 0
-    assert list(getattr(placement, field)) == []
+    for placement in (
+        instance_placements(instance)[0],
+        placements_from_workloads(rows)[0],
+    ):
+        assert getattr(placement, field) == []
+        assert len(getattr(placement, field)) == 0
+
+
+@pytest.mark.parametrize("distributed", [False, True])
+def test_no_spelling_of_an_empty_field_makes_the_two_readings_differ(distributed):
+    """Swept rather than enumerated by hand: this was fixed twice, once for
+    each direction, because a case was found in a deployment rather than
+    here. Every combination of how the optional fields can be spelled has to
+    read the same both ways."""
+    import itertools
+
+    from gpustack.schemas.models import (
+        ComputedResourceClaim,
+        DistributedServerCoordinateModeEnum,
+        DistributedServers,
+        ModelInstance,
+        ModelInstanceSubordinateWorker,
+    )
+    from gpustack.server.model_instance_workloads import compile_model_instance
+
+    spellings = {
+        "gpu_indexes": [None, []],
+        "gpu_addresses": [None, []],
+        "ports": [None, []],
+        "computed_resource_claim": [None, ComputedResourceClaim(vram={0: 1})],
+    }
+    names = list(spellings)
+
+    for combination in itertools.product(*(spellings[name] for name in names)):
+        fields = dict(zip(names, combination))
+        instance = ModelInstance(id=1, name="mi", worker_id=1, **fields)
+        if distributed:
+            instance.distributed_servers = DistributedServers(
+                mode=DistributedServerCoordinateModeEnum.INITIALIZE_LATER,
+                subordinate_workers=[
+                    ModelInstanceSubordinateWorker(worker_id=2, **fields)
+                ],
+            )
+
+        assert _binding_of(instance_placements(instance)) == _binding_of(
+            placements_from_workloads(compile_model_instance(instance))
+        ), fields

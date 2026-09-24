@@ -202,6 +202,20 @@ def _follower_state_of(placements: list) -> list:
     ]
 
 
+def _listed(value) -> list:
+    """A collection, however its source spelled the empty one.
+
+    Neither side is consistent with itself: a row compiles an empty
+    collection to NULL, which is the column's default, while an instance
+    carries [] before it is scheduled and None after -- gpu_addresses is
+    set on one write and left alone on the next. Absorbed here rather than
+    normalised into either store, because this is the one shape both
+    readings are held to, and its callers iterate and count these without a
+    guard.
+    """
+    return list(value) if value else []
+
+
 def placements_from_workloads(workloads: list) -> list:
     """
     The same shape, read off the rows instead.
@@ -229,12 +243,12 @@ def placements_from_workloads(workloads: list) -> list:
                 worker_ip=row.worker_ip,
                 worker_ifname=row.worker_ifname,
                 gpu_type=row.gpu_type,
-                gpu_indexes=row.gpu_indexes or [],
-                gpu_addresses=row.gpu_addresses or [],
+                gpu_indexes=_listed(row.gpu_indexes),
+                gpu_addresses=_listed(row.gpu_addresses),
                 computed_resource_claim=(
                     ComputedResourceClaim.model_validate(claim) if claim else None
                 ),
-                ports=ports or [],
+                ports=_listed(ports),
                 pid=row.pid,
                 arguments=row.arguments,
                 # Only for a follower. A leader's row reaches pending from five
@@ -274,10 +288,10 @@ def instance_placements(instance: ModelInstance, workloads: list = None) -> list
             worker_ip=instance.worker_ip,
             worker_ifname=instance.worker_ifname,
             gpu_type=instance.gpu_type,
-            gpu_indexes=instance.gpu_indexes,
-            gpu_addresses=instance.gpu_addresses,
+            gpu_indexes=_listed(instance.gpu_indexes),
+            gpu_addresses=_listed(instance.gpu_addresses),
             computed_resource_claim=instance.computed_resource_claim,
-            ports=instance.ports,
+            ports=_listed(instance.ports),
             pid=instance.pid,
             state=instance.state,
             state_message=instance.state_message,
@@ -336,10 +350,10 @@ def subordinate_placements(instance: ModelInstance, workloads: list = None) -> l
             worker_ip=sw.worker_ip,
             worker_ifname=sw.worker_ifname,
             gpu_type=sw.gpu_type,
-            gpu_indexes=sw.gpu_indexes,
-            gpu_addresses=sw.gpu_addresses,
+            gpu_indexes=_listed(sw.gpu_indexes),
+            gpu_addresses=_listed(sw.gpu_addresses),
             computed_resource_claim=sw.computed_resource_claim,
-            ports=sw.ports,
+            ports=_listed(sw.ports),
             pid=sw.pid,
             arguments=sw.arguments,
             state=sw.state,
