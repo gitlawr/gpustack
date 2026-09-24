@@ -559,19 +559,23 @@ class SGLangServer(InferenceServer):
                 ]
             )
 
-        if extended_kv_cache.ram_size and extended_kv_cache.ram_size > 0:
+        # --hicache-size, not --hicache-ratio: the ratio SGLang applies is a
+        # multiple of the KV pool it ends up with, which excludes the weights
+        # and is a fraction of the reservation a deployment's RAM-to-VRAM
+        # ratio is written against. Sizing it here is what keeps the host
+        # pool equal to the host memory the scheduler booked for it.
+        #
+        # The flag is a per-rank capacity in whole GB (10^9), and every rank
+        # builds its own host pool. A share under a gigabyte still asks for
+        # one: a 0 there is "unset", which hands the pool back to the ratio
+        # default of twice the KV pool, larger than anything booked.
+        ram_bytes = self._get_local_kv_cache_bytes_per_rank()
+        if ram_bytes:
+            hicache_size = max(int(ram_bytes / 1e9), 1)
             arguments.extend(
                 [
                     "--hicache-size",
-                    str(extended_kv_cache.ram_size),
-                ]
-            )
-
-        if extended_kv_cache.ram_ratio and extended_kv_cache.ram_ratio > 0:
-            arguments.extend(
-                [
-                    "--hicache-ratio",
-                    str(extended_kv_cache.ram_ratio),
+                    str(hicache_size),
                 ]
             )
 

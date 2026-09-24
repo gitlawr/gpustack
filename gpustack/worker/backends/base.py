@@ -51,6 +51,7 @@ from gpustack.schemas.models import (
     role_container_resources,
     role_takes_no_accelerator,
     BackendEnum,
+    ComputedResourceClaim,
     Model,
     ModelInstance,
     ModelInstanceUpdate,
@@ -870,6 +871,59 @@ class InferenceServer(ABC):
                 if gpu_device:
                     gpu_devices.append(gpu_device)
         return gpu_devices
+
+    def _get_computed_resource_claim(self) -> Optional[ComputedResourceClaim]:
+        """What the scheduler booked for this instance on *this* worker.
+
+        A distributed instance carries one claim per worker: the main one on
+        the instance, and one per subordinate worker under its distributed
+        servers. Reading the instance's own claim on a subordinate would
+        report the main worker's cards and memory.
+        """
+        minstance = self._model_instance
+        dservers = minstance.distributed_servers
+        if (
+            dservers
+            and dservers.subordinate_workers
+            and minstance.worker_id != self._worker.id
+        ):
+            for subworker in dservers.subordinate_workers:
+                if subworker.worker_id == self._worker.id:
+                    return subworker.computed_resource_claim
+            return None
+        return minstance.computed_resource_claim
+
+    def _get_local_kv_cache_bytes_per_rank(self) -> Optional[int]:
+        """Host memory one rank on this worker may fill with offloaded KV
+        blocks, in bytes. ``None`` when the deployment runs no local extended
+        KV cache, or when nothing was booked for it.
+
+        The scheduler sized the cache and reserved exactly that much host
+        memory on this worker (``get_computed_ram_claim``); handing the same
+        figure to the engine is what keeps what gets allocated equal to what
+        got booked. Every backend takes it as an absolute capacity **per
+        rank** -- each rank builds its own host pool -- so the worker's budget
+        divides among the cards it was given, which also keeps the sizing
+        independent of how the engine spells its parallelism.
+        """
+        ext = self._model.extended_kv_cache
+        if not (ext and ext.is_local()):
+            return None
+
+        claim = self._get_computed_resource_claim()
+        booked = claim.ram if claim else None
+        if not booked:
+            # A deployment that set neither knob lands here, and so does one
+            # whose placement recorded no claim; both leave the engine on its
+            # own default rather than on a size nothing reserved.
+            logger.info(
+                "No host memory was booked for the local extended KV cache; "
+                "leaving its size to the inference backend."
+            )
+            return None
+
+        ranks = len(self._get_selected_gpu_devices()) or 1
+        return booked // ranks
 
     def _get_device_info(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Get the device information for the serving.

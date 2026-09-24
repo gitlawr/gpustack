@@ -790,12 +790,31 @@ def test_sglang_shared_kv_cache_disables_hicache_arguments():
     assert backend._get_hicache_arguments() == []
 
 
-def test_sglang_local_kv_cache_hicache_arguments_unchanged():
+def _sglang_backend_with_kv_cache(extended_kv_cache, ram_claim=0, gpu_count=1):
+    """A backend whose local cache was booked ``ram_claim`` bytes of host
+    memory on this worker, the figure the scheduler wrote onto the instance."""
     backend = SGLangServer.__new__(SGLangServer)
-    backend._model = types.SimpleNamespace(
-        extended_kv_cache=ExtendedKVCacheConfig(
-            enabled=True, ram_size=8, chunk_size=64, ram_ratio=None
-        )
+    backend._model = types.SimpleNamespace(extended_kv_cache=extended_kv_cache)
+    backend._worker = types.SimpleNamespace(id=1)
+    backend._model_instance = types.SimpleNamespace(
+        worker_id=1,
+        computed_resource_claim=types.SimpleNamespace(ram=ram_claim),
+        distributed_servers=None,
+    )
+    backend._get_selected_gpu_devices = lambda: [
+        types.SimpleNamespace(index=i) for i in range(gpu_count)
+    ]
+    return backend
+
+
+def test_sglang_local_kv_cache_sizes_the_host_pool_it_was_booked():
+    """--hicache-size, not --hicache-ratio: SGLang's ratio multiplies the KV
+    pool it settles on, which leaves out the weights and is a fraction of the
+    reservation the deployment's ratio was written against. 8 GiB booked is
+    8.58 GB, the units the flag counts in."""
+    backend = _sglang_backend_with_kv_cache(
+        ExtendedKVCacheConfig(enabled=True, ram_size=8, chunk_size=64, ram_ratio=None),
+        ram_claim=8 * 1024**3,
     )
 
     assert backend._get_hicache_arguments() == [
@@ -807,21 +826,45 @@ def test_sglang_local_kv_cache_hicache_arguments_unchanged():
     ]
 
 
+def test_sglang_local_kv_cache_splits_the_host_pool_across_ranks():
+    """Every rank builds its own host pool, so the worker's budget is what its
+    cards share: 120 GiB over 2 cards is 64 GB a rank."""
+    backend = _sglang_backend_with_kv_cache(
+        ExtendedKVCacheConfig(enabled=True, ram_ratio=3.0),
+        ram_claim=120 * 1024**3,
+        gpu_count=2,
+    )
+
+    assert backend._get_hicache_arguments() == [
+        "--enable-hierarchical-cache",
+        "--hicache-size",
+        "64",
+    ]
+
+
+def test_sglang_local_kv_cache_without_a_booking_leaves_the_capacity_default():
+    backend = _sglang_backend_with_kv_cache(
+        ExtendedKVCacheConfig(enabled=True, ram_ratio=None, ram_size=None)
+    )
+
+    assert backend._get_hicache_arguments() == ["--enable-hierarchical-cache"]
+
+
 def test_sglang_local_kv_cache_has_no_accelerator_gate():
     """SGLang's hierarchical cache is engine-native on every framework it
     ships for — on CANN it picks the Ascend IO backend and memory layout
     itself — so the flags carry no accelerator condition, unlike the vLLM
     connectors."""
-    backend = SGLangServer.__new__(SGLangServer)
-    backend._model = types.SimpleNamespace(
-        extended_kv_cache=ExtendedKVCacheConfig(enabled=True, ram_ratio=3.0)
+    backend = _sglang_backend_with_kv_cache(
+        ExtendedKVCacheConfig(enabled=True, ram_ratio=3.0),
+        ram_claim=30 * 1024**3,
     )
     backend._get_device_info = lambda: ("cann", None, "Ascend910B3")
 
     assert backend._get_hicache_arguments() == [
         "--enable-hierarchical-cache",
-        "--hicache-ratio",
-        "3.0",
+        "--hicache-size",
+        "32",
     ]
 
 

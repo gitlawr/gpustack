@@ -1970,7 +1970,7 @@ def _drop_local_only_cache_knobs(declarations: List[_CacheDeclaration]) -> None:
     cache is a separate service with its own memory, which both worker
     backends say outright by returning before they apply either knob —
     `vllm.py`'s `_set_lmcache_env` never sets `LMCACHE_MAX_LOCAL_CPU_SIZE`,
-    `sglang.py` never passes `--hicache-ratio`.
+    `sglang.py` never passes `--hicache-size`.
 
     Left on the row they are not merely inert. The scheduler books host RAM
     from them (`get_computed_ram_claim`), and `ram_ratio` **defaults to 1.2**,

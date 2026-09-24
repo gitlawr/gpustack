@@ -5,7 +5,7 @@ the *engine process* offloads into host memory, which exists only in "local"
 mode. A "shared" cache lives in a separate cache service, and both worker
 backends return before they apply either knob -- ``vllm.py``'s
 ``_set_lmcache_env`` never sets ``LMCACHE_MAX_LOCAL_CPU_SIZE``, ``sglang.py``
-never passes ``--hicache-ratio``. The scheduler booked it anyway, and since
+never passes ``--hicache-size``. The scheduler booked it anyway, and since
 ``ram_ratio`` defaults to 1.2, merely picking a cache service made every
 accelerator-bearing member reserve 1.2x its VRAM claim of memory that no
 process would take.
