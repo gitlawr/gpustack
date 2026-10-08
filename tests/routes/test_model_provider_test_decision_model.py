@@ -360,3 +360,19 @@ async def test_official_typesafe_response_shape_is_a_pass(monkeypatch):
     result = await _test_decision(_systemone())
 
     assert result.accessible is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_transport_error_keeps_category_without_details(monkeypatch, error_type):
+    from gpustack.api.exceptions import InternalServerErrorException
+
+    def fail(_request):
+        raise error_type("credential=private-test-value; /internal/config.yaml")
+
+    _stub_upstream(monkeypatch, fail)
+    with pytest.raises(InternalServerErrorException) as raised:
+        await _test_decision(_systemone())
+    assert (
+        raised.value.message == f"Network error: {error_type.__name__}: request failed"
+    )

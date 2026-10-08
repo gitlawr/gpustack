@@ -79,3 +79,30 @@ async def test_resolve_direct_consumer_org_non_member_dropped(monkeypatch):
         monkeypatch, exc=ForbiddenException(message="Not a member of organization 7")
     )
     assert await middlewares._resolve_direct_consumer_org(_REQUEST, _USER, "7") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unexpected", [False, True])
+async def test_request_errors_keep_internal_details_out_of_responses(unexpected):
+    import httpx
+    from fastapi import FastAPI
+    from gpustack.api.exceptions import register_handlers
+
+    app = FastAPI()
+    app.add_middleware(middlewares.RequestTimeMiddleware)
+    register_handlers(app)
+
+    @app.get("/failure")
+    async def failure():
+        if unexpected:
+            raise RuntimeError("credential=private-test-value; /internal/config.yaml")
+        raise NotFoundException(message="Model not found")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/failure")
+    assert response.status_code == (500 if unexpected else 404)
+    assert response.json()["message"] == (
+        "An unexpected error occurred." if unexpected else "Model not found"
+    )

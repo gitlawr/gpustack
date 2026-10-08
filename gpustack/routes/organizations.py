@@ -123,8 +123,8 @@ async def create_organization(session: SessionDep, org_in: OrganizationCreate):
         return _to_public(created)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to create organization: {e}"
-        )
+            message=f"Failed to create organization: {type(e).__name__}"
+        ) from e
 
 
 @router.put("/{id}", response_model=OrganizationPublic)
@@ -142,8 +142,8 @@ async def update_organization(session: SessionDep, id: int, org_in: Organization
         await org.update(session, org_in.model_dump(exclude_unset=True))
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update organization: {e}"
-        )
+            message=f"Failed to update organization: {type(e).__name__}"
+        ) from e
     return _to_public(org)
 
 
@@ -173,8 +173,8 @@ async def delete_organization(session: SessionDep, id: int):
         await org.delete(session)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to delete organization: {e}"
-        )
+            message=f"Failed to delete organization: {type(e).__name__}"
+        ) from e
 
 
 async def _has_resources(session, owner_principal_id: int) -> list[str]:

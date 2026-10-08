@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import json
 import sys
@@ -50,6 +51,8 @@ from gpustack.config.config import get_global_config
 from gpustack.utils.grafana import resolve_grafana_base_url
 from gpustack.utils.export_limits import attachment_headers, sanitize_filename
 from gpustack.utils.tabular_export import stream_zip
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -298,7 +301,7 @@ async def get_serving_logs(  # noqa: C901
 
     def on_exception(e: Exception, t: aiohttp.ClientTimeout) -> tuple[str, int]:
         msg = (
-            str(e)
+            f"Unable to read logs: {type(e).__name__}"
             if not isinstance(e, TimeoutError)
             else f"Log stream timed out ({t.total} seconds). Please reopen the log page."
         )
@@ -463,7 +466,7 @@ async def _worker_log_download(
     try:
         chunk, headers, status_code = await anext(upstream)
     except Exception as e:
-        return None, _chunks_of(f"Failed to fetch logs: {e}\n".encode())
+        return None, _chunks_of(f"Failed to fetch logs: {type(e).__name__}\n".encode())
     payload = chunk if isinstance(chunk, bytes) else chunk.encode()
     if status_code >= 400:
         failure = f"Failed to fetch logs: HTTP {status_code}: ".encode() + payload
@@ -492,7 +495,7 @@ async def _download_body(
     except Exception as e:
         if not label_failure:
             raise
-        yield f"\nFailed to fetch logs: {e}\n".encode()
+        yield f"\nFailed to fetch logs: {type(e).__name__}\n".encode()
 
 
 async def _chunks_of(*chunks: bytes) -> AsyncIterator[bytes]:
@@ -560,7 +563,7 @@ async def _worker_log_chunks(
                     return
                 yield payload
     except Exception as e:
-        yield f"\nFailed to fetch logs: {e}\n".encode()
+        yield f"\nFailed to fetch logs: {type(e).__name__}\n".encode()
 
 
 def _build_serve_log_params(
@@ -670,7 +673,8 @@ async def _discover_worker_containers(
             request, worker, model_instance_id
         )
     except Exception as e:
-        return ["default"], str(e)
+        logger.exception("Failed to discover worker log streams")
+        return ["default"], f"Unable to discover log streams: {type(e).__name__}"
     current = next((entry for entry in payload.restarts if not entry.previous), None)
     containers = current.containers if current else []
     return list(containers) or ["default"], None
@@ -823,11 +827,12 @@ async def get_model_instance_log_options(
                 error=None,
             )
         except Exception as e:
+            logger.exception("Failed to retrieve worker log options")
             return ModelInstanceLogWorkerOption(
                 worker_id=wid,
                 name=display_name,
                 restarts=[],
-                error=str(e),
+                error=f"Unable to retrieve log options: {type(e).__name__}",
             )
 
     worker_options = await asyncio.gather(
@@ -873,8 +878,8 @@ async def create_model_instance(
         model_instance = await ModelInstance.create(session, model_instance_in)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to create model instance: {e}"
-        )
+            message=f"Failed to create model instance: {type(e).__name__}"
+        ) from e
     return model_instance
 
 
@@ -935,8 +940,8 @@ async def update_model_instance(
         await ModelInstanceService(session).update(model_instance, model_instance_in)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update model instance: {e}"
-        )
+            message=f"Failed to update model instance: {type(e).__name__}"
+        ) from e
     return model_instance
 
 
@@ -953,5 +958,5 @@ async def delete_model_instance(session: SessionDep, ctx: TenantContextDep, id: 
         await ModelInstanceService(session).delete(model_instance)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to delete model instance: {e}"
-        )
+            message=f"Failed to delete model instance: {type(e).__name__}"
+        ) from e

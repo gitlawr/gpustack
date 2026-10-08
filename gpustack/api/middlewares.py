@@ -33,7 +33,6 @@ from gpustack.server.metrics_collector import (
 )
 from gpustack.api.types.openai_ext import CreateEmbeddingResponseExt, CompletionExt
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -57,11 +56,9 @@ class RequestTimeMiddleware(BaseHTTPMiddleware):
         request.state.start_time = datetime.now(timezone.utc)
         try:
             response = await call_next(request)
-        except Exception as e:
-            # Log the full traceback so unexpected errors don't disappear
-            # behind the generic 500 response. The exception is otherwise
-            # serialized only via str(e), which often hides the real cause
-            # (validation errors, attribute errors with terse repr, etc.).
+        except Exception:
+            # Keep diagnostics on the server; the response contains no exception
+            # details because they may include database or filesystem contents.
             logger.exception(
                 "Unhandled exception in request %s %s",
                 request.method,
@@ -72,7 +69,7 @@ class RequestTimeMiddleware(BaseHTTPMiddleware):
                 content=ErrorResponse(
                     code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     reason="Internal Server Error",
-                    message=f"Unexpected error occurred: {e}",
+                    message="An unexpected error occurred.",
                 ).model_dump(),
             )
         return response

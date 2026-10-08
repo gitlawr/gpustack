@@ -97,8 +97,8 @@ async def update(
         await WorkerPool.update(existing, session=session, source=input)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update worker pool {id}: {e}"
-        )
+            message=f"Failed to update worker pool {id}: {type(e).__name__}"
+        ) from e
 
     return await WorkerPool.one_by_id(session, id, options=WORKER_POOL_LOAD_OPTIONS)
 
@@ -116,4 +116,6 @@ async def delete(session: SessionDep, ctx: TenantContextDep, id: int):
     try:
         await existing.delete(session=session)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to delete worker pool: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to delete worker pool: {type(e).__name__}"
+        ) from e

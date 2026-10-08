@@ -215,7 +215,9 @@ async def create_model_file(
         )
         model_file = await ModelFile.create(session, model_file)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to create model file: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to create model file: {type(e).__name__}"
+        ) from e
 
     return model_file
 
@@ -238,7 +240,9 @@ async def update_model_file(
     try:
         await model_file.update(session, model_file_in)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to update model file: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to update model file: {type(e).__name__}"
+        ) from e
 
     return model_file
 
@@ -274,7 +278,9 @@ async def delete_model_file(
 
         await model_file.delete(session)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to delete model file: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to delete model file: {type(e).__name__}"
+        ) from e
 
 
 @router.post(
@@ -294,6 +300,8 @@ async def reset_model_file(session: SessionDep, ctx: TenantContextDep, id: int):
 
         await model_file.update(session)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to update model file: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to update model file: {type(e).__name__}"
+        ) from e
 
     return model_file

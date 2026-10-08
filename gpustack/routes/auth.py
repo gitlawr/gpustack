@@ -861,54 +861,47 @@ async def oidc_callback(request: Request, session: SessionDep):
     async with httpx.AsyncClient(
         timeout=timeout, verify=verify, trust_env=use_proxy_env
     ) as client:
-        try:
-            token_res = await client.request("POST", token_endpoint, data=data)
-            res_data = json.loads(token_res.text)
-            if token_res.status_code != 200:
-                raise BadRequestException(
-                    message=f"Failed to get token, {res_data['error_description']}"
+        token_res = await client.request("POST", token_endpoint, data=data)
+        res_data = json.loads(token_res.text)
+        if token_res.status_code != 200:
+            raise BadRequestException(
+                message=f"Failed to get token, {res_data['error_description']}"
+            )
+
+        # Get user data from token or userinfo endpoint
+        user_data = await get_oidc_user_data(client, res_data, config)
+
+        if config.external_auth_name:
+            # If external_auth_name is set, use it as username.
+            username = user_data.get(config.external_auth_name)
+        else:
+            # Try common OIDC fields for username if external_auth_name is not set.
+            # Ref: https://openid.net/specs/openid-connect-core-1_0.html#rfc.section.18.1.1
+            for key in ["email", "sub"]:
+                if key in user_data:
+                    username = user_data[key]
+                    break
+            else:
+                raise UnauthorizedException(
+                    message="No valid username found in user data"
                 )
 
-            # Get user data from token or userinfo endpoint
-            user_data = await get_oidc_user_data(client, res_data, config)
+        if config.external_auth_full_name and '+' not in config.external_auth_full_name:
+            full_name = user_data.get(config.external_auth_full_name)
+        elif config.external_auth_full_name:
+            full_name = ' '.join(
+                [
+                    user_data.get(v.strip())
+                    for v in config.external_auth_full_name.split('+')
+                ]
+            )
+        else:
+            full_name = user_data.get("name", "")
 
-            if config.external_auth_name:
-                # If external_auth_name is set, use it as username.
-                username = user_data.get(config.external_auth_name)
-            else:
-                # Try common OIDC fields for username if external_auth_name is not set.
-                # Ref: https://openid.net/specs/openid-connect-core-1_0.html#rfc.section.18.1.1
-                for key in ["email", "sub"]:
-                    if key in user_data:
-                        username = user_data[key]
-                        break
-                else:
-                    raise UnauthorizedException(
-                        message="No valid username found in user data"
-                    )
-
-            if (
-                config.external_auth_full_name
-                and '+' not in config.external_auth_full_name
-            ):
-                full_name = user_data.get(config.external_auth_full_name)
-            elif config.external_auth_full_name:
-                full_name = ' '.join(
-                    [
-                        user_data.get(v.strip())
-                        for v in config.external_auth_full_name.split('+')
-                    ]
-                )
-            else:
-                full_name = user_data.get("name", "")
-
-            if config.external_auth_avatar_url:
-                avatar_url = user_data.get(config.external_auth_avatar_url)
-            else:
-                avatar_url = user_data.get("picture", None)
-        except Exception as e:
-            logger.error(f"Get OIDC user info error: {str(e)}")
-            raise UnauthorizedException(message=str(e))
+        if config.external_auth_avatar_url:
+            avatar_url = user_data.get(config.external_auth_avatar_url)
+        else:
+            avatar_url = user_data.get("picture", None)
     user = await _resolve_or_provision_external_user(
         session,
         username,
@@ -1052,7 +1045,9 @@ async def validate_cas_ticket(
             message=f"CAS validation HTTP error: {e.response.status_code}"
         )
     except httpx.HTTPError as e:
-        raise UnauthorizedException(message=f"CAS validation request failed: {e}")
+        raise UnauthorizedException(
+            message=f"CAS validation request failed: {type(e).__name__}"
+        )
 
     try:
         # Parse the raw bytes so the XML declaration's ``encoding=``
@@ -1068,7 +1063,9 @@ async def validate_cas_ticket(
         )
         root = etree.fromstring(response.content, parser=parser)
     except etree.XMLSyntaxError as e:
-        raise UnauthorizedException(message=f"Failed to parse CAS response: {e}")
+        raise UnauthorizedException(
+            message=f"Failed to parse CAS response: {type(e).__name__}"
+        )
 
     success_elem = _cas_find(root, "authenticationSuccess")
     if success_elem is None:

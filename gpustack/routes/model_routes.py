@@ -869,8 +869,8 @@ async def create_model_route(
     except Exception as e:
         await session.rollback()
         raise InternalServerErrorException(
-            f"Failed to create ModelAccess '{input.name}': {e}"
-        )
+            f"Failed to create ModelAccess '{input.name}': {type(e).__name__}"
+        ) from e
 
 
 @router.put(
@@ -956,7 +956,9 @@ async def update_model_route(
         # the session dirty, and the rollback keeps a retried request
         # from inheriting a failed transaction
         await session.rollback()
-        raise InternalServerErrorException(f"Failed to update ModelRoute '{id}': {e}")
+        raise InternalServerErrorException(
+            f"Failed to update ModelRoute '{id}': {type(e).__name__}"
+        ) from e
     return await _route_with_fresh_lb_mode(session, id)
 
 
@@ -999,7 +1001,9 @@ async def delete_model_route(
         # dirty; the rollback keeps a later use of the request session
         # from failing with PendingRollbackError
         await session.rollback()
-        raise InternalServerErrorException(f"Failed to delete ModelRoute '{id}': {e}")
+        raise InternalServerErrorException(
+            f"Failed to delete ModelRoute '{id}': {type(e).__name__}"
+        ) from e
 
 
 async def unset_fallback_target(
@@ -1065,8 +1069,8 @@ async def add_model_route_targets(
         return touched_targets
     except Exception as e:
         raise InternalServerErrorException(
-            f"Failed to add targets to ModelRoute '{id}': {e}"
-        )
+            f"Failed to add targets to ModelRoute '{id}': {type(e).__name__}"
+        ) from e
 
 
 async def _assert_consistent_lb_weights(session: AsyncSession, route_id: int) -> None:
@@ -1172,8 +1176,8 @@ async def batch_handle_targets(
         raise
     except Exception as e:
         raise InternalServerErrorException(
-            f"Failed to batch handle ModelRouteTargets: {e}"
-        )
+            f"Failed to batch handle ModelRouteTargets: {type(e).__name__}"
+        ) from e
 
     return target_count, targets_to_return
 
@@ -1523,8 +1527,8 @@ async def update_model_route_target(
     except Exception as e:
         await session.rollback()
         raise InternalServerErrorException(
-            f"Failed to update ModelRouteTarget '{id}': {e}"
-        )
+            f"Failed to update ModelRouteTarget '{id}': {type(e).__name__}"
+        ) from e
     await _refresh_route_lb_mode(session, existing.route_id)
     result = await ModelRouteTarget.one_by_id(session=session, id=id)
     if result is not None:
@@ -1562,8 +1566,8 @@ async def delete_model_route_target(
     except Exception as e:
         await session.rollback()
         raise InternalServerErrorException(
-            f"Failed to delete ModelRouteTarget '{id}': {e}"
-        )
+            f"Failed to delete ModelRouteTarget '{id}': {type(e).__name__}"
+        ) from e
 
 
 @target_router.post(
@@ -1607,8 +1611,8 @@ async def set_fallback_target(
     except Exception as e:
         await session.rollback()
         raise InternalServerErrorException(
-            f"Failed to set fallback status codes for ModelRouteTarget '{id}': {e}"
-        )
+            f"Failed to set fallback status codes for ModelRouteTarget '{id}': {type(e).__name__}"
+        ) from e
     target = await ModelRouteTarget.one_by_id(session=session, id=id)
     # Same response shape as the other target endpoints: any plugin
     # owning a target section is represented in the response.
@@ -1859,7 +1863,9 @@ async def add_model_authorization(
         await ModelRouteService(session).update(model)
     except Exception as e:
         await session.rollback()
-        raise InternalServerErrorException(message=f"Failed to add model access: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to add model access: {type(e).__name__}"
+        ) from e
 
     return ModelAuthorizationList(
         items=await _list_route_users(session, id),

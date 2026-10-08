@@ -263,12 +263,15 @@ class TestModelListPathCandidates:
         assert "expected a JSON object" in raised.value.message
 
     @pytest.mark.asyncio
-    async def test_a_transport_failure_stops_at_the_first_path(self, monkeypatch):
+    @pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
+    async def test_a_transport_failure_stops_at_the_first_path(
+        self, monkeypatch, error_type
+    ):
         # Nothing about the host resolved, so another path on it cannot do
         # better -- and reporting a connect error as "provider said 404" would
         # send the operator looking at their base path instead of the network.
         def refuse(_path: str) -> httpx.Response:
-            raise httpx.ConnectError("connection refused")
+            raise error_type("credential=private-test-value; /internal/config.yaml")
 
         asked = _stub_upstream(monkeypatch, refuse)
 
@@ -276,7 +279,10 @@ class TestModelListPathCandidates:
             await _get_models(self._claude("http://192.168.50.14:8080/anthropic"))
 
         assert asked == ["/anthropic/v1/models"]
-        assert "Network error" in raised.value.message
+        assert (
+            raised.value.message
+            == f"Network error: {error_type.__name__}: request failed"
+        )
 
 
 class TestModelListShape:

@@ -203,13 +203,17 @@ async def handle_error(already_exists_message: Optional[str] = None):
     blanket 500.
 
     ``already_exists_message`` overrides the message of the 409 branch: the
-    upstream exception only carries the bare HTTP reason phrase
-    (``"Conflict"``), which does not tell the caller what already exists.
+    default is the standard HTTP reason phrase (``"Conflict"``), which does
+    not tell the caller what already exists.
     """
     try:
         yield
     except client.exceptions.ApiException as e:
-        message = getattr(e, "reason", None) or str(e)
+        logger.exception("Kubernetes request failed")
+        message = next(
+            (status.phrase for status in http.HTTPStatus if status == e.status),
+            "Kubernetes request failed",
+        )
         if e.status == http.HTTPStatus.NOT_FOUND:
             raise NotFoundException(message=message)
         if e.status == http.HTTPStatus.CONFLICT:

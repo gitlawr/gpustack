@@ -169,7 +169,7 @@ async def update_cache_service_instance(
         await instance.update(session, instance_in.model_dump(exclude_unset=True))
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update cache service instance: {e}"
-        )
+            message=f"Failed to update cache service instance: {type(e).__name__}"
+        ) from e
 
     return instance

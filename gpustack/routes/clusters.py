@@ -799,7 +799,9 @@ async def create_cluster(
         await session.refresh(cluster)
         return cluster
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to create cluster: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to create cluster: {type(e).__name__}"
+        ) from e
 
 
 @router.put("/{id}", response_model=ClusterPublic, response_model_exclude_none=True)
@@ -837,7 +839,9 @@ async def update_cluster(
     try:
         await cluster.update(session=session, source=input)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to update cluster: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to update cluster: {type(e).__name__}"
+        ) from e
 
     return await Cluster.one_by_id(
         session,
@@ -947,7 +951,9 @@ async def delete_cluster(session: SessionDep, ctx: TenantContextDep, id: int):
     try:
         await existing.delete(session=session)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to delete cluster: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to delete cluster: {type(e).__name__}"
+        ) from e
 
 
 @router.post("/{id}/set-default")
@@ -990,8 +996,8 @@ async def set_default_cluster(session: SessionDep, ctx: TenantContextDep, id: in
         await session.commit()
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to set default cluster: {e}"
-        )
+            message=f"Failed to set default cluster: {type(e).__name__}"
+        ) from e
 
 
 @router.post("/{id}/worker-pools", response_model=WorkerPoolPublic)
@@ -1019,7 +1025,9 @@ async def create_worker_pool(
         worker_pool.cluster = cluster
         return await WorkerPool.create(session, worker_pool)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to create worker pool: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to create worker pool: {type(e).__name__}"
+        ) from e
 
 
 def get_registration_from_cluster(

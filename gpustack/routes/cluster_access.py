@@ -149,7 +149,9 @@ async def grant_cluster_access(
         )
     except Exception as e:
         await session.rollback()
-        raise InvalidException(message=f"Failed to grant cluster access: {e}")
+        raise InvalidException(
+            message=f"Failed to grant cluster access: {type(e).__name__}"
+        ) from e
 
     enriched = await _resolve_principal_views(session, [access])
     return enriched[0]
@@ -176,4 +178,6 @@ async def revoke_cluster_access(
         await access.delete(session)
     except Exception as e:
         await session.rollback()
-        raise InvalidException(message=f"Failed to revoke cluster access: {e}")
+        raise InvalidException(
+            message=f"Failed to revoke cluster access: {type(e).__name__}"
+        ) from e

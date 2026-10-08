@@ -377,8 +377,9 @@ async def parse_form_data(request: Request) -> Tuple[aiohttp.FormData, str, bool
 
         return form_data, model_name, stream
     except Exception as e:
+        logger.exception("We could not parse the form body of your request")
         raise BadRequestException(
-            message=f"We could not parse the form body of your request: {e}",
+            message=f"We could not parse the form body of your request: {type(e).__name__}",
             is_openai_exception=True,
         )
 
@@ -390,8 +391,9 @@ async def parse_json_body(request: Request):
         stream = body_json.get("stream", False)
         return body_json, model_name, stream
     except Exception as e:
+        logger.exception("We could not parse the JSON body of your request")
         raise BadRequestException(
-            message=f"We could not parse the JSON body of your request: {e}",
+            message=f"We could not parse the JSON body of your request: {type(e).__name__}",
             is_openai_exception=True,
         )
 

@@ -643,7 +643,6 @@ async def list_backend_configs(  # noqa: C901
     except Exception as e:
         # A 200 with an empty list reads as "no backends available" in the UI.
         # The cause stays in the log: a database error carries SQL details.
-        logger.exception(f"Failed to load backends from database: {e}")
         raise InternalServerErrorException(
             message="Failed to list backend configurations"
         ) from e
@@ -1258,8 +1257,8 @@ async def create_inference_backend(
         backend = await InferenceBackend.create(session, backend)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to create inference backend: {e}"
-        )
+            message=f"Failed to create inference backend: {type(e).__name__}"
+        ) from e
 
     return backend
 
@@ -1422,8 +1421,8 @@ async def update_inference_backend(  # noqa: C901
         await backend.update(session, update_data)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update inference backend: {e}"
-        )
+            message=f"Failed to update inference backend: {type(e).__name__}"
+        ) from e
 
     return backend
 
@@ -1460,8 +1459,8 @@ async def delete_inference_backend(session: SessionDep, ctx: TenantContextDep, i
         await backend.delete(session)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to delete inference backend: {e}"
-        )
+            message=f"Failed to delete inference backend: {type(e).__name__}"
+        ) from e
 
 
 @router.post("/from-yaml", response_model=InferenceBackend)
@@ -1579,8 +1578,8 @@ async def create_inference_backend_from_yaml(  # noqa: C901
         raise  # Re-raise BadRequestException without wrapping
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to create inference backend from YAML: {e.__str__()}"
-        )
+            message=f"Failed to create inference backend from YAML: {type(e).__name__}"
+        ) from e
 
 
 @router.put("/{id}/from-yaml", response_model=InferenceBackend)
@@ -1689,8 +1688,8 @@ async def update_inference_backend_from_yaml(  # noqa: C901
         raise  # Re-raise BadRequestException without wrapping
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update inference backend from YAML: {e}"
-        )
+            message=f"Failed to update inference backend from YAML: {type(e).__name__}"
+        ) from e
 
 
 def _process_version_configs(

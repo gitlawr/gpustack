@@ -740,8 +740,8 @@ async def create_worker(user: CurrentUserDep, worker_in: WorkerCreate):
             except Exception as e:
                 await session.rollback()
                 raise InternalServerErrorException(
-                    message=f"Failed to create worker: {e}"
-                )
+                    message=f"Failed to create worker: {type(e).__name__}"
+                ) from e
 
 
 @router.put("/{id}", response_model=WorkerPublic)
@@ -765,7 +765,9 @@ async def update_worker(
     try:
         await WorkerService(session).update(worker, patch)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to update worker: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to update worker: {type(e).__name__}"
+        ) from e
 
     return worker
 
@@ -790,7 +792,9 @@ async def delete_worker(ctx: TenantContextDep, session: SessionDep, id: int):
             worker.state = WorkerStateEnum.DELETING
         await WorkerService(session).delete(worker, soft=soft)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to delete worker: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to delete worker: {type(e).__name__}"
+        ) from e
 
 
 async def create_worker_status(user: CurrentUserDep, input: WorkerStatusStored):

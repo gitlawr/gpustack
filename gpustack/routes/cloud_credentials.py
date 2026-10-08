@@ -109,8 +109,8 @@ async def create(
         return await CloudCredential.create(session, input)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to create cloud credential: {e}"
-        )
+            message=f"Failed to create cloud credential: {type(e).__name__}"
+        ) from e
 
 
 @router.put("/{id}", response_model=CloudCredentialPublic)
@@ -129,8 +129,8 @@ async def update(
         await CloudCredential.update(existing, session=session, source=input)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update cloud credential: {e}"
-        )
+            message=f"Failed to update cloud credential: {type(e).__name__}"
+        ) from e
 
     return await CloudCredential.one_by_id(session, id)
 
@@ -146,8 +146,8 @@ async def delete(session: SessionDep, ctx: TenantContextDep, id: int):
         await existing.delete(session=session)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to delete cloud credential: {e}"
-        )
+            message=f"Failed to delete cloud credential: {type(e).__name__}"
+        ) from e
 
 
 @router.api_route("/{id}/provider-proxy/{path:path}", methods=["GET"])

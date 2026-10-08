@@ -421,6 +421,55 @@ async def test_cas_callback_translates_other_failures_to_auth_failed(monkeypatch
     assert response.headers["location"] == auth_route.AUTH_FAILED_LOGIN_URL
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["request", "xml"])
+async def test_cas_callback_logs_original_exception_once(
+    monkeypatch, caplog, failure_stage
+):
+    import httpx
+    from lxml import etree
+
+    client = _client("<serviceResponse>")
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    if failure_stage == "request":
+        client.get.side_effect = httpx.ConnectError("CAS upstream diagnostic marker")
+    monkeypatch.setattr(auth_route.httpx, "AsyncClient", lambda **kwargs: client)
+    monkeypatch.setattr(auth_route, "use_proxy_env_for_url", lambda url: False)
+
+    request = MagicMock()
+    config = _config()
+    config.cas_callback_url = "https://gpustack.example.com/auth/cas/callback"
+    config.external_auth_insecure_skip_tls_verify = True
+    request.app.state.server_config = config
+    request.query_params = {"ticket": "ST-test"}
+
+    response = await auth_route.cas_callback(request=request, session=MagicMock())
+
+    assert response.status_code == 303
+    assert response.headers["location"] == auth_route.AUTH_FAILED_LOGIN_URL
+    records = [
+        r
+        for r in caplog.records
+        if r.name == auth_route.logger.name and r.levelno >= 40
+    ]
+    assert len(records) == 1
+    logged_error = records[0].exc_info[1]
+    assert isinstance(logged_error, UnauthorizedException)
+    original_error = logged_error.__context__
+    expected_type = (
+        httpx.ConnectError if failure_stage == "request" else etree.XMLSyntaxError
+    )
+    assert isinstance(original_error, expected_type)
+    assert original_error.__traceback__ is not None
+    if failure_stage == "xml":
+        assert original_error.msg in caplog.text
+        assert 'File "<string>", line 1' in caplog.text
+    else:
+        assert str(original_error) in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+
+
 class _AsyncClientFake:
     async def __aenter__(self):
         return self

@@ -185,7 +185,9 @@ async def create_group(session: SessionDep, body: UserGroupCreate):
         )
         created = await Principal.create(session, group)
     except Exception as e:
-        raise InvalidException(message=f"Failed to create group: {e}")
+        raise InvalidException(
+            message=f"Failed to create group: {type(e).__name__}"
+        ) from e
     # New group has no members yet; skip the COUNT round trip.
     return UserGroupPublic.from_principal(created, member_count=0)
 
@@ -222,7 +224,9 @@ async def update_group(session: SessionDep, group_id: int, body: UserGroupUpdate
     try:
         await group.update(session, body.model_dump(exclude_unset=True))
     except Exception as e:
-        raise InvalidException(message=f"Failed to update group: {e}")
+        raise InvalidException(
+            message=f"Failed to update group: {type(e).__name__}"
+        ) from e
     counts = await _bulk_member_counts(session, [group.id])
     return UserGroupPublic.from_principal(group, member_count=counts.get(group.id, 0))
 
@@ -236,7 +240,9 @@ async def delete_group(session: SessionDep, group_id: int):
     try:
         await group.delete(session)
     except Exception as e:
-        raise InvalidException(message=f"Failed to delete group: {e}")
+        raise InvalidException(
+            message=f"Failed to delete group: {type(e).__name__}"
+        ) from e
 
 
 # ---- group members ---------------------------------------------------------
@@ -364,7 +370,9 @@ async def add_group_members(
         await session.commit()
     except Exception as e:
         await session.rollback()
-        raise InvalidException(message=f"Failed to add group members: {e}")
+        raise InvalidException(
+            message=f"Failed to add group members: {type(e).__name__}"
+        ) from e
 
     return [
         UserGroupMembershipPublic(
@@ -406,4 +414,6 @@ async def remove_group_member(
         await link.delete(session, soft=True)
     except Exception as e:
         await session.rollback()
-        raise InvalidException(message=f"Failed to remove group member: {e}")
+        raise InvalidException(
+            message=f"Failed to remove group member: {type(e).__name__}"
+        ) from e

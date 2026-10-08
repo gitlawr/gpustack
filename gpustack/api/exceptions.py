@@ -6,7 +6,6 @@ import httpx
 import logging
 from pydantic import BaseModel
 
-
 logger = logging.getLogger(__name__)
 
 # Starlette renamed HTTP_422_UNPROCESSABLE_ENTITY to HTTP_422_UNPROCESSABLE_CONTENT
@@ -114,10 +113,11 @@ async def async_raise_if_response_error(response: httpx.Response):  # noqa: C901
     try:
         await response.aread()
     except httpx.ReadError as e:
+        logger.exception("Failed to read upstream response")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             reason="Unknown",
-            message=str(e),
+            message=f"Failed to read upstream response: {type(e).__name__}",
         )
     raise_errors(response)
 
@@ -231,15 +231,22 @@ openai_api_error_responses = {
 def register_handlers(app: FastAPI):
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
-        if exc.status_code >= 500:
+        # Explicit causes delegate traceback logging to the request boundary.
+        # Locally handled diagnostics can use `from None` to suppress the chain.
+        if exc.__cause__ is not None or exc.status_code >= 500:
             logger.log(
                 exc.log_level,
-                "HTTP server error occurred: %s %s - %s (path=%s, method=%s)",
+                "HTTP request failed: %s %s - %s (path=%s, method=%s)",
                 exc.status_code,
                 exc.reason,
                 exc.message,
                 request.url.path,
                 request.method,
+                exc_info=(
+                    (type(exc), exc, exc.__traceback__)
+                    if exc.__cause__ is not None
+                    else None
+                ),
             )
         return JSONResponse(
             status_code=exc.status_code,

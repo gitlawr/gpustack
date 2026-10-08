@@ -3381,7 +3381,9 @@ async def restart_model(session: SessionDep, ctx: TenantContextDep, id: int):
         # rather than left to expire: the failure they now have to retry is the
         # worst moment to answer the retry with a 409.
         await ModelService(session).update(model, {"restarting_since": None})
-        raise InternalServerErrorException(message=f"Failed to restart model: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to restart model: {type(e).__name__}"
+        ) from e
 
     # Rebuilding is left to replica convergence rather than done here: it is
     # the one place that knows a group forms its GPU roles atomically and holds
@@ -3453,4 +3455,6 @@ async def delete_model(session: SessionDep, ctx: TenantContextDep, id: int):
     try:
         await ModelService(session).delete(model)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to delete model: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to delete model: {type(e).__name__}"
+        ) from e

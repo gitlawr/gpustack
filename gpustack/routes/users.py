@@ -213,7 +213,9 @@ async def create_user(session: SessionDep, user_in: UserCreate):
         await session.commit()
         await session.refresh(user)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to create user: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to create user: {type(e).__name__}"
+        ) from e
 
     return await _to_user_public(session, user)
 
@@ -313,7 +315,9 @@ async def update_user(session: SessionDep, id: int, user_in: UserUpdate):
         # from the pre-commit row and outlive our invalidation.
         await service.invalidate_cache(user, old_name=old_name)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to update user: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to update user: {type(e).__name__}"
+        ) from e
 
     return await _to_user_public(session, user)
 
@@ -347,8 +351,8 @@ async def update_user_activation(
         )
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update user activation: {e}"
-        )
+            message=f"Failed to update user activation: {type(e).__name__}"
+        ) from e
 
     return await _to_user_public(session, user)
 
@@ -370,7 +374,9 @@ async def delete_user(session: SessionDep, id: int):
     try:
         await user_service.delete(user)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to delete user: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to delete user: {type(e).__name__}"
+        ) from e
 
 
 async def is_only_admin_user(session: SessionDep, user: User) -> bool:
@@ -409,7 +415,9 @@ async def update_user_me(
         if plain:
             await set_password(session, user.id, plain)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to update user: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to update user: {type(e).__name__}"
+        ) from e
 
     return await _to_user_public(session, user)
 

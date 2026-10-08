@@ -1042,7 +1042,9 @@ async def create_benchmark(
     try:
         benchmark = await Benchmark.create(session, mutated)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to create benchmark: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to create benchmark: {type(e).__name__}"
+        ) from e
 
     return benchmark
 
@@ -1062,7 +1064,9 @@ async def update_benchmark(
     try:
         await benchmark.update(session, benchmark_in)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to update benchmark: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to update benchmark: {type(e).__name__}"
+        ) from e
 
     return benchmark
 
@@ -1100,8 +1104,8 @@ async def update_benchmark_state(
         await benchmark.update(session, state_update)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update benchmark state: {e}"
-        )
+            message=f"Failed to update benchmark state: {type(e).__name__}"
+        ) from e
 
     return benchmark
 
@@ -1253,8 +1257,8 @@ async def update_benchmark_metrics(
         await benchmark.update(session, metrics)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update benchmark metrics: {e}"
-        )
+            message=f"Failed to update benchmark metrics: {type(e).__name__}"
+        ) from e
 
     return benchmark
 
@@ -1302,8 +1306,8 @@ async def update_benchmark_results(
     except Exception as e:
         await session.rollback()
         raise InternalServerErrorException(
-            message=f"Failed to update benchmark results: {e}"
-        )
+            message=f"Failed to update benchmark results: {type(e).__name__}"
+        ) from e
 
     return benchmark
 
@@ -1367,7 +1371,9 @@ async def delete_benchmark(session: SessionDep, ctx: TenantContextDep, id: int):
     try:
         await benchmark.delete(session)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to delete benchmark: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to delete benchmark: {type(e).__name__}"
+        ) from e
 
 
 @router.get("/{id}/logs")
@@ -1400,7 +1406,7 @@ async def get_benchmark_logs(  # noqa: C901
 
         def on_exception(e: Exception, t: aiohttp.ClientTimeout) -> tuple[str, int]:
             msg = (
-                str(e)
+                f"Unable to read logs: {type(e).__name__}"
                 if not isinstance(e, TimeoutError)
                 else f"Log stream timed out ({t.total} seconds). Please reopen the log page."
             )

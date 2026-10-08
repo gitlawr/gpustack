@@ -237,7 +237,9 @@ async def create_api_key(
         )
         api_key = await ApiKey.create(session, api_key)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to create api key: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to create api key: {type(e).__name__}"
+        ) from e
 
     value = (
         key_in.custom
@@ -280,7 +282,9 @@ async def delete_api_key(session: SessionDep, ctx: TenantContextDep, id: int):
     try:
         await APIKeyService(session).delete(api_key)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to delete api key: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to delete api key: {type(e).__name__}"
+        ) from e
 
 
 @router.put("/{id}", response_model=ApiKeyPublic)
@@ -297,5 +301,7 @@ async def update_api_key(
             source=key_in.model_dump(exclude_unset=True),
         )
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to update api key: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to update api key: {type(e).__name__}"
+        ) from e
     return _api_key_to_public(api_key, user_name=user_name)

@@ -146,3 +146,21 @@ class TestThinkingRestrictedRetry:
 
         assert result.accessible is True
         assert asked[0]["json"].get("enable_thinking") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_transport_error_keeps_category_without_details(monkeypatch, error_type):
+    from gpustack.api.exceptions import InternalServerErrorException
+
+    def fail(_request):
+        raise error_type("credential=private-test-value; /internal/config.yaml")
+
+    _stub_upstream(monkeypatch, fail)
+    with pytest.raises(InternalServerErrorException) as raised:
+        await _test_model(_qwen())
+    assert (
+        raised.value.message == f"Network error: {error_type.__name__}: request failed"
+    )
+    assert isinstance(raised.value.__cause__, error_type)
+    assert raised.value.__cause__.__traceback__ is not None

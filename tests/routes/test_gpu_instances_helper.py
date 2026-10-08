@@ -49,9 +49,7 @@ async def test_upstream_unavailable_maps_to_service_unavailable(status):
 
     assert excinfo.value.status_code == 503
     assert excinfo.value.reason == "ServiceUnavailable"
-    # The upstream reason is carried through, the same way every other branch
-    # does it — the message is what told #6071's reporter the real cause.
-    assert excinfo.value.message == "Service Unavailable"
+    assert excinfo.value.message == status.phrase
 
 
 @pytest.mark.asyncio
@@ -114,7 +112,7 @@ async def test_unmapped_status_falls_back_to_internal_server_error(status):
             raise _api_exception(status)
 
     assert excinfo.value.status_code == 500
-    assert excinfo.value.message == "boom"
+    assert excinfo.value.message == status.phrase
 
 
 @pytest.mark.asyncio
@@ -128,3 +126,21 @@ async def test_a_non_api_exception_propagates_untouched():
             raise boom
 
     assert excinfo.value is boom
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 404, 409, 500, 502, 503, 504, 0])
+@pytest.mark.parametrize("reason", [None, "credential=private-test-value"])
+async def test_kubernetes_errors_omit_upstream_details(status, reason):
+    from gpustack.api.exceptions import HTTPException
+
+    error = _api_exception(status, reason)
+    error.body = "credential=private-test-value"
+    error.headers = {"Authorization": "private-test-value"}
+    with pytest.raises(HTTPException) as raised:
+        async with handle_error():
+            raise error
+    assert "private-test-value" not in raised.value.message
+    assert raised.value.message == (
+        http.HTTPStatus(status).phrase if status else "Kubernetes request failed"
+    )

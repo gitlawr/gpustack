@@ -964,6 +964,71 @@ async def test_oidc_callback_uses_system_trust_store(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_stage,error_type",
+    [
+        (stage, error)
+        for stage in ("token_request", "user_info")
+        for error in (RuntimeError, UnauthorizedException, BadRequestException)
+    ]
+    + [("token_response", BadRequestException)],
+)
+async def test_oidc_callback_logs_original_exception_once(
+    monkeypatch, caplog, failure_stage, error_type
+):
+    diagnostic = "OIDC upstream diagnostic marker"
+    original_error = (
+        error_type(diagnostic)
+        if error_type is RuntimeError
+        else error_type(message=diagnostic)
+    )
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.request.return_value = MagicMock(
+        status_code=200, text='{"access_token":"test-token"}'
+    )
+    get_user_data = AsyncMock()
+    if failure_stage == "token_request":
+        client.request.side_effect = original_error
+    elif failure_stage == "token_response":
+        client.request.return_value = MagicMock(
+            status_code=400, text='{"error_description":"' + diagnostic + '"}'
+        )
+    else:
+        get_user_data.side_effect = original_error
+    monkeypatch.setattr(auth_route.httpx, "AsyncClient", MagicMock(return_value=client))
+    monkeypatch.setattr(auth_route, "get_oidc_user_data", get_user_data)
+    monkeypatch.setattr(auth_route, "use_proxy_env_for_url", lambda url: False)
+
+    request = MagicMock()
+    config = request.app.state.server_config
+    config.openid_configuration = {"token_endpoint": "https://issuer.example.com/token"}
+    config.external_auth_insecure_skip_tls_verify = True
+    request.query_params = {"code": "test-code", "state": "test-state"}
+    request.cookies = {auth_route.OIDC_STATE_COOKIE_NAME: "test-state"}
+
+    response = await auth_route.oidc_callback(request=request, session=object())
+
+    assert response.status_code == 303
+    assert response.headers["location"] == auth_route.AUTH_FAILED_LOGIN_URL
+    records = [
+        r
+        for r in caplog.records
+        if r.name == auth_route.logger.name and r.levelno >= 40
+    ]
+    assert len(records) == 1
+    logged_error = records[0].exc_info[1]
+    if failure_stage == "token_response":
+        assert isinstance(logged_error, BadRequestException)
+        assert logged_error.message == f"Failed to get token, {diagnostic}"
+    else:
+        assert logged_error is original_error
+    assert records[0].exc_info[2] is not None
+    assert "Traceback (most recent call last)" in caplog.text
+    assert diagnostic in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_legacy_server_token_principal_authenticates():
     """Pre-2.0 workers authenticate every request with Basic
     ``system/worker/<uuid>:<server-token>``. The minted in-memory
@@ -1933,3 +1998,33 @@ async def test_no_gateway_means_no_gateway_assertions(monkeypatch):
         None,
     )
     assert not calls["by_access_key"], "the lookup must not even be attempted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token_type", ["api_key", "jwt"])
+async def test_user_lookup_failure_omits_exception_details(monkeypatch, token_type):
+    from unittest.mock import MagicMock
+    from gpustack.api import auth
+    from gpustack.api.exceptions import InternalServerErrorException
+
+    failed_lookup = AsyncMock(
+        side_effect=RuntimeError(
+            "credential=private-test-value; SELECT secret FROM keys"
+        )
+    )
+    if token_type == "api_key":
+        monkeypatch.setattr(auth.APIKeyService, "get_by_access_key", failed_lookup)
+        operation = auth.get_user_from_api_token(
+            MagicMock(), "gpustack_abcd1234_c11c75ed6334ea9505da4ad9"
+        )
+    else:
+        monkeypatch.setattr(auth.UserService, "get_by_username", failed_lookup)
+        manager = MagicMock()
+        manager.decode_jwt_token.return_value = {"sub": "test-user"}
+        operation = auth.get_user_from_jwt_token(MagicMock(), manager, "test-token")
+    with pytest.raises(InternalServerErrorException) as raised:
+        await operation
+    failed_lookup.assert_awaited_once()
+    assert raised.value.message == "Failed to get user: RuntimeError"
+    assert raised.value.__cause__ is failed_lookup.side_effect
+    assert raised.value.__cause__.__traceback__ is not None

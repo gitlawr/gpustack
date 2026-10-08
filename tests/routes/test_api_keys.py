@@ -173,3 +173,49 @@ async def test_admin_in_org_act_as_lands_key_in_that_org(monkeypatch):
     )
 
     assert captured["owner_principal_id"] == 99
+
+
+@pytest.mark.asyncio
+async def test_delete_failure_omits_database_details(monkeypatch, caplog):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from gpustack.api.exceptions import register_handlers
+
+    api_key = ApiKey(
+        id=5,
+        name="test-key",
+        user_id=1,
+        owner_principal_id=10,
+        access_key="access",
+        hashed_secret_key="secret",
+    )
+    monkeypatch.setattr(ApiKey, "one_by_id", AsyncMock(return_value=api_key))
+    monkeypatch.setattr(
+        api_keys.APIKeyService,
+        "delete",
+        AsyncMock(
+            side_effect=RuntimeError("SELECT secret FROM keys; private-test-value")
+        ),
+    )
+    app = FastAPI()
+    register_handlers(app)
+
+    @app.delete("/api-keys/5")
+    async def delete_key():
+        await api_keys.delete_api_key(
+            session=object(), ctx=_ctx(org_role=OrgRole.OWNER), id=5
+        )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.delete("/api-keys/5")
+    assert response.status_code == 500
+    assert "Failed to delete api key: RuntimeError" in response.text
+    assert "private-test-value" not in response.text
+    records = [r for r in caplog.records if r.exc_info]
+    assert len(records) == 1
+    assert records[0].name == "gpustack.api.exceptions"
+    assert isinstance(records[0].exc_info[1].__cause__, RuntimeError)
+    assert records[0].exc_info[2] is not None
+    assert "SELECT secret FROM keys; private-test-value" in caplog.text

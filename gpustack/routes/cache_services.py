@@ -425,8 +425,8 @@ async def delete_cache_service_instance(
         await instance.delete(session)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to delete cache service instance: {e}"
-        )
+            message=f"Failed to delete cache service instance: {type(e).__name__}"
+        ) from e
 
 
 @router.get("/{id}/instances", response_model=CacheServiceInstancesPublic)
@@ -488,7 +488,7 @@ async def _proxy_instance_logs(
 
     def on_exception(e: Exception, t: aiohttp.ClientTimeout) -> tuple[str, int]:
         msg = (
-            str(e)
+            f"Unable to read logs: {type(e).__name__}"
             if not isinstance(e, TimeoutError)
             else "Log stream timed out. Please reopen the log page."
         )
@@ -1314,8 +1314,8 @@ async def create_cache_service(
         cache_service = await CacheService.create(session, cache_service_dict)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to create cache service: {e}"
-        )
+            message=f"Failed to create cache service: {type(e).__name__}"
+        ) from e
 
     return cache_service
 
@@ -1448,8 +1448,8 @@ async def update_cache_service(
         await cache_service.update(session, cache_service_in)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update cache service: {e}"
-        )
+            message=f"Failed to update cache service: {type(e).__name__}"
+        ) from e
 
     return cache_service
 
@@ -1496,5 +1496,5 @@ async def delete_cache_service(session: SessionDep, ctx: TenantContextDep, id: i
         await cache_service.delete(session)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to delete cache service: {e}"
-        )
+            message=f"Failed to delete cache service: {type(e).__name__}"
+        ) from e

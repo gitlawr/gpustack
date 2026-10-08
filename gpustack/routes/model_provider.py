@@ -191,8 +191,8 @@ async def create_model_provider(
         return ModelProvider._convert_to_public_class(created)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to create provider {input.name}: {e}"
-        )
+            message=f"Failed to create provider {input.name}: {type(e).__name__}"
+        ) from e
 
 
 @router.get(
@@ -296,8 +296,8 @@ async def update_model_provider(
             await session.commit()
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to update provider {id}: {e}"
-        )
+            message=f"Failed to update provider {id}: {type(e).__name__}"
+        ) from e
     updated_provider = await ModelProvider.one_by_id(session=session, id=id)
     return ModelProvider._convert_to_public_class(updated_provider)
 
@@ -322,8 +322,8 @@ async def delete_model_provider(session: SessionDep, ctx: TenantContextDep, id: 
         await existing.delete(session=session)
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to delete provider {id}: {e}"
-        )
+            message=f"Failed to delete provider {id}: {type(e).__name__}"
+        ) from e
 
 
 def get_model_name(model: Dict[str, Any]) -> Optional[str]:
@@ -432,7 +432,7 @@ async def _first_model_list(
             )
         except httpx.RequestError as exc:
             raise InternalServerErrorException(
-                message=f"Network error: {exc.__class__.__name__}: {exc}"
+                message=f"Network error: {exc.__class__.__name__}: request failed"
             ) from exc
     raise InvalidException(
         message=f"Failed to get models from {provider_type}: {failure_detail}"
@@ -616,8 +616,8 @@ async def try_model_with_provider(
                 )
             except httpx.RequestError as exc:
                 raise InternalServerErrorException(
-                    message=f"Network error: {exc.__class__.__name__}: {exc}"
-                )
+                    message=f"Network error: {exc.__class__.__name__}: request failed"
+                ) from exc
 
 
 def _is_thinking_restricted_qwen_rejection(
@@ -793,8 +793,8 @@ async def _try_decision_model(
             )
         except httpx.RequestError as exc:
             raise InternalServerErrorException(
-                message=f"Network error: {exc.__class__.__name__}: {exc}"
-            )
+                message=f"Network error: {exc.__class__.__name__}: request failed"
+            ) from exc
 
 
 @router.post(

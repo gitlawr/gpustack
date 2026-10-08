@@ -371,7 +371,9 @@ async def test_multiple_streams_download_as_a_zip_with_failures_captured():
     # A failed discovery is noted, and an error body must not read as real log
     # output.
     worker_b_log = archive.read("worker-b.ray-worker.log")
-    assert worker_b_log.startswith(b"Note: container discovery failed (HTTP 404: ")
+    assert worker_b_log.startswith(
+        b"Note: container discovery failed (Unable to discover log streams: ValueError)"
+    )
     assert b"Failed to fetch logs: HTTP 500: boom" in worker_b_log
     assert b"Worker not found in database" in archive.read("worker-c.default.log")
 
@@ -391,7 +393,7 @@ async def test_discovery_failure_still_serves_the_main_workload():
     # Noted inline, so a sidecar log missing from the download can't pass for
     # one that never existed.
     assert body == (
-        b"Note: container discovery failed (HTTP 404: no log options); "
+        b"Note: container discovery failed (Unable to discover log streams: ValueError); "
         b"this log covers the main workload only.\n"
         b"real log\n"
     )
@@ -571,3 +573,75 @@ async def test_a_download_waits_on_liveness_rather_than_on_a_deadline():
     timeout = calls[0]["timeout"]
     assert timeout.total is None
     assert timeout.sock_read == 120
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multiple_workers", [False, True])
+@pytest.mark.parametrize("failure_stage", ["discovery", "connect", "read"])
+async def test_download_errors_omit_internal_details(multiple_workers, failure_stage):
+    sentinel = "credential=private-test-value; /internal/config.yaml"
+    targets = [_target(1, "worker-a")]
+    if multiple_workers:
+        targets.append(_target(2, "worker-b"))
+    options = {
+        name: ValueError(sentinel) if failure_stage == "discovery" else ["default"]
+        for _, name, _ in targets
+    }
+    chunks = {
+        "discovery": [b"log contents\n"],
+        "connect": [ConnectionError(sentinel)],
+        "read": [b"log contents\n", ConnectionError(sentinel)],
+    }[failure_stage]
+    _, body = await _download(
+        _instance(),
+        targets,
+        options=options,
+        logs={(name, "default"): (200, chunks) for _, name, _ in targets},
+    )
+    if multiple_workers:
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            contents = [archive.read(name) for name in archive.namelist()]
+    else:
+        contents = [body]
+    for content in contents:
+        assert sentinel.encode() not in content
+        assert (
+            b"ValueError" if failure_stage == "discovery" else b"ConnectionError"
+        ) in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("all_failed", [False, True])
+async def test_log_options_omit_worker_exception_details(all_failed):
+    from gpustack.routes.model_instances import get_model_instance_log_options
+
+    failures = [ValueError("credential=private-test-value")]
+    targets = [_target(1, "worker-a")]
+    if not all_failed:
+        failures.append(ServeLogOptionsResponse(restarts=[]))
+        targets.append(_target(2, "worker-b"))
+    with (
+        patch(f"{MODULE}.fetch_model_instance", AsyncMock(return_value=_instance())),
+        patch(
+            f"{MODULE}.resolve_instance_log_worker_targets",
+            AsyncMock(return_value=targets),
+        ),
+        patch(
+            f"{MODULE}.fetch_serve_log_options_from_worker",
+            AsyncMock(side_effect=failures),
+        ),
+    ):
+        if all_failed:
+            with pytest.raises(HTTPException) as raised:
+                await get_model_instance_log_options(
+                    MagicMock(), MagicMock(), MagicMock(), 7
+                )
+            assert raised.value.status_code == 502
+            payload = raised.value.detail
+        else:
+            result = await get_model_instance_log_options(
+                MagicMock(), MagicMock(), MagicMock(), 7
+            )
+            payload = result.model_dump_json()
+    assert "private-test-value" not in payload
+    assert "Unable to retrieve log options: ValueError" in payload

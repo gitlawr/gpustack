@@ -14,7 +14,6 @@ from gpustack.api.exceptions import (
 )
 from gpustack.server.deps import SessionDep, TenantContextDep
 
-
 router = APIRouter()
 
 
@@ -60,7 +59,7 @@ async def create_model_evaluation(
         )
     except Exception as e:
         raise InternalServerErrorException(
-            message=f"Failed to evaluate model compatibility: {e}"
-        )
+            message=f"Failed to evaluate model compatibility: {type(e).__name__}"
+        ) from e
 
     return ModelEvaluationResponse(results=results)

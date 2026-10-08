@@ -233,7 +233,9 @@ async def authenticate_request(
     except HTTPException:
         raise
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to authenticate user: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to authenticate user: {type(e).__name__}"
+        ) from e
 
     raise credentials_exception()
 
@@ -357,7 +359,9 @@ async def get_user_from_jwt_token(
     try:
         user = await UserService(session).get_by_username(username)
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to get user: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to get user: {type(e).__name__}"
+        ) from e
 
     return user
 
@@ -551,7 +555,9 @@ async def get_user_from_api_token(
             if user is not None:
                 return user, api_key
     except Exception as e:
-        raise InternalServerErrorException(message=f"Failed to get user: {e}")
+        raise InternalServerErrorException(
+            message=f"Failed to get user: {type(e).__name__}"
+        ) from e
 
     return None, None
 

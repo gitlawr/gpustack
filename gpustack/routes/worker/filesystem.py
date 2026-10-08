@@ -23,7 +23,6 @@ from gpustack.scheduler.calculator import (
     calculate_local_model_weight_size,
 )
 
-
 router = APIRouter(dependencies=[Depends(worker_auth)])
 
 logger = logging.getLogger(__name__)
@@ -98,8 +97,8 @@ def validate_path_security(path: str, base_path: str = None) -> str:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error validating path {path}: {e}")
-        raise HTTPException(status_code=400, detail=f"Invalid path: {str(e)}")
+        logger.exception(f"Error validating path {path}: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid path: {type(e).__name__}")
 
 
 @router.get("/files/model-config")
@@ -145,8 +144,9 @@ async def read_model_config(path: str = Query(..., description="File path to rea
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"Invalid JSON file: {str(e)}")
         except OSError as e:
+            logger.exception("Failed to read file")
             raise HTTPException(
-                status_code=500, detail=f"Failed to read file: {str(e)}"
+                status_code=500, detail=f"Failed to read file: {type(e).__name__}"
             )
 
         return config_data
@@ -154,8 +154,10 @@ async def read_model_config(path: str = Query(..., description="File path to rea
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error reading file {path}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+        logger.exception(f"Error reading file {path}: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to read file: {type(e).__name__}"
+        )
 
 
 @router.get("/files/file-exists", response_model=FileExistsResponse)
@@ -180,8 +182,10 @@ async def file_exists(path: str = Query(..., description="Path to check")):
         )
 
     except Exception as e:
-        logger.error(f"Error checking path {path}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to check path: {str(e)}")
+        logger.exception(f"Error checking path {path}: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to check path: {type(e).__name__}"
+        )
 
 
 def is_diffusion_model(path: str) -> bool:
@@ -229,12 +233,17 @@ async def get_model_weight_size(
         # Calculate size using utility function
         try:
             total_size = calculate_local_model_weight_size(validated_path, is_diffusion)
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except NotADirectoryError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except PermissionError as e:
-            raise HTTPException(status_code=403, detail=str(e))
+        except FileNotFoundError:
+            logger.exception("Model file not found")
+            raise HTTPException(status_code=404, detail="Model file not found")
+        except NotADirectoryError:
+            logger.exception("Model path is not a directory")
+            raise HTTPException(status_code=400, detail="Model path is not a directory")
+        except PermissionError:
+            logger.exception("Permission denied reading model files")
+            raise HTTPException(
+                status_code=403, detail="Permission denied reading model files"
+            )
         except json.JSONDecodeError as e:
             raise HTTPException(
                 status_code=400, detail=f"Invalid model_index.json: {str(e)}"
@@ -244,9 +253,9 @@ async def get_model_weight_size(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error calculating model weight size for {path}: {e}")
+        logger.exception(f"Error calculating model weight size for {path}: {e}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to calculate size: {str(e)}"
+            status_code=500, detail=f"Failed to calculate size: {type(e).__name__}"
         )
 
 
@@ -343,4 +352,6 @@ async def parse_gguf_file(http_request: Request, body: GGUFParseRequest):
     except Exception as e:
         error_detail = traceback.format_exc()
         logger.error(f"Error parsing GGUF file: {e}\nTraceback:\n{error_detail}")
-        return GGUFParseResponse(success=False, error=f"{type(e).__name__}: {str(e)}")
+        return GGUFParseResponse(
+            success=False, error=f"Unable to parse GGUF file: {type(e).__name__}"
+        )

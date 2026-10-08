@@ -296,10 +296,13 @@ async def proxy(path: str, request: Request):  # noqa: C901
             except (asyncio.TimeoutError, TimeoutError):
                 # close(), not release(): data may still be in flight, so the
                 # connection must not go back to the pool.
+                logger.exception(
+                    "Inference backend sent no response data before timeout"
+                )
                 resp.close()
                 raise GatewayTimeoutException(
                     message=(
-                        f"Upstream {url} sent no response data within "
+                        "Inference backend sent no response data within "
                         f"{envs.PROXY_TTFT_TIMEOUT}s"
                     ),
                     is_openai_exception=True,
@@ -367,17 +370,17 @@ async def proxy(path: str, request: Request):  # noqa: C901
         # below from downgrading a detected stall to a 503.
         raise
     except asyncio.TimeoutError as e:
-        error_message = f"Request to {url} timed out"
-        if str(e):
-            error_message += f": {e}"
+        logger.exception("Failed to proxy inference request")
+        error_message = "Request to inference backend timed out"
+        error_message += f": {type(e).__name__}"
         raise GatewayTimeoutException(
             message=error_message,
             is_openai_exception=True,
         )
     except Exception as e:
+        logger.exception("Failed to proxy inference request")
         error_message = "An unexpected error occurred"
-        if str(e):
-            error_message += f": {e}"
+        error_message += f": {type(e).__name__}"
         raise ServiceUnavailableException(
             message=error_message,
             is_openai_exception=True,

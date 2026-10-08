@@ -357,7 +357,9 @@ async def add_org_members(
         await session.commit()
     except Exception as e:
         await session.rollback()
-        raise InvalidException(message=f"Failed to add members: {e}")
+        raise InvalidException(
+            message=f"Failed to add members: {type(e).__name__}"
+        ) from e
 
     # Bust each affected user's accessible-models cache so a session that
     # queried before being added doesn't see a stale empty set.
@@ -405,7 +407,9 @@ async def update_org_member(
         await session.refresh(membership)
     except Exception as e:
         await session.rollback()
-        raise InvalidException(message=f"Failed to update member: {e}")
+        raise InvalidException(
+            message=f"Failed to update member: {type(e).__name__}"
+        ) from e
 
     return _to_public(p, membership.role, membership.created_at, org_id)
 
@@ -474,7 +478,9 @@ async def remove_org_member(
         await membership.delete(session, soft=True)
     except Exception as e:
         await session.rollback()
-        raise InvalidException(message=f"Failed to remove member: {e}")
+        raise InvalidException(
+            message=f"Failed to remove member: {type(e).__name__}"
+        ) from e
 
     # Existing sessions for these users would otherwise keep hitting the
     # cached accessible-model set until TTL expiry and continue
