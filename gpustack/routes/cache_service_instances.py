@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from sqlmodel import select
 
+from gpustack.api.streaming import tenant_streaming
 from gpustack.api.exceptions import (
     ForbiddenException,
     InternalServerErrorException,
@@ -77,12 +78,14 @@ async def get_cache_service_instances(
                 return getattr(data, "cache_service_id", None) in visible_service_ids
 
         else:
-            filter_func = None
+            filter_func = lambda data: True  # noqa: E731
 
         return StreamingResponse(
-            CacheServiceInstance.streaming(
+            tenant_streaming(
+                CacheServiceInstance,
+                ctx,
                 fields=fields,
-                filter_func=filter_func,
+                visibility_filter=filter_func,
             ),
             media_type="text/event-stream",
         )

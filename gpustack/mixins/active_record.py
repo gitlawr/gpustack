@@ -1,6 +1,8 @@
 import asyncio
+from contextlib import aclosing
 from datetime import datetime, timedelta, timezone
 import importlib
+from inspect import isawaitable
 import json
 import logging
 import math
@@ -31,6 +33,14 @@ from gpustack.server.cache import locked_cached, delete_cache_by_key, class_key
 from gpustack.server.db import async_session
 
 logger = logging.getLogger(__name__)
+
+
+class _ReplayEvent(Event):
+    """In-process marker for rows returned by a custom replay loader.
+
+    Streaming projects this into a plain Event, so the marker never changes
+    the wire format or conflates replay with live CREATED events.
+    """
 
 
 class CommitEvent:
@@ -834,6 +844,7 @@ class ActiveRecordMixin:
         options: Optional[List] = None,
         event_types: Optional[Iterable[EventType]] = None,
         replay_existing: bool = True,
+        replay_loader: Optional[Callable[[], Awaitable[Iterable[Any]]]] = None,
     ) -> AsyncGenerator[Event, None]:
         """Subscribe to bus events for this model.
 
@@ -841,6 +852,8 @@ class ActiveRecordMixin:
         whitelists pre-enqueue, so filtered events don't take queue slots.
         ``replay_existing=False`` skips the initial CREATED snapshot for
         consumers that bootstrap themselves.
+        ``replay_loader`` replaces the cached snapshot read and runs only
+        after subscribing, so events arriving during that read are queued.
         """
         topic = cls.__name__.lower()
         subscriber = event_bus.subscribe(topic, source=source, event_types=event_types)
@@ -851,17 +864,24 @@ class ActiveRecordMixin:
             id(subscriber),
         )
 
-        if replay_existing:
-            include_created = event_types is None or EventType.CREATED in event_types
-            if include_created:
-                initial_items = await cls.cached_all(options=options)
-                for item in initial_items:
-                    yield Event(type=EventType.CREATED, data=item)
-
         heartbeat_interval = timedelta(seconds=15)
         last_event_time = datetime.now(timezone.utc)
 
         try:
+            if replay_existing:
+                include_created = (
+                    event_types is None or EventType.CREATED in event_types
+                )
+                if include_created:
+                    initial_items = (
+                        await replay_loader()
+                        if replay_loader is not None
+                        else await cls.cached_all(options=options)
+                    )
+                    event_class = _ReplayEvent if replay_loader is not None else Event
+                    for item in initial_items:
+                        yield event_class(type=EventType.CREATED, data=item)
+
             while True:
                 try:
                     event = await asyncio.wait_for(
@@ -883,16 +903,23 @@ class ActiveRecordMixin:
         cls,
         fields: Optional[dict] = None,
         fuzzy_fields: Optional[dict] = None,
-        filter_func: Optional[Callable[[Any], bool]] = None,
+        filter_func: Optional[Callable[[Any], Union[bool, Awaitable[bool]]]] = None,
         options: Optional[List] = None,
         event_transform: Optional[Callable[[Event], Awaitable[None]]] = None,
+        replay_loader: Optional[Callable[[], Awaitable[Iterable[Any]]]] = None,
+        replay_filter_func: Optional[
+            Callable[[Any], Union[bool, Awaitable[bool]]]
+        ] = None,
     ) -> AsyncGenerator[str, None]:
         """Stream events matching the given criteria as JSON strings.
+
+        Tenant HTTP routes use ``api.streaming.tenant_streaming`` to supply
+        mandatory authorization independently of business filters.
 
         Args:
             fields: Exact match filters as key-value pairs
             fuzzy_fields: Fuzzy match filters
-            filter_func: Optional filter function to apply to event data
+            filter_func: Optional sync or async predicate applied before projection
             options: SQLAlchemy options for eager loading relationships (e.g., selectinload)
             event_transform: Optional async hook called with the public Event
                 right before serialization. May mutate ``event.data`` in
@@ -900,44 +927,69 @@ class ActiveRecordMixin:
                 subscribe payload — used e.g. by /v2/workers to inject
                 allocated computed from current ModelInstance bindings so
                 the watch stream matches the REST response.
+            replay_loader: Optional snapshot query run after bus subscription.
+            replay_filter_func: Predicate for custom replay rows only; defaults
+                to filter_func. Live CREATED events always use filter_func.
         """
+        subscribe_options = {"source": "streaming", "options": options}
+        if replay_loader is not None:
+            subscribe_options["replay_loader"] = replay_loader
         try:
-            async for event in cls.subscribe(source="streaming", options=options):
-                if event.type == EventType.HEARTBEAT:
-                    yield "\n\n"
-                    continue
+            async with aclosing(cls.subscribe(**subscribe_options)) as events:
+                async for event in events:
+                    if event.type == EventType.HEARTBEAT:
+                        yield "\n\n"
+                        continue
 
-                if not cls._match_fields(event, fields):
-                    continue
+                    if not cls._match_fields(event, fields):
+                        continue
 
-                if not cls._match_fuzzy_fields(event, fuzzy_fields):
-                    continue
+                    if not cls._match_fuzzy_fields(event, fuzzy_fields):
+                        continue
 
-                if filter_func and not filter_func(event.data):
-                    continue
+                    event_filter = filter_func
+                    if (
+                        isinstance(event, _ReplayEvent)
+                        and replay_filter_func is not None
+                    ):
+                        event_filter = replay_filter_func
+                    if not await cls._match_filter(event.data, event_filter):
+                        continue
 
-                public_event = Event(
-                    type=event.type,
-                    data=cls._convert_to_public_class(event.data),
-                    changed_fields=event.changed_fields,
-                    id=event.id,
-                )
-                if event_transform is not None:
-                    try:
-                        await event_transform(public_event)
-                    except Exception as e:
-                        logger.error(
-                            f"event_transform failed for {cls.__name__} "
-                            f"event {event.id}: {e}"
-                        )
-                formatted = cls._format_event(public_event)
-                if formatted is not None:
-                    yield formatted
+                    public_event = Event(
+                        type=event.type,
+                        data=cls._convert_to_public_class(event.data),
+                        changed_fields=event.changed_fields,
+                        id=event.id,
+                    )
+                    if event_transform is not None:
+                        try:
+                            await event_transform(public_event)
+                        except Exception as e:
+                            logger.error(
+                                f"event_transform failed for {cls.__name__} "
+                                f"event {event.id}: {e}"
+                            )
+                    formatted = cls._format_event(public_event)
+                    if formatted is not None:
+                        yield formatted
         except asyncio.CancelledError:
             # Re-raise to ensure proper structured concurrency cancellation state
             raise
         except Exception as e:
             logger.error(f"Error in streaming {cls.__name__}: {e}")
+
+    @staticmethod
+    async def _match_filter(
+        data: Any,
+        filter_func: Optional[Callable[[Any], Union[bool, Awaitable[bool]]]],
+    ) -> bool:
+        if filter_func is None:
+            return True
+        matched = filter_func(data)
+        if isawaitable(matched):
+            matched = await matched
+        return bool(matched)
 
     @classmethod
     def _match_fields(cls, event: Any, fields: Optional[dict]) -> bool:

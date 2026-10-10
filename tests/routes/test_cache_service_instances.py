@@ -196,7 +196,7 @@ async def test_watch_unfiltered_for_platform_system(monkeypatch):
         ctx=_system_ctx(), params=_params(watch=True)
     )
 
-    assert captured["filter_func"] is None
+    assert captured["filter_func"](SimpleNamespace(cache_service_id=999))
 
 
 # ---- get by id ----
