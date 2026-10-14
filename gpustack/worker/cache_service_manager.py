@@ -304,6 +304,7 @@ class CacheServiceManager:
             try:
                 delete_workload(
                     deployment_metadata.name,
+                    namespace=deployment_metadata.namespace,
                 )
             except Exception as e:
                 # The workload may not exist yet.
@@ -401,6 +402,7 @@ class CacheServiceManager:
             )
             workload_plan = WorkloadPlan(
                 name=deployment_metadata.name,
+                namespace=deployment_metadata.namespace,
                 host_network=True,
                 host_ipc=self._host_ipc_enabled(cache_service, component_spec),
                 containers=[run_container],
@@ -462,7 +464,10 @@ class CacheServiceManager:
     def _prepare_launch_log(self, instance):
         if not self._logs.stop(instance.id):
             # Closing the workload also releases a quiet, blocked log stream.
-            delete_workload(instance.get_deployment_metadata().name)
+            delete_workload(
+                instance.get_deployment_metadata().name,
+                namespace=instance.workload_namespace,
+            )
         return self._logs.prepare(instance)
 
     def _reservation_ready(self, instance, cache_service, provider) -> bool:
@@ -494,9 +499,9 @@ class CacheServiceManager:
         # Failed provisioning currently prioritizes stopping the workload.
         try:
             name = instance.get_deployment_metadata().name
-            if get_workload(name) is not None:
+            if get_workload(name, namespace=instance.workload_namespace) is not None:
                 self._logs.archive(instance, log_path)
-                delete_workload(name)
+                delete_workload(name, namespace=instance.workload_namespace)
         except Exception:
             logger.exception("Failed to clean up workload after failed provisioning")
 
@@ -505,7 +510,10 @@ class CacheServiceManager:
             # Teardown also runs after the child exits: a runtime may have
             # accepted creation just before cancellation reached it.
             try:
-                delete_workload(instance.get_deployment_metadata().name)
+                delete_workload(
+                    instance.get_deployment_metadata().name,
+                    namespace=instance.workload_namespace,
+                )
             except Exception:
                 logger.exception("Failed to clean up cancelled cache deployment")
             else:
@@ -1093,7 +1101,9 @@ class CacheServiceManager:
         """Synchronize a single cache service instance's state."""
         log_path = provision_log_path(self._config.log_dir, instance.id)
         deployment_metadata = instance.get_deployment_metadata()
-        workload = get_workload(deployment_metadata.name)
+        workload = get_workload(
+            deployment_metadata.name, namespace=deployment_metadata.namespace
+        )
 
         if not workload or workload.state in [
             WorkloadStatusStateEnum.FAILED,
@@ -1121,10 +1131,7 @@ class CacheServiceManager:
             WorkloadStatusStateEnum.PENDING,
             WorkloadStatusStateEnum.INITIALIZING,
         ):
-            message = (
-                getattr(workload, "state_message", None)
-                or "Waiting for container initialization."
-            )
+            message = getattr(workload, "state_message", None) or ""
             if message != instance.state_message:
                 self._update_cache_service_instance(instance.id, state_message=message)
             return
@@ -1241,7 +1248,7 @@ class CacheServiceManager:
 
         self._logs.stop(instance.id)
         try:
-            delete_workload(workload_name)
+            delete_workload(workload_name, namespace=instance.workload_namespace)
         except Exception as e:
             # The workload may already be gone.
             logger.debug(
@@ -1338,7 +1345,9 @@ class CacheServiceManager:
             self._cache_service_instance_by_instance_id[instance.id] = instance
         deployment_metadata = instance.get_deployment_metadata()
         try:
-            delete_workload(deployment_metadata.name)
+            delete_workload(
+                deployment_metadata.name, namespace=deployment_metadata.namespace
+            )
         except Exception as e:
             # The workload may already be gone (never created or cleaned up).
             logger.warning(

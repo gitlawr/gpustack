@@ -1756,3 +1756,45 @@ def test_a_component_may_declare_its_own_completion_hints():
     # already its own
     assert server.common_parameters == []
     assert "--l1-size-gb" not in coordinator.common_parameters
+
+
+@pytest.mark.asyncio
+async def test_configured_catalog_reads_saved_sources_before_materialization(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    from gpustack.server.cache_provider_catalog import get_configured_cache_providers
+    from gpustack.schemas.source import SourceTypeEnum
+
+    sources = [
+        SimpleNamespace(
+            id=1,
+            name="builtin",
+            enabled=True,
+            source_type=SourceTypeEnum.BUILTIN,
+            content="- name: Old\n  versions: {v1: {image: 'old:v1'}}\n",
+        ),
+        SimpleNamespace(
+            id=2,
+            name="custom",
+            enabled=True,
+            source_type=SourceTypeEnum.FILE,
+            content="- name: New\n  versions: {v1: {image: 'new:v1'}}\n",
+        ),
+    ]
+    monkeypatch.setattr(
+        "gpustack.schemas.cache_provider_source.CacheProviderSource.all",
+        AsyncMock(return_value=sources),
+    )
+    monkeypatch.setattr(
+        "gpustack.schemas.runner_source.RunnerOverrideEntry.all",
+        AsyncMock(return_value=[]),
+    )
+    entries = AsyncMock()
+    monkeypatch.setattr(
+        "gpustack.schemas.cache_provider_source.CacheProviderEntry.all", entries
+    )
+    providers = await get_configured_cache_providers(MagicMock())
+    assert [provider.name for provider in providers] == ["New"]
+    entries.assert_not_awaited()

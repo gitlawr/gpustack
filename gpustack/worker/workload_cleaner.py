@@ -10,7 +10,11 @@ from gpustack.client.generated_clientset import ClientSet
 from gpustack.utils import network
 from gpustack.utils.datetimex import parse_iso8601_to_utc
 from gpustack.schemas.benchmark import BenchmarkStateEnum
-from gpustack.utils.runtime import is_benchmark_workload, is_cache_service_workload
+from gpustack.utils.runtime import (
+    cache_workload_namespaces,
+    is_benchmark_workload,
+    is_cache_service_workload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +114,19 @@ class WorkloadCleaner:
             live_benchmark_names = None
 
         workloads = list_workloads()
+        seen = {(getattr(w, "namespace", None), w.name) for w in workloads}
+        try:
+            namespaces = cache_workload_namespaces()
+            for namespace in namespaces:
+                for workload in list_workloads(
+                    namespace=namespace, labels={"type": "cache-service"}
+                ):
+                    key = (getattr(workload, "namespace", None), workload.name)
+                    if key not in seen:
+                        workloads.append(workload)
+                        seen.add(key)
+        except Exception as e:
+            logger.warning(f"Failed to discover namespaced cache workloads: {e}")
         for w in workloads:
             create_at = parse_iso8601_to_utc(w.created_at)
             should_clean_orphan = False
@@ -125,7 +142,9 @@ class WorkloadCleaner:
                 # can read FAILED/INACTIVE between stages, and deleting on that
                 # alone killed runs that were still producing results.
                 if should_clean_orphan and w.name not in live_benchmark_names:
-                    delete_workload(w.name)
+                    delete_workload(
+                        w.name, **({"namespace": w.namespace} if w.namespace else {})
+                    )
                     logger.info(
                         f"Deleted orphan benchmark workload {w.name}, "
                         f"created at {w.created_at}."
@@ -135,7 +154,9 @@ class WorkloadCleaner:
                     create_at, envs.WORKER_ORPHAN_WORKLOAD_CLEANUP_GRACE_PERIOD
                 )
                 if w.name not in current_cache_service_names and should_clean_orphan:
-                    delete_workload(w.name)
+                    delete_workload(
+                        w.name, **({"namespace": w.namespace} if w.namespace else {})
+                    )
                     logger.info(
                         f"Deleted orphan cache service workload {w.name}, "
                         f"created at {w.created_at}."
@@ -145,7 +166,9 @@ class WorkloadCleaner:
                     create_at, envs.WORKER_ORPHAN_WORKLOAD_CLEANUP_GRACE_PERIOD
                 )
                 if w.name not in current_instance_names and should_clean_orphan:
-                    delete_workload(w.name)
+                    delete_workload(
+                        w.name, **({"namespace": w.namespace} if w.namespace else {})
+                    )
                     logger.info(
                         f"Deleted orphan workload {w.name}, created at {w.created_at}."
                     )

@@ -291,6 +291,7 @@ class ContainerLogPersister:
         stop_event: threading.Event,
         token: Optional[str] = None,
         resume: bool = False,
+        namespace: Optional[str] = None,
     ):
         """Persist container logs to local file (runs in a separate thread).
 
@@ -325,6 +326,7 @@ class ContainerLogPersister:
                 self._locate_cursor(cursor, log_path)
                 log_stream = logs_workload(
                     name=workload_name,
+                    **({"namespace": namespace} if namespace else {}),
                     token=token,
                     tail=-1,
                     timestamps=True,
@@ -345,7 +347,9 @@ class ContainerLogPersister:
                 # A restart briefly looks terminated at EOF; wait for the
                 # container to return before giving up, so logs aren't dropped.
                 if stop_event.is_set() or not self._wait_for_container_recovery(
-                    workload_name, stop_event
+                    workload_name,
+                    stop_event,
+                    **({"namespace": namespace} if namespace else {}),
                 ):
                     break
                 logger.debug(
@@ -368,7 +372,9 @@ class ContainerLogPersister:
 
         logger.debug(f"Log persistence thread for {workload_name} exiting")
 
-    def _archive_container_logs(self, workload_name: str, log_path: str) -> None:
+    def _archive_container_logs(
+        self, workload_name: str, log_path: str, namespace: Optional[str] = None
+    ) -> None:
         """Drain existing runtime output before teardown, resuming the archive cursor."""
         cursor = _LogCursor(log_path)
         cursor.load()
@@ -376,6 +382,7 @@ class ContainerLogPersister:
         self._locate_cursor(cursor, log_path)
         stream = logs_workload(
             name=workload_name,
+            **({"namespace": namespace} if namespace else {}),
             tail=-1,
             timestamps=True,
             since=cursor.epoch,
@@ -482,11 +489,15 @@ class ContainerLogPersister:
             )
         cursor.store()
 
-    def _container_still_running(self, workload_name: str) -> bool:
+    def _container_still_running(
+        self, workload_name: str, namespace: Optional[str] = None
+    ) -> bool:
         """Whether the workload is still alive (a dead stream should reconnect
         rather than exit)."""
         try:
-            workload = get_workload(workload_name)
+            workload = get_workload(
+                workload_name, **({"namespace": namespace} if namespace else {})
+            )
         except Exception:
             return True  # transient query failure: reconnect, don't drop logs
         return bool(workload) and workload.state in (
@@ -501,6 +512,7 @@ class ContainerLogPersister:
         stop_event: threading.Event,
         grace_seconds: float = LOG_RECONNECT_GRACE_SECONDS,
         poll_interval: float = 1.0,
+        namespace: Optional[str] = None,
     ) -> bool:
         """Poll until the workload is alive again (True -> reconnect) or the
         grace window elapses / stop_event fires (False -> give up). A restart
@@ -511,7 +523,9 @@ class ContainerLogPersister:
         for _ in range(attempts):
             if stop_event.is_set():
                 return False
-            if self._container_still_running(workload_name):
+            if self._container_still_running(
+                workload_name, **({"namespace": namespace} if namespace else {})
+            ):
                 return True
             stop_event.wait(timeout=poll_interval)
         return False

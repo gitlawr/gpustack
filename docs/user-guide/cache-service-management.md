@@ -18,7 +18,17 @@ Cache services attach to the built-in vLLM and SGLang backends only, and a deplo
 
 !!! tip
 
-    Changes to an existing cache service take effect only after its instances are deleted and recreated.
+    Changes to an existing cache service take effect after restarting the service or deleting and recreating its instances.
+
+## Restart a Cache Service
+
+Select `Restart` from the service's action menu or detail page, then confirm. GPUStack retires all of the service's instances and recreates them from the saved configuration, including provider components and their dependencies. The operation resets each instance's automatic restart budget. Cached data may be lost and attached model deployments may be temporarily affected.
+
+A restart already in progress cannot be submitted again for ten minutes, unless the service becomes running sooner. An empty service has no instances to restart.
+
+On Kubernetes, new cache instances use the service owner's namespace (`gpustack-<org>` or `gpustack-user-<principal-id>` for personal scope). The Pod name matches the instance name. The worker Helm release must include the cluster-scoped workload permissions required to manage these Pods and their logs.
+
+Saving a provider document in `Manage Provider` refreshes the provider catalog immediately, including open cache-service forms.
 
 ## Attach a Deployment
 

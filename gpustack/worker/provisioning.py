@@ -1,23 +1,29 @@
 """Run blocking container provisioning with isolated, per-instance output."""
 
 import multiprocessing
+import os
 import logging
 import threading
 from pathlib import Path
 from typing import Optional
 
+from gpustack_runtime import envs as runtime_envs
 from gpustack_runtime.deployer import WorkloadPlan, create_workload
 from gpustack_runtime.logging import setup_logging as setup_runtime_logging
 
 from gpustack.logging import RedirectStdoutStderr, setup_logging
 from gpustack.utils.process import add_signal_handlers, terminate_process_tree
 from gpustack.worker.log_sources import CappedLogWriter
+from gpustack.worker.cache_service_namespace import prepare_cache_image_pull_secrets
 
 logger = logging.getLogger(__name__)
 
 
 def _provision(plan: WorkloadPlan, log_path: str, debug: bool) -> None:
     add_signal_handlers()
+    if plan.namespace:
+        os.environ["GPUSTACK_RUNTIME_KUBERNETES_NAMESPACE"] = plan.namespace
+        runtime_envs.__getattr__.cache_clear()
     with CappedLogWriter(log_path, append=True) as log_file:
         with RedirectStdoutStderr(log_file):
             setup_logging(debug=debug)
@@ -25,6 +31,7 @@ def _provision(plan: WorkloadPlan, log_path: str, debug: bool) -> None:
             # Runtime image pull output belongs to this launch, including the
             # stdout progress emitted before any container exists.
             try:
+                prepare_cache_image_pull_secrets(plan)
                 create_workload(plan)
             except Exception:
                 logger.exception("Container provisioning failed")

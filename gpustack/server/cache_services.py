@@ -473,3 +473,31 @@ METRICS_FETCH_TIMEOUT_SECONDS = 5
 
 METRICS_RETENTION_SECONDS = 24 * 3600
 """Samples older than this are deleted on each collector pass."""
+
+
+async def cache_workload_namespace(
+    session: AsyncSession, service: CacheService
+) -> Optional[str]:
+    """Ensure the owner's namespace before assigning Kubernetes cache workloads."""
+    from gpustack.config.config import get_global_config
+    from gpustack.gpu_instances.cluster_apis import ClusterOps
+    from gpustack.gpu_instances.cluster_apis_util import principal_namespace_identifier
+    from gpustack.schemas.clusters import Cluster, ClusterProvider
+    from gpustack.schemas.principals import Principal
+
+    cluster = await Cluster.one_by_id(session, service.cluster_id)
+    if cluster is None:
+        raise ValueError("Cache service cluster not found")
+    if cluster.provider != ClusterProvider.Kubernetes:
+        return None
+    principal = await Principal.one_by_id(session, service.owner_principal_id)
+    if principal is None:
+        raise ValueError("Cache service owner not found")
+    async with ClusterOps(
+        server_api_port=get_global_config().get_api_port(),
+        cluster_id=cluster.id,
+        cluster_registration_token=cluster.registration_token,
+        cluster_owner_principal_identifier=principal_namespace_identifier(principal),
+    ) as ops:
+        await ops.ensure_org_namespace()
+        return ops.org_namespace

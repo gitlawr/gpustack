@@ -1,8 +1,11 @@
 import logging
+from datetime import datetime, timezone
+
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 import aiohttp
+from pydantic import BaseModel
 from sqlalchemy.orm import selectinload
 from fastapi import APIRouter, Request, status
 from fastapi.responses import RedirectResponse, StreamingResponse
@@ -13,6 +16,7 @@ from gpustack.api.streaming import tenant_streaming
 from gpustack.api.exceptions import (
     AlreadyExistsException,
     BadRequestException,
+    ConflictException,
     InternalServerErrorException,
     NotFoundException,
 )
@@ -391,6 +395,58 @@ async def _fetch_service_instance(
     if instance is None or instance.cache_service_id != cache_service.id:
         raise NotFoundException(message="Cache service instance not found")
     return instance
+
+
+class CacheServiceRestartResult(BaseModel):
+    restarted: bool
+    deleted_instances: List[str] = []
+
+
+@router.post("/{id}/restart", response_model=CacheServiceRestartResult)
+async def restart_cache_service(
+    session: SessionDep, ctx: TenantContextDep, id: int
+) -> CacheServiceRestartResult:
+    """Rebuild every component from the saved service configuration."""
+    service = await _fetch_cache_service(session, ctx, id)
+    # Serialize explicit requests before checking the persisted restart guard.
+    await session.refresh(service, with_for_update=True)
+    now = datetime.now(timezone.utc)
+    if (
+        service.restarting_since is not None
+        and (now - service.restarting_since).total_seconds() < 600
+    ):
+        raise ConflictException(
+            message="A restart is already in progress for this cache service"
+        )
+    instances = await CacheServiceInstance.all_by_fields(
+        session, {"cache_service_id": service.id}
+    )
+    if not instances:
+        return CacheServiceRestartResult(restarted=False)
+    names = [instance.name for instance in instances]
+    try:
+        await service.update(
+            session,
+            {
+                "restarting_since": now,
+                "state": CacheServiceStateEnum.PENDING,
+                "state_message": "",
+                "healthy": False,
+            },
+            auto_commit=False,
+        )
+        # Publish deletions only after the whole instance set has been retired.
+        for instance in instances:
+            await instance.delete(session, auto_commit=False)
+        await session.commit()
+    except Exception as e:
+        await session.rollback()
+        raise InternalServerErrorException(
+            message=f"Failed to restart cache service: {e}"
+        )
+    await CacheServiceInstance._invalidate_cached_all()
+    await CacheService._invalidate_cached_all()
+    return CacheServiceRestartResult(restarted=True, deleted_instances=names)
 
 
 @router.delete("/{id}/instances/{instance_id}")

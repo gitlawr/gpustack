@@ -81,6 +81,7 @@ def upgrade() -> None:
         sa.Column('healthy', sa.Boolean(), nullable=True),
         sa.Column('last_check_at', sa.DateTime(), nullable=True),
         sa.Column('restart_on_error', sa.Boolean(), nullable=True),
+        sa.Column('restarting_since', gpustack.schemas.common.UTCDateTime(), nullable=True),
         sa.Column('owner_principal_id', sa.Integer(), nullable=False),
         sa.Column('created_at', sa.DateTime(), nullable=True),
         sa.Column('updated_at', sa.DateTime(), nullable=True),
@@ -103,6 +104,7 @@ def upgrade() -> None:
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
         sa.Column('cache_service_id', sa.Integer(), nullable=False),
+        sa.Column('workload_namespace', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column('worker_id', sa.Integer(), nullable=False),
         sa.Column('cluster_id', sa.Integer(), nullable=False),
         sa.Column(

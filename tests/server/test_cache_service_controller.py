@@ -33,6 +33,12 @@ def catalog_lookup(monkeypatch):
     what a cluster serves with no document configured — and let a test install
     a declaration of its own over it."""
 
+    monkeypatch.setattr(
+        cache_service_controller,
+        "cache_workload_namespace",
+        AsyncMock(return_value="gpustack-acme"),
+    )
+
     async def lookup(_session, name=None):
         wanted = (name or "").lower()
         return next(
@@ -180,6 +186,7 @@ async def test_replicas_pins_one_instance_on_picked_worker(monkeypatch):
     assert created.cache_service_id == 9
     assert created.worker_id == 5
     assert created.cluster_id == 1
+    assert created.workload_namespace == "gpustack-acme"
     assert created.state == CacheServiceStateEnum.PENDING
     # Display name: parent service's name plus a short random suffix,
     # following the model-instance convention.
@@ -1726,3 +1733,18 @@ async def test_aggregate_reports_reservation_drift_without_rewriting_running_cla
     assert (
         "configuration changed" not in service.update.call_args.args[1]["state_message"]
     )
+
+
+@pytest.mark.asyncio
+async def test_running_service_clears_restart_guard_even_without_state_change():
+    from datetime import datetime, timezone
+
+    service = _service(
+        state=CacheServiceStateEnum.RUNNING,
+        healthy=True,
+        restarting_since=datetime.now(timezone.utc),
+    )
+    await CacheServiceController(MagicMock())._set_service_state(
+        MagicMock(), service, CacheServiceStateEnum.RUNNING, None, True
+    )
+    assert service.update.await_args.args[1]["restarting_since"] is None

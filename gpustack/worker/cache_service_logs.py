@@ -88,7 +88,7 @@ class CacheServiceLogManager(ContainerLogPersister):
             thread = threading.Thread(
                 target=self._persist_container_logs,
                 args=(instance.get_deployment_metadata().name, str(archive), stop),
-                kwargs={"resume": True},
+                kwargs={"resume": True, "namespace": instance.workload_namespace},
                 daemon=True,
             )
             self._writers[instance.id] = (thread, stop, path)
@@ -114,7 +114,9 @@ class CacheServiceLogManager(ContainerLogPersister):
             archive = path.with_name(CONTAINER_LOG_NAME)
             try:
                 self._archive_container_logs(
-                    instance.get_deployment_metadata().name, str(archive)
+                    instance.get_deployment_metadata().name,
+                    str(archive),
+                    namespace=instance.workload_namespace,
                 )
                 return True
             except Exception:

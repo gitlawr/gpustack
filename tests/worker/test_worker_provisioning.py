@@ -71,7 +71,7 @@ def test_runtime_stdout_is_written_to_the_instance_startup_log(tmp_path):
             side_effect=lambda plan: print("Pulling image: 42%", flush=True),
         ),
     ):
-        _provision(MagicMock(), str(path), False)
+        _provision(WorkloadPlan(), str(path), False)
     assert "Pulling image: 42%" in path.read_text()
 
 
@@ -80,13 +80,14 @@ INJECTION_POLICY = "GPUSTACK_RUNTIME_KUBERNETES_RESOURCE_INJECTION_POLICY"
 
 @pytest.mark.parametrize("policy", ["Auto", "KDP", "Env"])
 @pytest.mark.parametrize("gpu_access", [True, False])
+@pytest.mark.parametrize("namespace", ["gpustack-system", "gpustack-acme"])
 def test_cache_plan_uses_env_injection_without_changing_worker_policy(
-    tmp_path, policy, gpu_access
+    tmp_path, policy, gpu_access, namespace
 ):
     """Cache Pods access GPUs without using device-plugin allocations."""
     plan = WorkloadPlan(
         name="cache-svc-1-i1",
-        namespace="gpustack-system",
+        namespace=namespace,
         labels={"type": "cache-service"},
         host_ipc=gpu_access,
         containers=[
@@ -122,6 +123,7 @@ def test_cache_plan_uses_env_injection_without_changing_worker_policy(
     try:
         with (
             patch.dict(os.environ, {INJECTION_POLICY: policy}),
+            patch("gpustack.worker.provisioning.prepare_cache_image_pull_secrets"),
             patch("gpustack.worker.provisioning.add_signal_handlers"),
             patch("gpustack.worker.provisioning.setup_logging"),
             patch("gpustack.worker.provisioning.setup_runtime_logging"),
@@ -157,6 +159,8 @@ def test_cache_plan_uses_env_injection_without_changing_worker_policy(
         runtime_envs.__getattr__.cache_clear()
 
     pod = core.create_namespaced_pod.call_args.kwargs["body"]
+    assert pod.metadata.namespace == namespace
+    assert core.create_namespaced_pod.call_args.kwargs["namespace"] == namespace
     assert pod.spec.runtime_class_name == "nvidia"
     assert pod.spec.host_ipc is gpu_access
     container = pod.spec.containers[0]
@@ -174,3 +178,29 @@ def test_cache_plan_uses_env_injection_without_changing_worker_policy(
         assert "NVIDIA_VISIBLE_DEVICES" not in variables
         devices.assert_not_called()
     probe.assert_not_called()
+
+
+def test_provisioning_scopes_runtime_secret_and_mirror_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("GPUSTACK_RUNTIME_KUBERNETES_NAMESPACE", "gpustack-system")
+    runtime_envs.__getattr__.cache_clear()
+    assert runtime_envs.GPUSTACK_RUNTIME_KUBERNETES_NAMESPACE == "gpustack-system"
+
+    def create(plan):
+        assert plan.namespace == "gpustack-acme"
+        assert runtime_envs.GPUSTACK_RUNTIME_KUBERNETES_NAMESPACE == "gpustack-acme"
+
+    with (
+        patch("gpustack.worker.provisioning.add_signal_handlers"),
+        patch("gpustack.worker.provisioning.setup_logging"),
+        patch("gpustack.worker.provisioning.setup_runtime_logging"),
+        patch(
+            "gpustack.worker.provisioning.create_workload", side_effect=create
+        ) as create_workload,
+    ):
+        _provision(
+            WorkloadPlan(namespace="gpustack-acme"),
+            str(tmp_path / "startup.log"),
+            False,
+        )
+    create_workload.assert_called_once()
+    runtime_envs.__getattr__.cache_clear()

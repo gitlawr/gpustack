@@ -119,7 +119,7 @@ def _new_instance(**overrides) -> CacheServiceInstance:
     return CacheServiceInstance(**fields)
 
 
-INSTANCE_WORKLOAD_NAME = "cache-svc-5-i11"
+INSTANCE_WORKLOAD_NAME = "mooncake-svc-a1b2c"
 
 
 def _new_provider(**overrides) -> CacheProvider:
@@ -322,9 +322,10 @@ def test_start_instance_attaches_gpu_resources_to_container():
     assert container.resources == {"nvidia.com/devices": "all"}
 
 
-def test_start_instance_creates_workload_and_patches_starting():
+@pytest.mark.parametrize("namespace", [None, "gpustack-acme"])
+def test_start_instance_creates_workload_and_patches_starting(namespace):
     manager, clientset = _build_manager(worker_id=1)
-    instance = _new_instance()
+    instance = _new_instance(workload_namespace=namespace)
     clientset.cache_services.get.return_value = _new_cache_service(
         config=CacheServiceConfig(fields={"ram_size": 8}, env={"FOO": "bar"})
     )
@@ -375,6 +376,7 @@ def test_start_instance_creates_workload_and_patches_starting():
 
     plan = create.call_args[0][0]
     assert plan.name == INSTANCE_WORKLOAD_NAME
+    assert plan.namespace == namespace
     assert plan.host_network is True
     assert plan.labels == {
         "type": "cache-service",
@@ -1810,7 +1812,7 @@ def test_sync_workload_failed_restarts_with_incremented_count():
     ):
         manager.sync_cache_service_instances_state()
 
-    delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME)
+    delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME, namespace=None)
     update.assert_called_once_with(
         instance.id,
         state=CacheServiceStateEnum.PENDING,
@@ -2296,7 +2298,7 @@ def test_stop_instance_deletes_workload_and_frees_port():
     with patch("gpustack.worker.cache_service_manager.delete_workload") as delete:
         manager._stop_cache_service_instance(instance)
 
-    delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME)
+    delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME, namespace=None)
     assert instance.id not in manager._assigned_ports
 
 
@@ -2315,7 +2317,7 @@ def test_stop_cancels_a_start_claimed_during_workload_deletion():
     manager, _ = _build_manager(worker_id=1)
     instance = _new_instance(state=CacheServiceStateEnum.PENDING)
 
-    def delete(_name):
+    def delete(_name, **_kwargs):
         assert manager._claim_start(instance.id)
 
     with (
@@ -2732,7 +2734,7 @@ def test_confirmed_missing_instance_stops_container_on_state_sync():
     clientset.cache_service_instances.list.return_value = SimpleNamespace(items=[])
     with patch("gpustack.worker.cache_service_manager.delete_workload") as delete:
         manager.sync_cache_service_instances_state()
-    delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME)
+    delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME, namespace=None)
     assert instance.id not in manager._cache_service_instance_by_instance_id
     assert clientset.cache_service_instances.list.call_args.kwargs["use_cache"] is False
 
@@ -2908,7 +2910,7 @@ def test_exited_container_logs_are_archived_before_restart_or_error(restart, arc
         ),
         patch(
             "gpustack.worker.cache_service_manager.delete_workload",
-            side_effect=lambda *args: calls.append("delete"),
+            side_effect=lambda *args, **kwargs: calls.append("delete"),
         ),
         patch.object(
             manager,
@@ -2955,7 +2957,7 @@ def test_failed_provisioning_archives_and_removes_partial_workload():
         ),
         patch(
             "gpustack.worker.cache_service_manager.delete_workload",
-            side_effect=lambda *args: calls.append("delete"),
+            side_effect=lambda *args, **kwargs: calls.append("delete"),
         ),
         patch.object(
             manager._logs,
@@ -3016,8 +3018,41 @@ def test_unhealthy_container_recovery_does_not_wait_for_a_quiet_log_writer(resta
     archive.assert_not_called()
     if restart:
         stop.assert_called_once_with(instance.id)
-        delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME)
+        delete.assert_called_once_with(INSTANCE_WORKLOAD_NAME, namespace=None)
         assert update.call_args.kwargs["state"] == CacheServiceStateEnum.PENDING
     else:
         delete.assert_not_called()
         assert update.call_args.kwargs["state"] == CacheServiceStateEnum.ERROR
+
+
+@pytest.mark.parametrize(
+    "state", [WorkloadStatusStateEnum.PENDING, WorkloadStatusStateEnum.INITIALIZING]
+)
+@pytest.mark.parametrize("runtime_message", [None, "Pulling image", "ImagePullBackOff"])
+def test_initializing_message_uses_only_runtime_details(state, runtime_message):
+    manager, _ = _build_manager()
+    instance = _new_instance(
+        state=CacheServiceStateEnum.STARTING,
+        workload_namespace="gpustack-acme",
+        state_message="Waiting for container initialization.",
+    )
+    with (
+        patch(
+            "gpustack.worker.cache_service_manager.get_workload",
+            return_value=SimpleNamespace(state=state, state_message=runtime_message),
+        ) as get,
+        patch.object(manager, "_update_cache_service_instance") as update,
+    ):
+        manager._sync_single_cache_service_instance_state(
+            instance, _new_cache_service()
+        )
+    get.assert_called_once_with(instance.name, namespace="gpustack-acme")
+    update.assert_called_once_with(instance.id, state_message=runtime_message or "")
+
+
+def test_stop_instance_targets_its_org_namespace():
+    manager, _ = _build_manager()
+    instance = _new_instance(workload_namespace="gpustack-acme")
+    with patch("gpustack.worker.cache_service_manager.delete_workload") as delete:
+        manager._stop_cache_service_instance(instance)
+    delete.assert_called_once_with(instance.name, namespace="gpustack-acme")

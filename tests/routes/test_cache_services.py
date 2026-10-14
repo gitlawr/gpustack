@@ -2888,3 +2888,116 @@ async def test_update_does_not_run_creation_memory_check(monkeypatch):
     workers.assert_not_awaited()
     models.assert_not_awaited()
     caches.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "states", [[CacheServiceStateEnum.RUNNING, CacheServiceStateEnum.ERROR], []]
+)
+async def test_restart_retires_all_components_atomically(monkeypatch, states):
+    service = _existing_service(restarting_since=None)
+    instances = [
+        _service_instance(id=index + 1, state=state, name=f"svc-{index}")
+        for index, state in enumerate(states)
+    ]
+    session = AsyncMock()
+    monkeypatch.setattr(
+        cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
+    )
+    listing = AsyncMock(return_value=instances)
+    monkeypatch.setattr(
+        cache_services_route.CacheServiceInstance, "all_by_fields", listing
+    )
+    invalidate = AsyncMock()
+    monkeypatch.setattr(
+        cache_services_route.CacheServiceInstance, "_invalidate_cached_all", invalidate
+    )
+    monkeypatch.setattr(
+        cache_services_route.CacheService, "_invalidate_cached_all", AsyncMock()
+    )
+    result = await cache_services_route.restart_cache_service(session, _user_ctx(), 9)
+    listing.assert_awaited_once_with(session, {"cache_service_id": service.id})
+    assert result.restarted is bool(instances)
+    assert result.deleted_instances == [instance.name for instance in instances]
+    for instance in instances:
+        instance.delete.assert_awaited_once_with(session, auto_commit=False)
+    if instances:
+        session.commit.assert_awaited_once()
+        invalidate.assert_awaited_once()
+        assert service.update.await_args.kwargs == {"auto_commit": False}
+        assert (
+            service.update.await_args.args[1]["state"] == CacheServiceStateEnum.PENDING
+        )
+    else:
+        session.commit.assert_not_awaited()
+        service.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restart_denies_other_tenants_before_mutating(monkeypatch):
+    service = _existing_service(owner_principal_id=999)
+    monkeypatch.setattr(
+        cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
+    )
+    session = AsyncMock()
+    with pytest.raises(NotFoundException):
+        await cache_services_route.restart_cache_service(session, _user_ctx(), 9)
+    session.refresh.assert_not_awaited()
+    service.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restart_rejects_duplicate_requests(monkeypatch):
+    from gpustack.api.exceptions import ConflictException
+
+    service = _existing_service(restarting_since=datetime.now(timezone.utc))
+    monkeypatch.setattr(
+        cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
+    )
+    with pytest.raises(ConflictException):
+        await cache_services_route.restart_cache_service(AsyncMock(), _user_ctx(), 9)
+    service.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restart_rolls_back_the_whole_group_on_failure(monkeypatch):
+    service = _existing_service(restarting_since=None)
+    first, second = _service_instance(name="first"), _service_instance(
+        id=22, name="second"
+    )
+    second.delete.side_effect = RuntimeError("delete failed")
+    monkeypatch.setattr(
+        cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
+    )
+    monkeypatch.setattr(
+        cache_services_route.CacheServiceInstance,
+        "all_by_fields",
+        AsyncMock(return_value=[first, second]),
+    )
+    session = AsyncMock()
+    with pytest.raises(InternalServerErrorException):
+        await cache_services_route.restart_cache_service(session, _user_ctx(), 9)
+    first.delete.assert_awaited_once_with(session, auto_commit=False)
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_restart_guard_expires_for_a_service_that_never_recovers(monkeypatch):
+    from datetime import timedelta
+
+    service = _existing_service(
+        restarting_since=datetime.now(timezone.utc) - timedelta(minutes=11)
+    )
+    monkeypatch.setattr(
+        cache_services_route.CacheService, "one_by_id", AsyncMock(return_value=service)
+    )
+    monkeypatch.setattr(
+        cache_services_route.CacheServiceInstance,
+        "all_by_fields",
+        AsyncMock(return_value=[]),
+    )
+    result = await cache_services_route.restart_cache_service(
+        AsyncMock(), _user_ctx(), 9
+    )
+    assert not result.restarted

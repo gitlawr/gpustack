@@ -113,10 +113,11 @@ rules:
       - "create"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+# Cache workloads run in their owner's namespace. The trusted worker runtime
+# needs the same lifecycle and log permissions there as in the system namespace.
+kind: ClusterRoleBinding
 metadata:
   name: {{ .Release.Name }}-worker-pod-cm-creator-binding
-  namespace: {{ .Release.Namespace }}
   labels:
 {{ include "chart_labels" . | indent 4 }}
 subjects:

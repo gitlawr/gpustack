@@ -85,3 +85,22 @@ def is_cache_service_workload(status: Union[WorkloadPlan, WorkloadStatus]) -> bo
     if not status.labels:
         return False
     return status.labels.get("type") == CACHE_SERVICE_WORKLOAD_TYPE
+
+
+def cache_workload_namespaces() -> set:
+    """Discover namespaces containing cache Pods, including orphaned instances.
+
+    Runtime listing remains responsible for filtering workloads to this node.
+    Discovery also runs after worker restarts, when no local instance map exists.
+    """
+    if not KubernetesDeployer.is_supported():
+        return set()
+    from kubernetes import client, config
+
+    configuration = client.Configuration()
+    config.load_config(client_configuration=configuration)
+    with client.ApiClient(configuration) as api_client:
+        pods = client.CoreV1Api(api_client).list_pod_for_all_namespaces(
+            label_selector=f"type={CACHE_SERVICE_WORKLOAD_TYPE}"
+        )
+        return {pod.metadata.namespace for pod in pods.items}

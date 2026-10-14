@@ -11,7 +11,10 @@ def instance():
     return SimpleNamespace(
         id=11,
         name="cache-test",
-        get_deployment_metadata=lambda: SimpleNamespace(name="cache-svc-5-i11"),
+        workload_namespace="gpustack-acme",
+        get_deployment_metadata=lambda: SimpleNamespace(
+            name="cache-test", namespace="gpustack-acme"
+        ),
     )
 
 
@@ -53,7 +56,8 @@ def test_reattaching_writer_resumes_and_is_not_duplicated(tmp_path):
     path = manager.prepare(instance())
     entered = threading.Event()
 
-    def persist(_name, _path, stop, resume):
+    def persist(_name, _path, stop, resume, namespace):
+        assert namespace == "gpustack-acme"
         assert resume
         entered.set()
         stop.wait(2)
@@ -80,6 +84,7 @@ def test_archive_drains_exit_output_and_resumes_without_duplicates(
     ]
 
     def runtime_logs(**kwargs):
+        assert kwargs["namespace"] == "gpustack-acme"
         assert kwargs["follow"] is False
         if output_type == "stream":
             return iter(lines)

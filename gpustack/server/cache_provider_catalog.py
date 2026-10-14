@@ -11,6 +11,7 @@ row from and what an admin downloads to edit against.
 """
 
 import logging
+import asyncio
 from importlib.resources import files
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,6 +19,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from gpustack.schemas.cache_provider_source import (
     CacheProviderEntry,
+    CacheProviderSource,
     dump_cache_providers,
     load_cache_providers_document,
     merge_cache_providers,
@@ -183,3 +185,16 @@ def render_injection(
         fallback = resolved.get(field.name)
         params.setdefault(field.name, fallback if fallback is not None else "")
     return _render_injection(integration, params)
+
+
+async def get_configured_cache_providers(session: AsyncSession) -> List[CacheProvider]:
+    """Read committed source content without waiting for background materialization."""
+    from gpustack.schemas.runner_source import RunnerOverrideEntry, merged_runners
+    from gpustack.server.sources.core import order_source_contents
+
+    sources = await CacheProviderSource.all(session)
+    contents = order_source_contents(source for source in sources if source.enabled)
+    runners = merged_runners(await RunnerOverrideEntry.all(session))
+    return await asyncio.to_thread(
+        providers_from_documents, [source.content for source in contents], runners
+    )

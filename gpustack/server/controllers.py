@@ -102,6 +102,7 @@ from gpustack.schemas.cache_services import (
     CacheService,
     CacheServiceInstance,
     CacheServiceInstanceCreate,
+    cache_instance_name,
     CacheServiceStateEnum,
 )
 from gpustack.schemas.cache_providers import (
@@ -124,7 +125,10 @@ from gpustack.validation.pd.parameters import (
 from gpustack.utils.command import find_last_int_parameter, find_last_parameter
 from gpustack.server import pd_membership
 from gpustack.server.pd_membership import outcome_for as membership_outcome_for
-from gpustack.server.cache_services import resolve_instance_cache_config_safe
+from gpustack.server.cache_services import (
+    cache_workload_namespace,
+    resolve_instance_cache_config_safe,
+)
 from gpustack.schemas.workers import (
     Worker,
     WorkerStateEnum,
@@ -1108,6 +1112,8 @@ class CacheServiceController:
                 surviving.append(instance)
                 room[key] -= 1
 
+        namespace = None
+        namespace_resolved = False
         for component, layout in desired_by_component.items():
             spec = provider.get_component(component) if provider else None
             instance_addresses: Optional[Dict[str, str]] = None
@@ -1131,6 +1137,9 @@ class CacheServiceController:
                 for worker_id in sorted(layout)
                 for _ in range(room.get((component, worker_id), 0))
             ]
+            if missing and not namespace_resolved:
+                namespace = await cache_workload_namespace(session, service)
+                namespace_resolved = True
             for worker_id in missing:
                 # Same display-name convention as model instances: the
                 # parent's name (as of instance creation; a later service
@@ -1143,7 +1152,8 @@ class CacheServiceController:
                 await CacheServiceInstance.create(
                     session,
                     CacheServiceInstanceCreate(
-                        name=f"{service.name}{name_role}-{name_suffix}",
+                        name=cache_instance_name(service.name, component, name_suffix),
+                        workload_namespace=namespace,
                         cache_service_id=service.id,
                         worker_id=worker_id,
                         cluster_id=service.cluster_id,
@@ -1525,8 +1535,13 @@ class CacheServiceController:
     ):
         """Write the aggregate only on change, so steady state produces no
         UPDATE events for watchers to churn on."""
+        restart_complete = (
+            state == CacheServiceStateEnum.RUNNING
+            and getattr(service, "restarting_since", None) is not None
+        )
         if (
-            service.state == state
+            not restart_complete
+            and service.state == state
             and service.state_message == state_message
             and service.healthy == healthy
         ):
@@ -1537,6 +1552,7 @@ class CacheServiceController:
                 "state": state,
                 "state_message": state_message,
                 "healthy": healthy,
+                **({"restarting_since": None} if restart_complete else {}),
             },
         )
 

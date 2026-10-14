@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -21,12 +22,12 @@ from gpustack.schemas.principals import _platform_principal_id
 CACHE_SERVICE_WORKLOAD_TYPE = "cache-service"
 
 
-def cache_service_instance_workload_name(
-    cache_service_id: int, instance_id: int
-) -> str:
-    """Name of the workload a managed cache service instance runs as on
-    its worker."""
-    return f"cache-svc-{cache_service_id}-i{instance_id}"
+def cache_instance_name(service_name: str, component: str, suffix: str) -> str:
+    """Use one DNS-safe identity for both the instance and its workload."""
+    prefix = f"{service_name}-{component}" if component else service_name
+    prefix = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-")
+    prefix = prefix[: 62 - len(suffix)].rstrip("-") or "cache"
+    return f"{prefix}-{suffix}"
 
 
 class CacheServiceStateEnum(str, Enum):
@@ -126,6 +127,7 @@ class CacheServiceConfig(BaseModel):
 class CacheServiceDeploymentMetadata:
     name: str
     labels: Dict[str, str]
+    namespace: Optional[str] = None
 
 
 class CacheServiceBase(SQLModel):
@@ -183,6 +185,11 @@ class CacheService(CacheServiceBase, BaseModelMixin, table=True):
         ),
     )
 
+    restarting_since: Optional[datetime] = Field(
+        sa_column=Column(UTCDateTime), default=None
+    )
+    """Protect replacement instances while a requested restart converges."""
+
     # ActiveRecord's cascade queues instance deletion events in the same
     # transaction, so workers can stop containers as soon as it commits.
     instances: List["CacheServiceInstance"] = Relationship(
@@ -201,6 +208,7 @@ class CacheServiceUpdate(CacheServiceBase):
 
 class CacheServicePublic(CacheServiceBase):
     id: int
+    restarting_since: Optional[datetime] = None
     owner_principal_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
@@ -263,6 +271,10 @@ class CacheServiceInstanceBase(SQLModel):
     """Denormalized from the parent service so cluster-bound service
     accounts' reads (list conditions, watch filter) scope without a join."""
 
+    workload_namespace: Optional[str] = None
+    """Kubernetes namespace stamped by the server from the service owner.
+    None uses the runtime default, including on non-Kubernetes workers."""
+
     ports: Optional[Dict[str, int]] = Field(sa_column=Column(JSON), default=None)
     """Every port allocated for this instance on its worker (port name ->
     port), one per name its component declares, rendered into its
@@ -303,7 +315,8 @@ class CacheServiceInstanceBase(SQLModel):
 
     def get_deployment_metadata(self) -> CacheServiceDeploymentMetadata:
         return CacheServiceDeploymentMetadata(
-            name=cache_service_instance_workload_name(self.cache_service_id, self.id),
+            name=self.name,
+            namespace=self.workload_namespace,
             labels={
                 "type": CACHE_SERVICE_WORKLOAD_TYPE,
                 "cache-service-id": str(self.cache_service_id),

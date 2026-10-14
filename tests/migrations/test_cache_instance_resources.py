@@ -47,3 +47,25 @@ def test_downgrade_removes_instance_table(monkeypatch):
     monkeypatch.setattr(revision, "op", operations)
     revision.downgrade()
     operations.drop_table.assert_any_call("cache_service_instances")
+
+
+@pytest.mark.parametrize("dialect", [postgresql.dialect(), mysql.dialect()])
+def test_cache_namespace_and_restart_guard_are_portable(monkeypatch, dialect):
+    revision = migration()
+    operations = MagicMock()
+    monkeypatch.setattr(revision, "op", operations)
+    revision.upgrade()
+    tables = {
+        call.args[0]: call.args[1:] for call in operations.create_table.call_args_list
+    }
+    for table, name in [
+        ("cache_service_instances", "workload_namespace"),
+        ("cache_services", "restarting_since"),
+    ]:
+        column = next(
+            col
+            for col in tables[table]
+            if isinstance(col, sa.Column) and col.name == name
+        )
+        assert column.nullable
+        assert column.type.compile(dialect=dialect)

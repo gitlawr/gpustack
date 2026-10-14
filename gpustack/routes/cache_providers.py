@@ -24,8 +24,7 @@ from gpustack.schemas.cache_services import CacheService
 from gpustack.schemas.common import PaginatedList, Pagination
 from gpustack.schemas.source import SourceContent, SourceTypeEnum
 from gpustack.server.cache_provider_catalog import (
-    get_cache_provider,
-    get_cache_providers,
+    get_configured_cache_providers,
     providers_from_documents,
 )
 from gpustack.server.deps import ListParamsDep, SessionDep
@@ -40,7 +39,7 @@ async def list_cache_providers(
     params: ListParamsDep,
     search: Optional[str] = None,
 ):
-    providers: List[CacheProvider] = await get_cache_providers(session)
+    providers: List[CacheProvider] = await get_configured_cache_providers(session)
     if search:
         search = search.strip().lower()
         # Every translation of the display name is searchable, not just
@@ -88,7 +87,14 @@ async def list_cache_providers(
 
 @router.get("/{name}", response_model=CacheProvider)
 async def get_cache_provider_by_name(name: str, session: SessionDep):
-    provider = await get_cache_provider(session, name)
+    provider = next(
+        (
+            provider
+            for provider in await get_configured_cache_providers(session)
+            if provider.name.lower() == name.lower()
+        ),
+        None,
+    )
     if provider is None:
         raise NotFoundException(message=f"Cache provider '{name}' not found")
     return provider
