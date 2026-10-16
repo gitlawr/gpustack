@@ -876,6 +876,33 @@ def test_mp_band_at_the_range_end_is_refused_not_clamped():
     assert "Widen the port range" in message
 
 
+@pytest.mark.parametrize("distributed", [False, True])
+def test_failed_port_selection_leaves_instance_unchanged_and_can_retry(distributed):
+    manager = _manager("40000-40009" if distributed else "40000-40003")
+    mi = _plain_instance() if distributed else _instance()
+    model = _mp_model() if distributed else _pd_model()
+    before = mi.model_dump()
+    manager._assigned_ports[99] = {50000}
+
+    with patch(
+        "gpustack.worker.pd_injection.get_pd_mode", return_value=_wide_band_mode(4)
+    ):
+        with pytest.raises(network.PortRangeExhaustedError):
+            manager._assign_ports(mi, model, BackendEnum.VLLM)
+
+        assert mi.model_dump() == before
+        assert manager._assigned_ports == {99: {50000}}
+
+        manager._config.service_port_range = PORT_RANGE
+        manager._assign_ports(mi, model, BackendEnum.VLLM)
+
+    assert mi.port is not None
+    assert mi.ports[0] == mi.port
+    assert len(mi.ports) == 5
+    assert len(manager._assigned_ports[mi.id]) == (14 if distributed else 5)
+    assert manager._assigned_ports[99] == {50000}
+
+
 def test_restarted_mp_instance_refills_the_whole_band():
     """The band is persisted in `mi.ports`, so the refill on a restart covers
     it without a second index to expand."""

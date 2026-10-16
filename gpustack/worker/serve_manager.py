@@ -1989,6 +1989,11 @@ class ServeManager(ContainerLogPersister):
                 self._register_assigned_ports(mi)
                 return
 
+            # Select on a private copy so allocation failures leave the instance
+            # and its local reservation unchanged for the next attempt.
+            target = mi
+            mi = mi.model_copy(deep=True)
+
             # Main serving port
             mi.port = network.get_free_port(
                 port_range=self._config.service_port_range,
@@ -2106,6 +2111,9 @@ class ServeManager(ContainerLogPersister):
                     mi.named_ports = named_ports
 
             self._register_assigned_ports(mi)
+            target.port = mi.port
+            target.ports = mi.ports
+            target.named_ports = mi.named_ports
 
     def _mark_crash_loop(
         self, mi: ModelInstance, workload, is_main_worker: bool
