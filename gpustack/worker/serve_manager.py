@@ -39,10 +39,11 @@ from gpustack.utils.convert import safe_int
 from gpustack.utils.attrs import set_attr
 from gpustack.utils.command import find_int_parameter
 from gpustack.utils.process import terminate_process_tree, add_signal_handlers
+from gpustack.utils.vllm_topology import parse_user_parallelism
 from gpustack.worker.backends.ascend_mindie import AscendMindIEServer
 from gpustack.worker.backends.sglang import SGLangServer
 from gpustack.utils.command import resolve_executor_backend
-from gpustack.worker.backends.vllm import VLLMServer
+from gpustack.worker.backends.vllm import VLLMServer, cal_multinode_topology
 from gpustack.worker.backends.vox_box import VoxBoxServer
 from gpustack.worker.backends.custom import CustomServer
 from gpustack.worker.log_sources import (
@@ -107,10 +108,8 @@ _WORKLOAD_FAILED_MESSAGE = "Inference server exited or unhealthy."
 
 # The `count` spelling that means "as many ports as this member has cards".
 
-# vLLM's mp path does not bind only VLLM_DP_MASTER_PORT: it derives nine more
-# ports from it (one per DP init attempt), so the connecting port is the *base*
-# of a band and every port in that band has to be probed, fenced and recorded
-# like any other allocation. Ten is vLLM's number, not ours.
+# vLLM reserves a ten-port window starting at VLLM_DP_MASTER_PORT for DP
+# initialization. Fence the whole window when the deployment uses DP.
 _VLLM_MP_CONNECTING_BAND = 10
 
 # Name the mp band is recorded under in `named_ports`. Prefixed so it cannot
@@ -1990,13 +1989,19 @@ class ServeManager(ContainerLogPersister):
                     if backend == BackendEnum.VLLM
                     else None
                 )
-                # The connecting port doubles as VLLM_DP_MASTER_PORT, and on the
-                # mp path vLLM derives nine more ports from it, so what has to
-                # be free is a run of ten — not one port with nine unprobed
-                # neighbours, which is all a `get_free_port` here can promise.
-                # Allocated first so the cross ports (incl. VLLM_PORT)
-                # land outside the band rather than inside it.
-                band_count = _VLLM_MP_CONNECTING_BAND if executor_backend == "mp" else 1
+                # Use the same inferred DP size as the backend command builder:
+                # an omitted --dp can still produce multiple DP ranks.
+                band_count = 1
+                if executor_backend == "mp":
+                    topology = cal_multinode_topology(
+                        mi,
+                        mi.get_deployment_metadata(self._worker_id),
+                        parse_user_parallelism(model.backend_parameters),
+                    )
+                    if topology.dp > 1:
+                        band_count = _VLLM_MP_CONNECTING_BAND
+                # Allocate the DP window before cross ports so VLLM_PORT stays
+                # outside the range reserved for VLLM_DP_MASTER_PORT.
                 connecting_port = network.get_free_band(
                     port_range=self._config.service_port_range,
                     count=band_count,

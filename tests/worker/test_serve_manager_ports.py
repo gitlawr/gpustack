@@ -664,7 +664,9 @@ def test_exhaustion_names_the_role_and_the_band():
 
 def _distributed(mi):
     mi.distributed_servers = DistributedServers(
-        subordinate_workers=[ModelInstanceSubordinateWorker(worker_id=2)]
+        subordinate_workers=[
+            ModelInstanceSubordinateWorker(worker_id=2, gpu_indexes=[0])
+        ]
     )
     return mi
 
@@ -680,9 +682,65 @@ def _mp_model(**kwargs):
 
 
 def _plain_instance(instance_id: int = 1):
-    mi = new_model_instance(instance_id, f"mp-{instance_id}", 1, worker_id=1)
+    mi = new_model_instance(
+        instance_id, f"mp-{instance_id}", 1, worker_id=1, gpu_indexes=[0]
+    )
     mi.worker_ip = "127.0.0.1"
     return _distributed(mi)
+
+
+@pytest.mark.parametrize(
+    "gpu_per_node, parameters, needs_dp_band",
+    [
+        ([4, 4], ["--tp=8"], False),
+        ([4, 4], ["--dp=1"], False),
+        ([4, 4], ["--tp=4", "--pp=2"], False),
+        ([1, 1], [], True),
+        ([4, 4], ["--data-parallel-size", "2"], True),
+        ([4, 4, 4, 4], ["--tp=8"], True),
+    ],
+)
+def test_mp_connecting_band_depends_on_inferred_dp(
+    gpu_per_node, parameters, needs_dp_band
+):
+    manager = _manager(PORT_RANGE if needs_dp_band else "40000-40004")
+    mi = _plain_instance()
+    mi.gpu_indexes = list(range(gpu_per_node[0]))
+    mi.distributed_servers.subordinate_workers = [
+        ModelInstanceSubordinateWorker(worker_id=index + 2, gpu_indexes=list(range(n)))
+        for index, n in enumerate(gpu_per_node[1:])
+    ]
+    model = _mp_model()
+    model.backend_parameters.extend(parameters)
+
+    manager._assign_ports(mi, model, BackendEnum.VLLM)
+
+    assert len(mi.ports) == 5
+    assert mi.ports[0] == mi.port
+    assert len(manager._assigned_ports[mi.id]) == (14 if needs_dp_band else 5)
+    band = (mi.named_ports or {}).get("_vllm_mp_connecting")
+    if needs_dp_band:
+        assert band == PortBand(base=mi.ports[-1], count=10)
+    else:
+        assert band is None
+
+
+def test_mp_dp_one_restart_preserves_published_band():
+    manager = _manager()
+    mi = _plain_instance()
+    model = _mp_model()
+    model.backend_parameters.append("--dp=1")
+    mi.port = 40000
+    mi.ports = [40000, 40001, 40002, 40003, 40010]
+    mi.named_ports = {"_vllm_mp_connecting": PortBand(base=40010, count=10)}
+
+    manager._assign_ports(mi, model, BackendEnum.VLLM)
+
+    assert mi.ports == [40000, 40001, 40002, 40003, 40010]
+    assert mi.named_ports["_vllm_mp_connecting"] == PortBand(base=40010, count=10)
+    assert manager._assigned_ports[mi.id] == {40000, 40001, 40002, 40003} | set(
+        range(40010, 40020)
+    )
 
 
 def test_mp_connecting_band_keeps_the_positional_layout():
