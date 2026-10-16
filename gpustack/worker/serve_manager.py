@@ -388,6 +388,7 @@ class ServeManager(ContainerLogPersister):
         self._error_model_instances = {}
         self._model_cache_by_instance = {}
         self._model_instance_by_instance_id = {}
+        self._model_instance_lifecycle_lock = threading.RLock()
 
         self._port_reservations = port_reservations or WorkerPortReservations()
         self._assigned_ports = self._port_reservations.model_ports
@@ -552,16 +553,22 @@ class ServeManager(ContainerLogPersister):
             stale = self._model_instance_by_instance_id.get(stale_id)
             if stale is None:
                 continue
-            logger.info(
-                f"Reaping stale model instance {stale.name} (id={stale_id}); "
-                f"server no longer reports it assigned to this worker."
-            )
+            # A launch can still create a workload. Retry cleanup on the next
+            # pass instead of releasing its ports while creation is in flight.
+            if not self._model_instance_lifecycle_lock.acquire(blocking=False):
+                continue
             try:
+                logger.info(
+                    f"Reaping stale model instance {stale.name} (id={stale_id}); "
+                    f"server no longer reports it assigned to this worker."
+                )
                 # Equivalent to a dropped DELETED event, so purge logs too —
                 # otherwise a reused id would inherit this instance's stale logs.
                 self._stop_model_instance(stale, delete_logs=True)
             except Exception as e:
                 logger.warning(f"Failed to reap stale model instance {stale.name}: {e}")
+            finally:
+                self._model_instance_lifecycle_lock.release()
 
         if not all_items:
             # Nothing left to sync; reap pass above already handled stale
@@ -1147,7 +1154,8 @@ class ServeManager(ContainerLogPersister):
         model_instances = [
             mi
             for mi in self._model_instance_by_instance_id.values()
-            if mi.state == ModelInstanceStateEnum.RUNNING
+            if mi.worker_id == self._worker_id
+            and mi.state == ModelInstanceStateEnum.RUNNING
         ]
         if not model_instances:
             return
@@ -1290,6 +1298,9 @@ class ServeManager(ContainerLogPersister):
             )
             if not joined:
                 return
+            # Followers need lifecycle tracking even while waiting to launch,
+            # so deletion can reap their workloads and local port reservations.
+            self._model_instance_by_instance_id[mi.id] = mi
             # Return if the main worker isn't initialized.
             if (
                 mi.distributed_servers.mode
@@ -1792,7 +1803,12 @@ class ServeManager(ContainerLogPersister):
             except OSError as e:
                 logger.warning(f"Failed to delete serve log file {path}: {e}")
 
-    def _start_model_instance(self, mi: ModelInstance):  # noqa: C901
+    def _start_model_instance(self, mi: ModelInstance):
+        """Serialize launch with teardown, including cleanup after launch failure."""
+        with self._model_instance_lifecycle_lock:
+            self._launch_model_instance(mi)
+
+    def _launch_model_instance(self, mi: ModelInstance):  # noqa: C901
         """
         Start model instance through a subprocess.
 
@@ -1803,6 +1819,10 @@ class ServeManager(ContainerLogPersister):
         if self._is_provisioning(mi):
             logger.warning(f"Model instance {mi.name} is provisioning. Skipping start.")
             return
+
+        # Restart teardown removes the entry. Track every local launch before
+        # reserving ports so failed starts remain visible to periodic cleanup.
+        self._model_instance_by_instance_id[mi.id] = mi
 
         # Follow a rename before anything writes under the new name, or the
         # instance's logs end up split across two directories.
@@ -1826,11 +1846,13 @@ class ServeManager(ContainerLogPersister):
             )
             sw = mi.distributed_servers.subordinate_workers[sw_pos]
 
+        ports_assigned = False
         try:
             model = self._get_model(mi)
             backend = get_backend(model)
 
             self._assign_ports(mi, model, backend)
+            ports_assigned = True
 
             logger.debug(
                 f"Starting model instance {mi.name}"
@@ -1901,9 +1923,17 @@ class ServeManager(ContainerLogPersister):
             )
 
         except Exception as e:
-            # Clean up provisioning process if started.
-            if mi.id in self._provisioning_processes:
-                self._stop_model_instance(mi)
+            # A failure before process creation can still leave reserved ports.
+            # Keep the reservations if workload teardown cannot be confirmed.
+            if ports_assigned or mi.id in self._provisioning_processes:
+                try:
+                    self._stop_model_instance(mi, clear_restart_backoff=False)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Failed to clean up model instance %s after launch failure: %s",
+                        mi.name,
+                        cleanup_error,
+                    )
 
             # Get patch dict for main worker.
             if is_main_worker:
@@ -2344,6 +2374,16 @@ class ServeManager(ContainerLogPersister):
         clear_restart_backoff: bool = True,
         delete_logs: bool = False,
     ):
+        """Serialize teardown with launch, including cleanup after launch failure."""
+        with self._model_instance_lifecycle_lock:
+            self._cleanup_model_instance(mi, clear_restart_backoff, delete_logs)
+
+    def _cleanup_model_instance(
+        self,
+        mi: ModelInstance,
+        clear_restart_backoff: bool = True,
+        delete_logs: bool = False,
+    ):
         """
         Stop model instance and clean up.
 
@@ -2534,7 +2574,9 @@ class ServeManager(ContainerLogPersister):
         )  # Ensure the model instance is cached.
         return (
             instance.ports[0]
-            if instance and instance.state == ModelInstanceStateEnum.RUNNING
+            if instance
+            and instance.worker_id == self._worker_id
+            and instance.state == ModelInstanceStateEnum.RUNNING
             else None
         )
 
