@@ -195,7 +195,7 @@ def _run_start(
             manager._provider_catalog, "lookup", return_value=(provider, True)
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             side_effect=lambda **kwargs: next(ports),
         ),
         patch(
@@ -347,11 +347,11 @@ def test_start_instance_creates_workload_and_patches_starting():
         config=CacheServiceConfig(fields={"ram_size": 8}, env={"FOO": "bar"})
     )
 
-    # get_free_port mutates the shared unavailable-ports set, so snapshot
+    # get_free_band mutates the shared unavailable-ports set, so snapshot
     # the set contents at each call.
     port_calls = []
 
-    def fake_get_free_port(port_range, unavailable_ports):
+    def fake_get_free_band(port_range, unavailable_ports, count):
         port_calls.append((port_range, set(unavailable_ports)))
         return 40001 if len(port_calls) == 1 else 40002
 
@@ -362,8 +362,8 @@ def test_start_instance_creates_workload_and_patches_starting():
             return_value=(_new_provider(), True),
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
-            side_effect=fake_get_free_port,
+            "gpustack.worker.cache_service_manager.network.get_free_band",
+            side_effect=fake_get_free_band,
         ),
         patch(
             "gpustack.worker.cache_service_manager.registration.determine_default_registry",
@@ -452,7 +452,7 @@ def test_start_instance_removes_stale_workload_first():
             return_value=(_new_provider(), True),
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             side_effect=lambda **kwargs: next(ports),
         ),
         patch(
@@ -496,7 +496,7 @@ def test_start_instance_tolerates_missing_stale_workload():
             return_value=(_new_provider(), True),
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             return_value=40001,
         ),
         patch(
@@ -547,7 +547,7 @@ def test_start_instance_drops_flags_with_empty_rendered_values():
             manager._provider_catalog, "lookup", return_value=(provider, True)
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             return_value=40001,
         ),
         patch(
@@ -1418,7 +1418,7 @@ def test_start_instance_rereads_a_catalog_that_predates_the_service():
 
     with (
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             side_effect=lambda **kwargs: next(ports),
         ),
         patch(
@@ -1472,7 +1472,7 @@ def test_start_instance_failure_sets_error_and_releases_port():
             return_value=(_new_provider(), True),
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             return_value=40001,
         ),
         patch(
@@ -1605,7 +1605,7 @@ def test_launch_records_starting_and_ports_before_provisioning():
             side_effect=provision,
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             side_effect=[40001, 40002],
         ),
         patch.object(manager, "_sync_single_cache_service_instance_state") as probe,
@@ -1640,7 +1640,7 @@ def test_deletion_during_provisioning_cancels_and_cleans_up_without_writeback():
             side_effect=provision,
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             side_effect=[40001, 40002],
         ),
     ):
@@ -1667,6 +1667,33 @@ def test_update_instance_reports_failed_writeback_without_raising(operation):
     )
 
 
+@pytest.mark.parametrize(
+    "recorded, busy, expected",
+    [
+        ({}, set(), {"port": 40000, "metrics": 40001, "p2p": 40002}),
+        ({}, {40000, 40002}, {"port": 40001, "metrics": 40003, "p2p": 40004}),
+        (
+            {"port": 40020, "metrics": 40030},
+            {40000},
+            {"port": 40020, "metrics": 40030, "p2p": 40001},
+        ),
+    ],
+)
+def test_allocate_ports_packs_new_ports_and_preserves_recorded_ones(
+    recorded, busy, expected
+):
+    manager, _ = _build_manager()
+    instance = _new_instance(ports=recorded)
+    with patch(
+        "gpustack.worker.cache_service_manager.network.is_port_available",
+        side_effect=lambda port, *args: port not in busy,
+    ):
+        ports = manager._allocate_ports(instance, ["port", "metrics", "p2p"])
+
+    assert ports == expected
+    assert manager._assigned_ports[instance.id] == tuple(expected.values())
+
+
 def test_allocate_ports_excludes_ports_of_sibling_instances():
     manager, clientset = _build_manager(worker_id=1)
     instance = _new_instance(id=12, cache_service_id=6)
@@ -1682,17 +1709,17 @@ def test_allocate_ports_excludes_ports_of_sibling_instances():
         items=[sibling]
     )
 
-    # get_free_port mutates the shared unavailable-ports set, so snapshot
+    # get_free_band mutates the shared unavailable-ports set, so snapshot
     # the set contents at each call.
     port_calls = []
 
-    def fake_get_free_port(port_range, unavailable_ports):
+    def fake_get_free_band(port_range, unavailable_ports, count):
         port_calls.append((port_range, set(unavailable_ports)))
         return 40002 if len(port_calls) == 1 else 40003
 
     with patch(
-        "gpustack.worker.cache_service_manager.network.get_free_port",
-        side_effect=fake_get_free_port,
+        "gpustack.worker.cache_service_manager.network.get_free_band",
+        side_effect=fake_get_free_band,
     ):
         ports = manager._allocate_ports(instance, ["port", "metrics"])
 
@@ -1720,13 +1747,13 @@ def test_allocate_ports_serves_the_names_a_component_declares():
     picks = iter([40002, 40003, 40004])
     seen = []
 
-    def fake_get_free_port(port_range, unavailable_ports):
+    def fake_get_free_band(port_range, unavailable_ports, count):
         seen.append(set(unavailable_ports))
         return next(picks)
 
     with patch(
-        "gpustack.worker.cache_service_manager.network.get_free_port",
-        side_effect=fake_get_free_port,
+        "gpustack.worker.cache_service_manager.network.get_free_band",
+        side_effect=fake_get_free_band,
     ):
         ports = manager._allocate_ports(instance, ["port", "metrics", "p2p"])
 
@@ -1771,7 +1798,7 @@ def test_allocate_ports_keeps_the_held_ones_when_a_port_is_added():
             return_value=True,
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             return_value=40005,
         ),
     ):
@@ -1795,7 +1822,7 @@ def test_allocate_ports_replaces_only_the_one_it_cannot_keep():
             side_effect=lambda port: port != 40002,
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             return_value=40009,
         ),
     ):
@@ -2507,8 +2534,8 @@ def test_start_instance_reuses_recorded_ports():
             return_value=True,
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port"
-        ) as get_free_port,
+            "gpustack.worker.cache_service_manager.network.get_free_band"
+        ) as get_free_band,
         patch(
             "gpustack.worker.cache_service_manager.registration.determine_default_registry",
             return_value=None,
@@ -2523,7 +2550,7 @@ def test_start_instance_reuses_recorded_ports():
     ):
         manager._start_cache_service_instance(instance)
 
-    get_free_port.assert_not_called()
+    get_free_band.assert_not_called()
     assert manager._assigned_ports[instance.id] == (40005, 40015)
 
 
@@ -2981,7 +3008,7 @@ def test_failed_provisioning_archives_and_removes_partial_workload():
             side_effect=lambda *args: calls.append("archive") or True,
         ),
         patch(
-            "gpustack.worker.cache_service_manager.network.get_free_port",
+            "gpustack.worker.cache_service_manager.network.get_free_band",
             side_effect=[40001, 40002],
         ),
         patch.object(

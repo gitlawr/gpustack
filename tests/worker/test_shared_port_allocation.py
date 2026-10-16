@@ -165,6 +165,7 @@ def test_concurrent_starts_reserve_before_the_other_allocator_selects(
         return port
 
     monkeypatch.setattr("gpustack.utils.network.get_free_port", pick)
+    monkeypatch.setattr("gpustack.utils.network.get_free_band", pick)
     allocations = {
         "model": lambda: _allocate_router(serve, _router()),
         "cache": lambda: set(

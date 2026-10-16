@@ -905,8 +905,11 @@ class CacheServiceManager:
         ) as unavailable_ports:
 
             def take() -> int:
-                port = network.get_free_port(
+                # Pack cache ports at the low end to preserve contiguous space
+                # for model workloads that need a port band.
+                port = network.get_free_band(
                     port_range=self._config.service_port_range,
+                    count=1,
                     unavailable_ports=unavailable_ports,
                 )
                 unavailable_ports.add(port)
